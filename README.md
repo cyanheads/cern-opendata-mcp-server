@@ -136,7 +136,7 @@ This server is an independent project and is not affiliated with or endorsed by 
 
 ## Known limitations
 
-- **60 requests a minute per client IP.** The portal publishes this limit. The server paces itself to 50 a minute, and a call that cannot start within its deadline fails as `rate_limited` with `retryAfter`. A hosted deployment shares that one budget across every user behind its egress IP, and the server has no per-user quota, so a hosted deployment needs a per-client rate limit at its edge. `cern_opendata_get_analysis_env` and `cern_opendata_get_validated_runs` cost 2–4 requests each.
+- **60 requests a minute per client IP.** The portal publishes this limit. The server paces itself to 50 a minute, and a call that cannot start within its deadline fails as `rate_limited` with `retryAfter`. A hosted deployment shares that one budget across every user behind its egress IP. `cern_opendata_get_analysis_env` and `cern_opendata_get_validated_runs` cost 2–4 requests each.
 - **10,000-result window.** Search and trigger-path paging reach only the first 10,000 matches; deeper result sets must be narrowed with filters.
 - **Facet lists are partial.** Terms facets return the first 10 values alphabetically (`file_type` up to 100), with the rest counted in `other_count`. A filter does not narrow its own facet, only the hits and the other facets.
 - **Tape-resident files.** Files with availability `on demand` must be requested on the record's portal page before download; staging them is a write and out of scope. A record whose availability is `ondemand` lists none of its files through the API, so `cern_opendata_list_files` reports only the count and size its metadata states.
