@@ -535,7 +535,25 @@ describe('cern_opendata_get_validated_runs dataset recid', () => {
       variant: 'muons_only',
     });
     expect(error.message).toBe(
-      'Record 6105 links validated-run lists 1000 in the full variant, and none has a muons_only twin.',
+      'Record 6105 links validated-run list 1000 in the full variant, and it has no muons_only twin.',
+    );
+  });
+
+  it('names several linked lists without a twin in the plural', async () => {
+    const d = datasetLinkingLists('6106', { abstract: ['1000', '1001'] });
+    serve({
+      specs: [
+        ...LIST_SPECS,
+        {
+          recid: '1001',
+          key: 'Cert_132440-144114_7TeV_Collisions10_JSON.txt',
+          periods: ['Run2010A'],
+        },
+      ],
+      records: { '6106': d },
+    });
+    expect(errorOf(await run({ recid: '6106', variant: 'muons_only' })).message).toBe(
+      'Record 6106 links validated-run lists 1000, 1001 in the full variant, and none has a muons_only twin.',
     );
   });
 
@@ -1527,6 +1545,13 @@ describe('cern_opendata_get_validated_runs format', () => {
     const text = textOf(await run({ recid: '1002', run_min: 999_999 }));
     expect(text).toContain('### Runs (0)\nNo runs in range.');
     expect(text).toContain('**Whole list:** 2 runs');
+  });
+
+  it('renders a one-run, one-section list in the singular', async () => {
+    serve({ files: { '1002': { '190456': [[7, 7]] } } });
+    expect(textOf(await run({ recid: '1002' }))).toContain(
+      '**Whole list:** 1 run, 1 luminosity section, runs 190456–190456',
+    );
   });
 
   it('renders a list that certifies no runs with absent first and last runs as Not available', async () => {

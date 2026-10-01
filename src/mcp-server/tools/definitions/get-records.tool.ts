@@ -13,6 +13,7 @@ import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-s
 import { type ClassifiedId, classifyIdentifier } from '@/services/cern-opendata/identifiers.js';
 import { DOC_BODY_MAX_CHARS, toRecord } from '@/services/cern-opendata/normalize.js';
 import {
+  countOf,
   fence,
   fenceHtml,
   inline,
@@ -33,7 +34,7 @@ function missingGuidance(id: ClassifiedId): string {
     case 'recid':
       return `No record has recid ${id.value}. Call cern_opendata_search_records with a title keyword to find the record's recid.`;
     case 'doi':
-      return `No record carries DOI ${id.value} (tried as given and uppercased). Call cern_opendata_search_records with a title keyword to find the record; portal DOIs look like 10.7483/OPENDATA.CMS.XXXX.XXXX.`;
+      return `No record carries DOI ${id.value} (tried as given and uppercased). Call cern_opendata_search_records with a title keyword to find the record; portal DOIs look like 10.7483/OPENDATA.{EXPERIMENT}.XXXX.XXXX.`;
     case 'cms_dataset_path':
       return `No record title equals ${id.value}. Call cern_opendata_search_records with experiment CMS and query set to the primary-dataset name to find the exact path.`;
     case 'doc_slug':
@@ -90,7 +91,7 @@ function renderRecord(record: RecordOut): string {
   if (record.distribution) {
     const d = record.distribution;
     lines.push(
-      `**Formats:** ${list(d.formats)} · **Events:** ${inlineOrNA(d.number_events)} · **Files:** ${inlineOrNA(d.number_files)} · **Size:** ${d.size_in_bytes === undefined ? NOT_AVAILABLE : `${d.size_in_bytes} bytes`}`,
+      `**Formats:** ${list(d.formats)} · **Events:** ${inlineOrNA(d.number_events)} · **Files:** ${inlineOrNA(d.number_files)} · **Size:** ${d.size_in_bytes === undefined ? NOT_AVAILABLE : countOf(d.size_in_bytes, 'byte')}`,
     );
   }
   const counts = record.availability_details
@@ -152,9 +153,13 @@ function renderRecord(record: RecordOut): string {
     const cut = record.body_truncated
       ? `, truncated at ${DOC_BODY_MAX_CHARS} characters`
       : ', not truncated';
+    const length =
+      record.body_length === undefined
+        ? `${NOT_AVAILABLE} characters`
+        : countOf(record.body_length, 'character');
     lines.push(
       '',
-      `### Body (format ${inlineOrNA(record.body_format)}, ${inlineOrNA(record.body_length)} characters${cut})`,
+      `### Body (format ${inlineOrNA(record.body_format)}, ${length}${cut})`,
       fence(record.body),
     );
   }

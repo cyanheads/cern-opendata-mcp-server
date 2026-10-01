@@ -569,7 +569,7 @@ describe('cern_opendata_search_records enrichment', () => {
     const result = success(await run({ experiment: 'NOPE' }));
     expect(result).toMatchObject(ZERO_BASE);
     expect(result.notice).toBe(
-      '"NOPE" is not a known experiment value (values are exact and case-sensitive); call cern_opendata_list_reference with topic experiments for the accepted spellings. ' +
+      '"NOPE" is not a known experiment value, so it was sent as given; call cern_opendata_list_reference with topic experiments for the accepted spellings. ' +
         'The facet counts in this response show what each filter would match with the other filters applied; relax the filter whose facet lists the alternatives and call cern_opendata_search_records again.',
     );
   });
@@ -637,6 +637,18 @@ describe('cern_opendata_search_records enrichment', () => {
     expect(result.notice).toBe(
       '5 glossary entries matched; glossary entries are not served by this server. ' +
         'No record matched the query; try fewer or broader terms, or call cern_opendata_list_reference with topic query_syntax for field forms.',
+    );
+  });
+
+  it('zero-result page names one Glossary match in the singular', async () => {
+    serve(
+      searchBody([], {
+        total: 0,
+        aggregations: { type: { buckets: [{ key: 'Glossary', doc_count: 1 }] } },
+      }),
+    );
+    expect(success(await run({ query: 'AOD' })).notice).toMatch(
+      /^1 glossary entry matched; glossary entries are not served by this server\. /,
     );
   });
 
@@ -773,6 +785,13 @@ describe('cern_opendata_search_records enrichment', () => {
     serve(searchBody([], { total: 50_000 }));
     const result = success(await run({ limit: 50, page: 200 }));
     expect(result.notice).toContain('with page 200.');
+  });
+
+  it('past-the-end page: a single match is named in the singular', async () => {
+    serve(searchBody([], { total: 1 }));
+    expect(success(await run({ page: 2 })).notice).toBe(
+      'Page 2 is past the last page (1 match); call cern_opendata_search_records again with page 1.',
+    );
   });
 
   it('keeps the facet counts on a zero-result page, so the alternatives show', async () => {
@@ -1141,6 +1160,31 @@ describe('cern_opendata_search_records format', () => {
     expect(text).toContain('**id:** abc · **recid:** 77 · **slug:** a-slug');
   });
 
+  it('declares bucket subtypes on the type facet only', () => {
+    for (const [name, facet] of Object.entries(searchRecords.output.shape.facets.shape)) {
+      const bucket = facet.shape.buckets.element.shape;
+      expect('subtypes' in bucket, name).toBe(name === 'type');
+    }
+  });
+
+  it('renders a one-byte size in the singular', () => {
+    const blocks = searchRecords.format?.({
+      hits: [
+        {
+          id: '78',
+          size_in_bytes: 1,
+          type: { primary: 'Dataset', secondary: [] },
+          portal_url: 'https://opendata.cern.ch/record/78',
+        },
+      ],
+      page: 1,
+      has_more: false,
+      facets: emptyFacets(),
+    });
+    const text = blocks?.[0]?.type === 'text' ? blocks[0].text : '';
+    expect(text).toMatch(/\*\*size:\*\* 1 byte$/m);
+  });
+
   it('renders every facet bucket, count, subtype and other-values count', async () => {
     const { data, text } = await rendered([collisionDatasetHit], aggregationsBody);
     expect(text).toContain('## Facets');
@@ -1150,7 +1194,7 @@ describe('cern_opendata_search_records format', () => {
         expect(text, `${name} ${bucket.value}`).toContain(
           `${inline(bucket.value)} (${bucket.count}`,
         );
-        for (const sub of bucket.subtypes ?? []) {
+        for (const sub of ('subtypes' in bucket ? bucket.subtypes : undefined) ?? []) {
           expect(text).toContain(`${inline(sub.value)} ${sub.count}`);
         }
       }

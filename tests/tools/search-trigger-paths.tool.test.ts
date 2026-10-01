@@ -89,22 +89,19 @@ describe('cern_opendata_search_trigger_paths registration', () => {
     });
   });
 
-  it('declares the four error reasons with the right codes and the service-thrown ones marked', () => {
+  it('declares the three error reasons with the right codes and the service-thrown ones marked', () => {
     const byReason = Object.fromEntries(
       (searchTriggerPaths.errors ?? []).map((entry) => [entry.reason, entry]),
     );
     expect(Object.keys(byReason).sort()).toEqual([
-      'invalid_query',
       'page_window_exceeded',
       'rate_limited',
       'upstream_unreadable',
     ]);
-    for (const reason of ['invalid_query', 'page_window_exceeded']) {
-      expect(byReason[reason]?.code, reason).toBe(JsonRpcErrorCode.ValidationError);
-      expect((byReason[reason] as { severity?: string } | undefined)?.severity, reason).toBe(
-        'notice',
-      );
-    }
+    expect(byReason.page_window_exceeded).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+    });
     expect(byReason.rate_limited).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       thrownBy: 'service',
@@ -566,6 +563,13 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
     expect(result.notice).toContain('page 200.');
   });
 
+  it('past-the-end page: a single match is named in the singular', async () => {
+    serve(searchBody([], { total: 1 }));
+    expect(success(await run({ path: 'HLT_IsoMu24', page: 2 })).notice).toBe(
+      'Page 2 is past the last page (1 match); call cern_opendata_search_trigger_paths again with page 1.',
+    );
+  });
+
   it('writes the same fields into the text trailer', async () => {
     serve(searchBody(triggerHits(10), { total: 95, hasNext: true }));
     const trailer = textOf(await run({ path: 'HLT_Mu*', limit: 10 }), 1);
@@ -586,45 +590,41 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
 describe('cern_opendata_search_trigger_paths errors on the wire', () => {
   const failure = async (input: Parameters<typeof run>[0]) => errorOf(await run(input));
 
-  it('invalid_query: the portal syntax 400 carries the upstream message and the recovery', async () => {
+  it('a syntax 400 is a server fault: InternalError carrying the upstream message, no caller recovery', async () => {
     serve(SYNTAX_ERROR_BODY, { status: 400 });
     const result = await run({ path: 'HLT_Mu*' });
     expect(result.isError).toBe(true);
     const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
     expect(error.data).toMatchObject({
-      reason: 'invalid_query',
       upstreamMessage: 'The syntax of the search query is invalid.',
     });
-    expect(error.data).not.toHaveProperty('upstreamErrors');
+    expect(error.data).not.toHaveProperty('reason');
+    expect(error.data).not.toHaveProperty('recovery');
     expect(error.message).toBe(
-      'The portal rejected the path: The syntax of the search query is invalid.',
+      'CERN Open Data rejected a query this server built: The syntax of the search query is invalid.',
     );
-    expect(hintOf(error)).toContain('HLT_IsoMu24 or a prefix with one trailing wildcard');
-    const text = textOf(result);
-    expect(text).toContain('Recovery: Pass a path name such as HLT_IsoMu24');
-    expect(text).toContain('reason invalid_query');
   });
 
-  it('invalid_query: any other 400 is carried too, with its field errors', async () => {
+  it('any other non-window 400 is the same server fault, with its field errors', async () => {
     serve(RANGE_ERROR_BODY, { status: 400 });
     const error = await failure({ path: 'HLT_Mu9', year: 2012 });
+    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
     expect(error.data).toMatchObject({
-      reason: 'invalid_query',
       upstreamMessage: 'Validation error.',
       upstreamErrors: [{ field: 'date_created', message: 'Invalid range format.' }],
     });
   });
 
-  it('invalid_query: a message that only mentions the window is still a syntax rejection', async () => {
+  it('a message that only mentions the window is not read as the window rejection', async () => {
     serve(
       { status: 400, message: 'Syntax invalid. Maximum number of 10000 results' },
       { status: 400 },
     );
-    expect((await failure({ path: 'HLT_Mu*' })).data).toMatchObject({ reason: 'invalid_query' });
+    expect((await failure({ path: 'HLT_Mu*' })).code).toBe(JsonRpcErrorCode.InternalError);
   });
 
-  it('page_window_exceeded: the upstream window 400 maps to it, not to invalid_query', async () => {
+  it('page_window_exceeded: the upstream window 400 maps to it, not to a server fault', async () => {
     const { http } = serve(WINDOW_ERROR_BODY, { status: 400 });
     const result = await run({ path: 'HLT_Mu*', page: 5, limit: 50 });
     const error = errorOf(result);

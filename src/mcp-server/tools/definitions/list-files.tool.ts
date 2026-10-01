@@ -12,6 +12,7 @@ import { AvailabilityCountsSchema } from '@/mcp-server/record-schema.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
 import { definedOnly, recordUrl } from '@/services/cern-opendata/normalize.js';
 import {
+  countOf,
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
@@ -271,7 +272,7 @@ export const listFiles = tool('cern_opendata_list_files', {
       if (!selected) {
         throw ctx.fail(
           'index_not_found',
-          `Record ${input.recid} has no file index with key "${oneLine(indexKey)}"; it has ${manifest.indexes.length} file indexes.`,
+          `Record ${input.recid} has no file index with key "${oneLine(indexKey)}"; it has ${countOf(manifest.indexes.length, 'file index', 'file indexes')}.`,
           { recid: input.recid, index: indexKey, indexCount: manifest.indexes.length },
         );
       }
@@ -283,7 +284,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     if (offset > 0 && offset >= total) {
       throw ctx.fail(
         'invalid_cursor',
-        `The cursor points to file ${offset + 1}, past the ${total} files in scope.`,
+        `The cursor points to file ${offset + 1}, past the ${countOf(total, 'file')} in scope.`,
         { recid: input.recid, index: indexKey, offset, total },
       );
     }
@@ -296,7 +297,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     if (indexKey === null && manifest.files.length === 0 && indexes.length > 0) {
       const indexed = indexes.reduce((sum, index) => sum + index.number_files, 0);
       fragments.push(
-        `Files are grouped into ${indexes.length} file indexes (${indexed} files); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once.`,
+        `Files are grouped into ${countOf(indexes.length, 'file index', 'file indexes')} (${countOf(indexed, 'file')}); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once.`,
       );
     }
     const onTape =
@@ -305,23 +306,29 @@ export const listFiles = tool('cern_opendata_list_files', {
         ? indexes.reduce((sum, index) => sum + (index.availability.on_demand ?? 0), 0)
         : 0);
     if (onTape > 0) {
+      const [are, them] = onTape === 1 ? ['is', 'it'] : ['are', 'them'];
       fragments.push(
-        `${onTape} files are on tape (availability on demand); request them on the record's portal page (${portalUrl}) before downloading.`,
+        `${countOf(onTape, 'file')} ${are} on tape (availability on demand); request ${them} on the record's portal page (${portalUrl}) before downloading.`,
       );
     }
     if (manifest.files.length === 0 && manifest.indexes.length === 0) {
       if (manifest.children.length > 0) {
         const named = manifest.children.slice(0, CHILDREN_NAMED).join(', ');
         const more = manifest.children.length > CHILDREN_NAMED ? ', …' : '';
+        const which = manifest.children.length === 1 ? 'that recid' : 'one of those recids';
         fragments.push(
-          `This record holds no files itself; its files sit in ${manifest.children.length} child records (${named}${more}). Call cern_opendata_list_files with one of those recids.`,
+          `This record holds no files itself; its files sit in ${countOf(manifest.children.length, 'child record')} (${named}${more}). Call cern_opendata_list_files with ${which}.`,
         );
       } else if (manifest.number_files) {
-        const stated = `${manifest.number_files} files${manifest.size === undefined ? '' : ` (${manifest.size} bytes)`}`;
+        const stated = `${countOf(manifest.number_files, 'file')}${manifest.size === undefined ? '' : ` (${countOf(manifest.size, 'byte')})`}`;
+        const [are, them, listsNone] =
+          manifest.number_files === 1
+            ? ['is', 'it', 'does not list it']
+            : ['are', 'them', 'lists none of them'];
         fragments.push(
           manifest.availability === 'ondemand'
-            ? `This record's ${stated} are on tape (availability ondemand), and the portal's API does not list them; request them on the record's portal page (${portalUrl}) before downloading.`
-            : `The record states ${stated}, but the portal's API lists none of them; check the record's portal page (${portalUrl}).`,
+            ? `This record's ${stated} ${are} on tape (availability ondemand), and the portal's API does not list ${them}; request ${them} on the record's portal page (${portalUrl}) before downloading.`
+            : `The record states ${stated}, but the portal's API ${listsNone}; check the record's portal page (${portalUrl}).`,
         );
       } else {
         fragments.push('This record has no files.');
@@ -375,7 +382,7 @@ export const listFiles = tool('cern_opendata_list_files', {
       lines.push('', `### File indexes (${result.indexes.length})`);
       for (const index of result.indexes) {
         lines.push(
-          `- **${inline(index.key)}**: ${index.number_files} files, ${index.size_in_bytes} bytes, online ${inlineOrNA(index.availability.online)}, on demand ${inlineOrNA(index.availability.on_demand)}`,
+          `- **${inline(index.key)}**: ${countOf(index.number_files, 'file')}, ${countOf(index.size_in_bytes, 'byte')}, online ${inlineOrNA(index.availability.online)}, on demand ${inlineOrNA(index.availability.on_demand)}`,
           `  - Description: ${index.description ? inline(index.description) : NOT_AVAILABLE}`,
           `  - URI list: ${printUrl(index.uri_list_url)}`,
           `  - JSON: ${printUrl(index.json_url)}`,

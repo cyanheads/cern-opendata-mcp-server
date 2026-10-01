@@ -7,13 +7,13 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { internalError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   getCernOpenDataService,
   isPageWindowRejection,
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import { definedOnly, portalUrlOf, str, strList } from '@/services/cern-opendata/normalize.js';
-import { fenceHtml, inline, inlineOrNA, printUrl } from '@/services/cern-opendata/text.js';
+import { countOf, fenceHtml, inline, inlineOrNA, printUrl } from '@/services/cern-opendata/text.js';
 import { parseTrigger } from '@/services/cern-opendata/trigger-parse.js';
 import type { RawHit, SearchParams } from '@/services/cern-opendata/types.js';
 import {
@@ -224,14 +224,6 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
   },
   errors: [
     {
-      reason: 'invalid_query',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'The portal rejected the path pattern with a 400.',
-      recovery:
-        'Pass a path name such as HLT_IsoMu24 or a prefix with one trailing wildcard such as HLT_IsoMu*, then call cern_opendata_search_trigger_paths again.',
-      severity: 'notice',
-    },
-    {
       reason: 'page_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
       when: 'page × limit exceeds 10,000, the deepest match the portal pages to.',
@@ -295,10 +287,13 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
           },
         );
       }
-      throw ctx.fail('invalid_query', `The portal rejected the path: ${rejection.message}`, {
-        upstreamMessage: rejection.message,
-        ...(rejection.errors ? { upstreamErrors: rejection.errors } : {}),
-      });
+      throw internalError(
+        `CERN Open Data rejected a query this server built: ${rejection.message}`,
+        {
+          upstreamMessage: rejection.message,
+          ...(rejection.errors ? { upstreamErrors: rejection.errors } : {}),
+        },
+      );
     }
 
     const { page } = outcome;
@@ -322,7 +317,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     } else if (triggers.length === 0) {
       const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / input.limit));
       fragments.push(
-        `Page ${input.page} is past the last page (${page.total} matches); call cern_opendata_search_trigger_paths again with page ${last}.`,
+        `Page ${input.page} is past the last page (${countOf(page.total, 'match', 'matches')}); call cern_opendata_search_trigger_paths again with page ${last}.`,
       );
     }
     if (truncated) {

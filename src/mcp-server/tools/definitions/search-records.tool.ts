@@ -19,7 +19,7 @@ import {
   toFacets,
   toSearchHit,
 } from '@/services/cern-opendata/normalize.js';
-import { fence, inline, printUrl } from '@/services/cern-opendata/text.js';
+import { countOf, fence, inline, printUrl } from '@/services/cern-opendata/text.js';
 import type { SearchParams } from '@/services/cern-opendata/types.js';
 import {
   PARAM_TOPIC,
@@ -106,37 +106,35 @@ const SearchHitSchema = z
   })
   .describe('One matching record, compact; cern_opendata_get_records returns the full metadata.');
 
-const facetSchema = (what: string) =>
+const BucketSchema = z
+  .object({
+    value: z.string().describe('The value, spelled as its filter accepts it.'),
+    count: z.number().describe('Records with this value.'),
+  })
+  .describe('One facet value.');
+
+/** Only the type facet's buckets carry subtypes, so only its schema declares them. */
+const TypeBucketSchema = BucketSchema.extend({
+  subtypes: z
+    .array(
+      z
+        .object({
+          value: z.string().describe('Secondary type.'),
+          count: z.number().describe('Records with it.'),
+        })
+        .describe('One secondary type.'),
+    )
+    .optional()
+    .describe('Secondary types of this primary type.'),
+}).describe('One primary type.');
+
+const facetSchema = <B extends z.ZodType>(what: string, bucket: B) =>
   z
     .object({
-      buckets: z
-        .array(
-          z
-            .object({
-              value: z
-                .string()
-                .describe('Facet value, spelled exactly as the matching filter accepts it.'),
-              count: z.number().describe('Records with this value under the other filters.'),
-              subtypes: z
-                .array(
-                  z
-                    .object({
-                      value: z.string().describe('Secondary type.'),
-                      count: z.number().describe('Records with this secondary type.'),
-                    })
-                    .describe('One secondary type.'),
-                )
-                .optional()
-                .describe('Secondary types of this primary type (type facet only).'),
-            })
-            .describe('One facet value.'),
-        )
-        .describe('Values with counts; terms facets list at most the first 10 alphabetically.'),
+      buckets: z.array(bucket).describe('Values with counts.'),
       other_count: z
         .number()
-        .describe(
-          'Records under values past the bucket cap (terms facets); 0 for year and number_events.',
-        ),
+        .describe('Records under values past the bucket cap; 0 for year and number_events.'),
     })
     .describe(what);
 
@@ -202,7 +200,7 @@ const AppliedFiltersSchema = z
 
 type AppliedFilters = z.infer<typeof AppliedFiltersSchema>;
 type HitOut = z.infer<typeof SearchHitSchema>;
-type FacetOut = z.infer<ReturnType<typeof facetSchema>>;
+type FacetOut = z.infer<ReturnType<typeof facetSchema<typeof TypeBucketSchema>>>;
 type RecordTypeOut = z.infer<typeof RecordTypeSchema>;
 
 /** `a--b`, `a--` or `--b`; `undefined` when neither bound is set (Decision 19). */
@@ -236,7 +234,7 @@ function renderHit(hit: HitOut): string[] {
     hit.formats ? `**formats:** ${joined(hit.formats)}` : '',
     hit.number_events !== undefined ? `**events:** ${hit.number_events}` : '',
     hit.number_files !== undefined ? `**files:** ${hit.number_files}` : '',
-    hit.size_in_bytes !== undefined ? `**size:** ${hit.size_in_bytes} bytes` : '',
+    hit.size_in_bytes !== undefined ? `**size:** ${countOf(hit.size_in_bytes, 'byte')}` : '',
     hit.availability ? `**availability:** ${inline(hit.availability)}` : '',
     hit.doi ? `**DOI:** ${inline(hit.doi)}` : '',
     hit.date_published ? `**published:** ${inline(hit.date_published)}` : '',
@@ -359,17 +357,20 @@ export const searchRecords = tool('cern_opendata_search_records', {
       ),
     facets: z
       .object({
-        experiment: facetSchema('Matches by experiment.'),
-        type: facetSchema('Matches by primary type, each with its secondary types.'),
-        collision_energy: facetSchema('Matches by collision energy.'),
-        collision_type: facetSchema('Matches by collision type.'),
-        file_type: facetSchema('Matches by file format or data tier (up to 100 values).'),
-        availability: facetSchema('Matches by record availability.'),
-        year: facetSchema('Matches by data-taking year.'),
-        number_events: facetSchema('Matches by event-count range.'),
+        experiment: facetSchema('Matches by experiment.', BucketSchema),
+        type: facetSchema(
+          'Matches by primary type, each with its secondary types.',
+          TypeBucketSchema,
+        ),
+        collision_energy: facetSchema('Matches by collision energy.', BucketSchema),
+        collision_type: facetSchema('Matches by collision type.', BucketSchema),
+        file_type: facetSchema('Matches by file format or data tier.', BucketSchema),
+        availability: facetSchema('Matches by record availability.', BucketSchema),
+        year: facetSchema('Matches by data-taking year.', BucketSchema),
+        number_events: facetSchema('Matches by event-count range.', BucketSchema),
       })
       .describe(
-        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters.',
+        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100).',
       ),
   }),
   enrichment: {
@@ -559,7 +560,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     if (page.total === 0) {
       for (const { param, value } of unrecognized.slice(0, 3)) {
         fragments.push(
-          `"${value}" is not a known ${param} value (values are exact and case-sensitive); call cern_opendata_list_reference with topic ${PARAM_TOPIC[param]} for the accepted spellings.`,
+          `"${value}" is not a known ${param} value, so it was sent as given; call cern_opendata_list_reference with topic ${PARAM_TOPIC[param]} for the accepted spellings.`,
         );
       }
       if (anyFilter) {
@@ -580,7 +581,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
       const glossary = typeDefaulted ? glossaryFacetCount(page.aggregations) : 0;
       if (glossary > 0) {
         fragments.push(
-          `${glossary} glossary entries matched; glossary entries are not served by this server.`,
+          `${countOf(glossary, 'glossary entry', 'glossary entries')} matched; glossary entries are not served by this server.`,
         );
       }
       if (!anyFilter && input.query !== undefined) {
@@ -591,7 +592,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     } else if (hits.length === 0) {
       const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / input.limit));
       fragments.push(
-        `Page ${input.page} is past the last page (${page.total} matches); call cern_opendata_search_records again with page ${last}.`,
+        `Page ${input.page} is past the last page (${countOf(page.total, 'match', 'matches')}); call cern_opendata_search_records again with page ${last}.`,
       );
     }
     if (truncated) {

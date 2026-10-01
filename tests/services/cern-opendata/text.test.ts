@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for upstream-text rendering helpers: entity decoding, URL
- * printing, HTML to text, fences, inline neutralization and character caps.
+ * printing, HTML to text, fences, inline neutralization, character caps and
+ * counts that agree with their noun.
  * @module tests/services/cern-opendata/text.test
  */
 
@@ -8,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   absoluteUrl,
   capText,
+  countOf,
   decodeEntities,
   fence,
   fenceHtml,
@@ -223,5 +225,20 @@ describe('capText', () => {
     const capped = capText(text, 3);
     expect(capped).toEqual({ text: 'ab', length: text.length, truncated: true });
     expect(capText(text, 4).text).toBe('ab\u{1F600}');
+  });
+});
+
+describe('countOf', () => {
+  it('uses the singular for exactly one and the plural otherwise', () => {
+    expect(countOf(1, 'file')).toBe('1 file');
+    expect(countOf(0, 'file')).toBe('0 files');
+    expect(countOf(2, 'file')).toBe('2 files');
+    expect(countOf(3504276797, 'byte')).toBe('3504276797 bytes');
+  });
+
+  it('takes an irregular plural', () => {
+    expect(countOf(1, 'match', 'matches')).toBe('1 match');
+    expect(countOf(4, 'match', 'matches')).toBe('4 matches');
+    expect(countOf(1, 'glossary entry', 'glossary entries')).toBe('1 glossary entry');
   });
 });

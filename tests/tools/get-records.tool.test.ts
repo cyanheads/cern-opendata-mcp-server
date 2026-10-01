@@ -486,7 +486,7 @@ describe('cern_opendata_get_records mixed identifiers', () => {
         input: '10.7483/OPENDATA.NOPE.0000',
         interpreted_as: 'doi',
         guidance:
-          'No record carries DOI 10.7483/OPENDATA.NOPE.0000 (tried as given and uppercased). Call cern_opendata_search_records with a title keyword to find the record; portal DOIs look like 10.7483/OPENDATA.CMS.XXXX.XXXX.',
+          'No record carries DOI 10.7483/OPENDATA.NOPE.0000 (tried as given and uppercased). Call cern_opendata_search_records with a title keyword to find the record; portal DOIs look like 10.7483/OPENDATA.{EXPERIMENT}.XXXX.XXXX.',
       },
       {
         input: '/No/Such/Path',
@@ -678,6 +678,13 @@ describe('cern_opendata_get_records documentation bodies', () => {
       '### Body (format md, 56 characters, not truncated)',
     );
   });
+
+  it('renders a one-character body in the singular', async () => {
+    servePool([docHitWithBody('one-char', 1)]);
+    expect(textOf(await run('one-char'))).toContain(
+      '### Body (format md, 1 character, not truncated)',
+    );
+  });
 });
 
 describe('cern_opendata_get_records format', () => {
@@ -686,6 +693,13 @@ describe('cern_opendata_get_records format', () => {
     const result = await run(ids);
     return { data: success(result), text: textOf(result) };
   }
+
+  it('renders a one-byte size in the singular', async () => {
+    const tiny = hit(9100, { recid: '9100', title: 'Tiny', distribution: { size: 1 } });
+    const { text } = await recordText([tiny], '9100');
+    expect(text).toContain('**Size:** 1 byte');
+    expect(text).not.toContain('1 bytes');
+  });
 
   it('renders every populated field of a rich record', async () => {
     const { data, text } = await recordText([richDatasetHit], '9001');

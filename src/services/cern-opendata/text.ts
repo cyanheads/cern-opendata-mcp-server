@@ -1,9 +1,9 @@
 /**
  * @fileoverview Rendering helpers for upstream-authored text in `format()`:
  * HTML to plain text, fenced free text, neutralized inline slots, printable
- * URLs, and character caps. Portal text is data, never instructions, so it is
- * fenced or neutralized before it reaches markdown; `structuredContent` keeps
- * every string as received.
+ * URLs, character caps, and counts that agree with their noun. Portal text is
+ * data, never instructions, so it is fenced or neutralized before it reaches
+ * markdown; `structuredContent` keeps every string as received.
  * @module services/cern-opendata/text
  */
 
@@ -226,6 +226,11 @@ export function inline(text: string): string {
  */
 export function oneLine(text: string): string {
   return text.replace(/[\s\u0085]*[\r\n\u0085\p{Zl}\p{Zp}][\s\u0085]*/gu, ' ');
+}
+
+/** `n` and its noun in agreement: `1 file`, `0 files`, `2 matches` with `plural` given. */
+export function countOf(n: number, noun: string, plural = `${noun}s`): string {
+  return `${n} ${n === 1 ? noun : plural}`;
 }
 
 /** Inline-neutralized value, or {@link NOT_AVAILABLE} when absent. */

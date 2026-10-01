@@ -415,7 +415,7 @@ describe('cern_opendata_list_files index scope', () => {
     const a = success(await run({ recid: '24464', index: 'ds_a_file_index.json' }));
     const b = success(await run({ recid: '24464', index: 'ds_b_file_index.json' }));
     expect(a.notice).toBe(
-      "1 files are on tape (availability on demand); request them on the record's portal page (https://opendata.cern.ch/record/24464) before downloading.",
+      "1 file is on tape (availability on demand); request it on the record's portal page (https://opendata.cern.ch/record/24464) before downloading.",
     );
     expect(b.notice).toBe(a.notice);
   });
@@ -586,7 +586,42 @@ describe('cern_opendata_list_files enrichment', () => {
       }),
     });
     expect(success(await run({ recid: '712' })).notice).toBe(
-      'This record holds no files itself; its files sit in 1 child records (713). Call cern_opendata_list_files with one of those recids.',
+      'This record holds no files itself; its files sit in 1 child record (713). Call cern_opendata_list_files with that recid.',
+    );
+  });
+
+  it('zero-result page (one stated file on tape) agrees the count with its noun', async () => {
+    serve({
+      '715': recordBody({
+        recid: '715',
+        availability: 'ondemand',
+        distribution: { availability: 'ondemand', number_files: 1, size: 1 },
+      }),
+    });
+    expect(success(await run({ recid: '715' })).notice).toBe(
+      "This record's 1 file (1 byte) is on tape (availability ondemand), and the portal's API does not list it; request it on the record's portal page (https://opendata.cern.ch/record/715) before downloading.",
+    );
+  });
+
+  it('zero-result page (one stated file, not on demand) agrees the count with its noun', async () => {
+    serve({
+      '716': recordBody({
+        recid: '716',
+        availability: 'requested',
+        distribution: { number_files: 1 },
+      }),
+    });
+    expect(success(await run({ recid: '716' })).notice).toBe(
+      "The record states 1 file, but the portal's API does not list it; check the record's portal page (https://opendata.cern.ch/record/716).",
+    );
+  });
+
+  it('zero-result file page (one index of one file) agrees each count with its noun', async () => {
+    serve({
+      '717': recordBody({ recid: '717', _file_indices: [fileIndex('x_file_index.json', 1)] }),
+    });
+    expect(success(await run({ recid: '717' })).notice).toBe(
+      "Files are grouped into 1 file index (1 file); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once.",
     );
   });
 
@@ -601,7 +636,7 @@ describe('cern_opendata_list_files enrichment', () => {
     expect(result).toMatchObject({ truncated: false, shown: 0, cap: 50, totalCount: 0 });
     expect(result.notice).toBe(
       "Files are grouped into 2 file indexes (4 files); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once. " +
-        "1 files are on tape (availability on demand); request them on the record's portal page (https://opendata.cern.ch/record/24464) before downloading.",
+        "1 file is on tape (availability on demand); request it on the record's portal page (https://opendata.cern.ch/record/24464) before downloading.",
     );
   });
 
@@ -853,6 +888,15 @@ describe('cern_opendata_list_files errors', () => {
     );
   });
 
+  it('index_not_found: a record with one index says so in the singular', async () => {
+    serve({
+      '705': recordBody({ recid: '705', _file_indices: [fileIndex('x_file_index.json', 1)] }),
+    });
+    expect(errorOf(await run({ recid: '705', index: 'y_file_index.json' })).message).toBe(
+      'Record 705 has no file index with key "y_file_index.json"; it has 1 file index.',
+    );
+  });
+
   it('index_not_found: a record with no indexes reports zero of them', async () => {
     serve();
     const error = errorOf(await run({ recid: '6004', index: 'x_file_index.json' }));
@@ -946,6 +990,14 @@ describe('cern_opendata_list_files errors', () => {
       });
       expect(error.message).toBe('The cursor points to file 3, past the 2 files in scope.');
       expect(http.calls).toHaveLength(1);
+    });
+
+    it('names a single file in scope in the singular', async () => {
+      serve({ '719': recordBody({ recid: '719', _files: regularFiles(1) }) });
+      const error = errorOf(
+        await run({ recid: '719', cursor: cursorOf({ r: '719', i: null, o: 1 }) }),
+      );
+      expect(error.message).toBe('The cursor points to file 2, past the 1 file in scope.');
     });
 
     it('rejects a cursor far past the end of an index', async () => {
@@ -1196,7 +1248,7 @@ describe('cern_opendata_list_files format', () => {
     ).toEqual([]);
     expect(lines.some((line) => line.startsWith('- bad'))).toBe(false);
     expect(text).toContain(
-      '- **k ## y_file_index.json**: 1 files, 100 bytes, online 1, on demand Not available',
+      '- **k ## y_file_index.json**: 1 file, 100 bytes, online 1, on demand Not available',
     );
     expect(text).toContain('  - Description: Desc # Heading \\| x \\[l\\](http://e.example)');
     expect(text).toContain(

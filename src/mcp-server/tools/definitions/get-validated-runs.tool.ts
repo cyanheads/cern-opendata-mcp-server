@@ -18,6 +18,7 @@ import {
   twinOf,
 } from '@/services/cern-opendata/normalize.js';
 import {
+  countOf,
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
@@ -427,9 +428,12 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
           ),
         );
         if (candidates.length === 0) {
+          const recids = linked.map((list) => list.recid).join(', ');
           throw ctx.fail(
             'no_validated_runs',
-            `Record ${datasetRecid} links validated-run lists ${linked.map((list) => list.recid).join(', ')} in the ${OTHER_VARIANT[variant]} variant, and none has a ${variant} twin.`,
+            linked.length === 1
+              ? `Record ${datasetRecid} links validated-run list ${recids} in the ${OTHER_VARIANT[variant]} variant, and it has no ${variant} twin.`
+              : `Record ${datasetRecid} links validated-run lists ${recids} in the ${OTHER_VARIANT[variant]} variant, and none has a ${variant} twin.`,
             { recid: datasetRecid, variant },
           );
         }
@@ -571,7 +575,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     if (summary) {
       lines.push(
         '',
-        `**Whole list:** ${summary.run_count} runs, ${summary.lumi_section_count} luminosity sections, runs ${inlineOrNA(summary.first_run)}–${inlineOrNA(summary.last_run)}`,
+        `**Whole list:** ${countOf(summary.run_count, 'run')}, ${countOf(summary.lumi_section_count, 'luminosity section')}, runs ${inlineOrNA(summary.first_run)}–${inlineOrNA(summary.last_run)}`,
       );
     }
     if (result.run_bounds) {
