@@ -1,0 +1,148 @@
+/**
+ * @fileoverview Shared input schema helpers for the cern_opendata_* tools:
+ * blank-as-unset optionals, comma-or-array lists with vocabulary
+ * canonicalization, and the recid field. Normalization runs in a preprocess,
+ * before any pattern check, so what the schema validates is what the handler
+ * receives.
+ * @module mcp-server/tools/inputs
+ */
+
+import { z } from '@cyanheads/mcp-ts-core';
+import { reduceRecidSpelling } from '@/services/cern-opendata/identifiers.js';
+import {
+  canonicalize,
+  isGlossaryType,
+  isKnownValue,
+  type VocabularyParam,
+} from '@/services/cern-opendata/vocabulary.js';
+
+/**
+ * Map `''` and whitespace-only strings to `undefined` before `schema` runs, so
+ * a form client's blank optional field reads as unset. Wrap every optional
+ * input with it (strings, numbers, enums, lists); never use `.min(1)` there.
+ */
+export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    schema,
+  );
+
+interface ListOptions {
+  /** Canonicalize each trimmed item (vocabulary lookup); identity when omitted. */
+  canonicalize?: (item: string) => string;
+  /** A string the list treats as one value instead of splitting it on commas. */
+  isWholeValue?: (raw: string) => boolean;
+}
+
+/**
+ * Accept an array of strings or one comma-separated string; split, trim, drop
+ * empties, canonicalize, dedupe, and cut at `max + 1` items so an oversized
+ * list fails with one `too_big` issue. An empty result becomes `undefined`.
+ */
+function splitList(value: unknown, max: number, options: ListOptions): unknown {
+  let items: unknown[];
+  if (typeof value === 'string') {
+    items = options.isWholeValue?.(value) ? [value] : value.split(',');
+  } else if (Array.isArray(value)) {
+    items = value;
+  } else {
+    return value;
+  }
+  const out: unknown[] = [];
+  for (const item of items) {
+    if (out.length > max) break;
+    if (typeof item !== 'string') {
+      out.push(item);
+      continue;
+    }
+    const trimmed = item.trim();
+    if (trimmed === '') continue;
+    const canonical = options.canonicalize ? options.canonicalize(trimmed) : trimmed;
+    if (!out.includes(canonical)) out.push(canonical);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * An optional list input: an array of strings or one comma-separated string,
+ * at most `max` items after splitting, trimming, canonicalizing and deduping.
+ * Blank input (`''`, `[]`, `' , '`) reads as unset. Add `.describe()` naming
+ * both forms and the cap.
+ */
+export function listInput<E extends z.ZodType<string>>(
+  max: number,
+  element: E,
+  options: ListOptions = {},
+) {
+  return z.preprocess(
+    (value) => splitList(value, max, options),
+    z.array(element).max(max).optional(),
+  );
+}
+
+/**
+ * A required list input with the same forms as {@link listInput}; at least one
+ * item must remain after blanks are dropped. A blank list (`''`, `[]`,
+ * `' , '`) reaches the array schema as `[]`, so it fails with `emptyMessage`
+ * rather than as a missing value.
+ */
+export function requiredListInput<E extends z.ZodType<string>>(
+  max: number,
+  element: E,
+  emptyMessage = 'At least one value is required.',
+) {
+  return z.preprocess(
+    (value) =>
+      typeof value === 'string' || Array.isArray(value) ? (splitList(value, max, {}) ?? []) : value,
+    z.array(element).min(1, emptyMessage).max(max),
+  );
+}
+
+/**
+ * An optional search-filter list for a vocabulary parameter: items ≤ 100
+ * characters, canonicalized against the verified table (unknown values pass
+ * through trimmed). `collision_energy`'s string form is first matched whole
+ * (`13TeV, 13.6TeV` is one upstream value) and split on commas only when it is
+ * not one. `type` rejects Glossary in any form. Add `.describe()` at the call site.
+ */
+export function vocabularyListInput(param: VocabularyParam, max: number) {
+  const element = z.string().max(100).describe(`One ${param} value.`);
+  const options: ListOptions = {
+    canonicalize: (item) => canonicalize(param, item),
+    ...(param === 'collision_energy'
+      ? { isWholeValue: (raw: string) => isKnownValue(param, canonicalize(param, raw)) }
+      : {}),
+  };
+  const list = z.array(element).max(max);
+  const checked =
+    param === 'type'
+      ? list.refine((items) => !items.some(isGlossaryType), {
+          message: 'Glossary entries are not served by this server.',
+        })
+      : list;
+  return z.preprocess((value) => splitList(value, max, options), checked.optional());
+}
+
+/**
+ * A required recid: trims, strips a leading `recid:` (any case), reduces
+ * `http(s)://opendata.cern.ch/record/{n}` or `/api/records/{n}` (any trailing
+ * path, query or fragment) to `n`, strips leading zeros, then requires digits
+ * (so an all-zero recid is rejected). For an optional recid use
+ * `blankAsUnset(recidInput().optional())`.
+ */
+export function recidInput() {
+  return z.preprocess(
+    (value) => (typeof value === 'string' ? reduceRecidSpelling(value) : value),
+    z.string().regex(/^\d+$/, 'A recid is digits, such as 6004.'),
+  );
+}
+
+/** Which parsed values of a canonicalized filter are not in the verified table. */
+export function unrecognizedValues(
+  param: VocabularyParam,
+  values: readonly string[] | undefined,
+): { param: VocabularyParam; value: string }[] {
+  return (values ?? [])
+    .filter((value) => !isKnownValue(param, value))
+    .map((value) => ({ param, value }));
+}
