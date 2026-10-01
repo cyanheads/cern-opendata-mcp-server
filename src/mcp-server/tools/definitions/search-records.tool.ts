@@ -12,6 +12,7 @@ import { RecordTypeSchema } from '@/mcp-server/record-schema.js';
 import {
   getCernOpenDataService,
   isPageWindowRejection,
+  PAGE_WINDOW,
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
   definedOnly,
@@ -19,7 +20,7 @@ import {
   toFacets,
   toSearchHit,
 } from '@/services/cern-opendata/normalize.js';
-import { countOf, fence, inline, printUrl } from '@/services/cern-opendata/text.js';
+import { countOf, fence, inline, NOT_AVAILABLE, printUrl } from '@/services/cern-opendata/text.js';
 import type { SearchParams } from '@/services/cern-opendata/types.js';
 import {
   PARAM_TOPIC,
@@ -36,9 +37,6 @@ import {
 import { blankAsUnset, listInput, unrecognizedValues, vocabularyListInput } from '../inputs.js';
 
 const SORTS = ['bestmatch', 'mostrecent', 'title', 'title_desc'] as const;
-
-/** Paging reaches at most this many matches (`page × size ≤ 10000` upstream). */
-const PAGE_WINDOW = 10_000;
 
 const VOCABULARY_PARAMS = [
   'type',
@@ -210,7 +208,7 @@ function composeRange(from: number | undefined, to: number | undefined): string 
 }
 
 function typeLabel(type: RecordTypeOut): string {
-  const primary = type.primary === '' ? 'Not available' : inline(type.primary);
+  const primary = type.primary === '' ? NOT_AVAILABLE : inline(type.primary);
   return type.secondary.length > 0
     ? `${primary} (${type.secondary.map(inline).join(', ')})`
     : primary;

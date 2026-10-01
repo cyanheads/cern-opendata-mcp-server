@@ -239,6 +239,11 @@ export function inlineOrNA(value: string | number | undefined): string {
   return typeof value === 'number' ? String(value) : inline(value);
 }
 
+/** Inline-neutralized values joined by `, `, or {@link NOT_AVAILABLE} when there are none. */
+export function inlineList(values: readonly string[] | undefined): string {
+  return values?.length ? values.map(inline).join(', ') : NOT_AVAILABLE;
+}
+
 /** A string cut to at most `maxChars` UTF-16 units, never splitting a surrogate pair. */
 export interface CappedText {
   /** Original length in characters. */

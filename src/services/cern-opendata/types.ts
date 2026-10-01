@@ -127,7 +127,6 @@ export interface RawAggregation {
 export interface RawSearchResponse {
   aggregations?: Record<string, RawAggregation>;
   hits: { hits: RawHit[]; total: number };
-  links?: { next?: string; prev?: string; self?: string };
 }
 
 // Service-level shapes

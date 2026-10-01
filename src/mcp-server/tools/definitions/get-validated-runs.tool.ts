@@ -20,6 +20,7 @@ import {
 import {
   countOf,
   inline,
+  inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
   oneLine,
@@ -218,10 +219,6 @@ function toSelected(list: ValidatedRunList): z.infer<typeof SelectedListSchema> 
     xrootd_uri: list.xrootd_uri,
     portal_url: recordUrl(list.recid),
   });
-}
-
-function joinOrNA(values: readonly string[] | undefined): string {
-  return values && values.length > 0 ? values.map(inline).join(', ') : NOT_AVAILABLE;
 }
 
 export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
@@ -482,13 +479,13 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
 
     if (dataset && defaulted) {
       fragments.push(
-        `Runs are limited to ${defaulted.first}–${defaulted.last}, the first and last run record ${dataset.recid} lists; list ${selected.recid} covers ${joinOrNA(selected.run_periods)}. For the whole list, call cern_opendata_get_validated_runs with recid ${selected.recid}.`,
+        `Runs are limited to ${defaulted.first}–${defaulted.last}, the first and last run record ${dataset.recid} lists; list ${selected.recid} covers ${inlineList(selected.run_periods)}. For the whole list, call cern_opendata_get_validated_runs with recid ${selected.recid}.`,
       );
     } else if (dataset && unbounded && spansBeyond(selected, dataset.run_period)) {
       fragments.push(
         dataset.run_period
-          ? `Record ${dataset.recid} lists no run numbers, so the runs span list ${selected.recid}'s whole run periods (${joinOrNA(selected.run_periods)}), not only the dataset's ${joinOrNA(dataset.run_period)}; set run_min and run_max to narrow them.`
-          : `Record ${dataset.recid} lists no run numbers or run period, so the runs span list ${selected.recid}'s whole run periods (${joinOrNA(selected.run_periods)}); set run_min and run_max to narrow them.`,
+          ? `Record ${dataset.recid} lists no run numbers, so the runs span list ${selected.recid}'s whole run periods (${inlineList(selected.run_periods)}), not only the dataset's ${inlineList(dataset.run_period)}; set run_min and run_max to narrow them.`
+          : `Record ${dataset.recid} lists no run numbers or run period, so the runs span list ${selected.recid}'s whole run periods (${inlineList(selected.run_periods)}); set run_min and run_max to narrow them.`,
       );
     }
     if (allRuns.length === 0) {
@@ -545,7 +542,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     );
     if (dataset) {
       lines.push(
-        `**Dataset:** ${inline(dataset.recid)}: ${inlineOrNA(dataset.title)} · **Run periods:** ${joinOrNA(dataset.run_period)}`,
+        `**Dataset:** ${inline(dataset.recid)}: ${inlineOrNA(dataset.title)} · **Run periods:** ${inlineList(dataset.run_period)}`,
       );
     }
 
@@ -556,7 +553,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       '|:------|:--------|:------------|:-----------------|:------|',
       ...result.matched_lists.map(
         (matched) =>
-          `| ${inline(matched.recid)} | ${matched.variant} | ${joinOrNA(matched.run_periods)} | ${inlineOrNA(matched.collision_energy)} | ${inline(matched.title)} |`,
+          `| ${inline(matched.recid)} | ${matched.variant} | ${inlineList(matched.run_periods)} | ${inlineOrNA(matched.collision_energy)} | ${inline(matched.title)} |`,
       ),
     );
 
@@ -565,7 +562,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         '',
         '### Selected list',
         `**Title:** ${inline(list.title)}`,
-        `**Recid:** ${inline(list.recid)} · **Variant:** ${list.variant} · **Run periods:** ${joinOrNA(list.run_periods)} · **Collision energy:** ${inlineOrNA(list.collision_energy)}`,
+        `**Recid:** ${inline(list.recid)} · **Variant:** ${list.variant} · **Run periods:** ${inlineList(list.run_periods)} · **Collision energy:** ${inlineOrNA(list.collision_energy)}`,
         `**File key:** ${inline(list.file_key)}`,
         `**HTTPS:** ${printUrl(list.https_url)}`,
         `**XRootD:** ${list.xrootd_uri ? printUrl(list.xrootd_uri) : NOT_AVAILABLE}`,

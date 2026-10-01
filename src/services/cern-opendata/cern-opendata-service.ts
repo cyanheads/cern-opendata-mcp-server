@@ -32,6 +32,7 @@ import type {
   RawSearchResponse,
   RunList,
   SearchOutcome,
+  SearchPage,
   SearchParams,
   SearchRejection,
   ValidatedRunList,
@@ -40,7 +41,7 @@ import type {
 const MiB = 1024 * 1024;
 
 /** One tool call's total upstream budget (Requirements: Deadline). */
-export const CALL_BUDGET_MS = 50_000;
+const CALL_BUDGET_MS = 50_000;
 /** Longest a request may wait in the pacer queue before shedding. */
 const MAX_QUEUE_WAIT_MS = 20_000;
 /** Longest one HTTP attempt (headers and body) may take. */
@@ -255,6 +256,9 @@ function parseRetryAfterSeconds(value: string | null): number {
   return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : DEFAULT_RETRY_AFTER_S;
 }
 
+/** The deepest match search pages to: the portal rejects `page × size > 10000` with a 400. */
+export const PAGE_WINDOW = 10_000;
+
 /** True for the portal's 400 for `page × size > 10000`. */
 export function isPageWindowRejection(rejection: SearchRejection): boolean {
   return rejection.message.startsWith('Maximum number of');
@@ -393,8 +397,11 @@ export class CernOpenDataService {
     };
   }
 
-  /** A search the server built itself; a 400 means the server built it wrong. */
-  async #searchBuilt(params: SearchParams, budget: Budget, ctx: Context) {
+  /**
+   * A search the server built itself, from validated input only: a 400 means
+   * the server built it wrong, so it is raised as `InternalError`.
+   */
+  async searchBuilt(params: SearchParams, budget: Budget, ctx: Context): Promise<SearchPage> {
     const outcome = await this.search(params, budget, ctx);
     if (outcome.kind === 'rejected') {
       throw internalError(
@@ -451,13 +458,13 @@ export class CernOpenDataService {
   async #lookupHits(ids: readonly ClassifiedId[], budget: Budget, ctx: Context): Promise<RawHit[]> {
     const q = lookupQuery(ids);
     if (q === undefined) return [];
-    const page = await this.#searchBuilt({ q, size: 100, sort: 'bestmatch' }, budget, ctx);
+    const page = await this.searchBuilt({ q, size: 100, sort: 'bestmatch' }, budget, ctx);
     return page.hits;
   }
 
   /** The record hit for `recid` (`q=recid:{n}`, `size=1`, files skipped), or `null` when none. */
   async findRecord(recid: string, budget: Budget, ctx: Context): Promise<RawHit | null> {
-    const page = await this.#searchBuilt({ q: `recid:${recid}`, size: 1 }, budget, ctx);
+    const page = await this.searchBuilt({ q: `recid:${recid}`, size: 1 }, budget, ctx);
     return page.hits.find((hit) => str(hit.metadata.recid) === recid) ?? null;
   }
 
@@ -505,7 +512,7 @@ export class CernOpenDataService {
    */
   async getValidatedRunLists(budget: Budget, ctx: Context): Promise<ValidatedRunList[]> {
     if (this.#runLists && this.#runLists.expiresAt > this.#now()) return this.#runLists.lists;
-    const page = await this.#searchBuilt(
+    const page = await this.searchBuilt(
       { collections: [VALIDATED_RUNS_COLLECTION], size: 100, skipFiles: false },
       budget,
       ctx,

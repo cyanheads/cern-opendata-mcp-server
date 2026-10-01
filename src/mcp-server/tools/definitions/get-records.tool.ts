@@ -17,6 +17,7 @@ import {
   fence,
   fenceHtml,
   inline,
+  inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
   printUrl,
@@ -44,9 +45,6 @@ function missingGuidance(id: ClassifiedId): string {
   }
 }
 
-const list = (values: readonly string[] | undefined) =>
-  values?.length ? values.map(inline).join(', ') : NOT_AVAILABLE;
-
 /** Markdown for one record: facts, then fenced free text, links and relations. */
 function renderRecord(record: RecordOut): string {
   const lines = [`## ${inline(record.title ?? record.id)}`];
@@ -56,13 +54,13 @@ function renderRecord(record: RecordOut): string {
   if (record.recid !== undefined) ids.push(`**recid:** ${inline(record.recid)}`);
   if (record.slug !== undefined) ids.push(`**slug:** ${inline(record.slug)}`);
   lines.push(ids.join(' · '));
-  lines.push(`**Matched inputs:** ${list(record.matched_inputs)}`);
+  lines.push(`**Matched inputs:** ${inlineList(record.matched_inputs)}`);
 
   const typeText =
     record.type.primary === ''
       ? NOT_AVAILABLE
-      : `${inline(record.type.primary)}${record.type.secondary.length > 0 ? ` (${list(record.type.secondary)})` : ''}`;
-  lines.push(`**Type:** ${typeText} · **Experiment:** ${list(record.experiment)}`);
+      : `${inline(record.type.primary)}${record.type.secondary.length > 0 ? ` (${inlineList(record.type.secondary)})` : ''}`;
+  lines.push(`**Type:** ${typeText} · **Experiment:** ${inlineList(record.experiment)}`);
 
   if (record.collaboration) {
     const recid = record.collaboration.recid
@@ -81,7 +79,7 @@ function renderRecord(record: RecordOut): string {
     `**DOI:** ${inlineOrNA(record.doi)} · **Published:** ${inlineOrNA(record.date_published)}${record.date_reprocessed ? ` · **Reprocessed:** ${inline(record.date_reprocessed)}` : ''}`,
   );
   lines.push(
-    `**Year:** ${list(record.date_created)} · **Run period:** ${list(record.run_period)}${record.run_numbers ? ` · **Run numbers:** ${list(record.run_numbers)}` : ''}`,
+    `**Year:** ${inlineList(record.date_created)} · **Run period:** ${inlineList(record.run_period)}${record.run_numbers ? ` · **Run numbers:** ${inlineList(record.run_numbers)}` : ''}`,
   );
   if (record.collision_energy || record.collision_type) {
     lines.push(
@@ -91,15 +89,15 @@ function renderRecord(record: RecordOut): string {
   if (record.distribution) {
     const d = record.distribution;
     lines.push(
-      `**Formats:** ${list(d.formats)} · **Events:** ${inlineOrNA(d.number_events)} · **Files:** ${inlineOrNA(d.number_files)} · **Size:** ${d.size_in_bytes === undefined ? NOT_AVAILABLE : countOf(d.size_in_bytes, 'byte')}`,
+      `**Formats:** ${inlineList(d.formats)} · **Events:** ${inlineOrNA(d.number_events)} · **Files:** ${inlineOrNA(d.number_files)} · **Size:** ${d.size_in_bytes === undefined ? NOT_AVAILABLE : countOf(d.size_in_bytes, 'byte')}`,
     );
   }
   const counts = record.availability_details
     ? ` (online files: ${inlineOrNA(record.availability_details.online)}, on-demand files: ${inlineOrNA(record.availability_details.on_demand)})`
     : '';
   lines.push(`**Availability:** ${inlineOrNA(record.availability)}${counts}`);
-  if (record.collections) lines.push(`**Collections:** ${list(record.collections)}`);
-  if (record.tags) lines.push(`**Tags:** ${list(record.tags)}`);
+  if (record.collections) lines.push(`**Collections:** ${inlineList(record.collections)}`);
+  if (record.tags) lines.push(`**Tags:** ${inlineList(record.tags)}`);
 
   if (record.system_details) {
     const s = record.system_details;

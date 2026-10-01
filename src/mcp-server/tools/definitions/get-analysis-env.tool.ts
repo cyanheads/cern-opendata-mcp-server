@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { RecordTypeSchema } from '@/mcp-server/record-schema.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
@@ -26,11 +26,12 @@ import {
   fence,
   fenceHtml,
   inline,
+  inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
   printUrl,
 } from '@/services/cern-opendata/text.js';
-import type { RawHit, RawLink, SearchPage } from '@/services/cern-opendata/types.js';
+import type { RawHit, RawLink } from '@/services/cern-opendata/types.js';
 import { composeNotice } from '../enrichment.js';
 import { recidInput } from '../inputs.js';
 
@@ -404,8 +405,8 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       periods.length > 0
         ? `use_with.links.recid:${recid} OR (type.primary:Environment AND run_period:(${periods.map((p) => `"${p}"`).join(' OR ')}))`
         : `use_with.links.recid:${recid}`;
-    const linkedLeg = async (): Promise<SearchPage> => {
-      const outcome = await service.search(
+    const [linkedOutcome, ...docOutcomes] = await Promise.allSettled([
+      service.searchBuilt(
         {
           q,
           ...(experiment?.[0] ? { experiment: [experiment[0]] } : {}),
@@ -414,18 +415,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
         },
         budget,
         ctx,
-      );
-      if (outcome.kind === 'rejected') {
-        throw internalError(
-          `CERN Open Data rejected a query this server built: ${outcome.rejection.message}`,
-          { upstreamMessage: outcome.rejection.message },
-        );
-      }
-      return outcome.page;
-    };
-
-    const [linkedOutcome, ...docOutcomes] = await Promise.allSettled([
-      linkedLeg(),
+      ),
       ...fetchSlugs.map((slug) => service.getDoc(slug, budget, ctx)),
     ]);
     if (ctx.signal.aborted) {
@@ -444,12 +434,13 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       linkedTotal = linkedOutcome.value.total;
     } else if (isDegradable(linkedOutcome.reason)) {
       degraded = true;
+      const reason = failureLabel(linkedOutcome.reason);
       ctx.log.warning('Linked environment and software records could not be read', {
         recid,
-        reason: failureLabel(linkedOutcome.reason),
+        reason,
       });
       fragments.push(
-        `Linked environment and software records could not be read (${failureLabel(linkedOutcome.reason)}); call cern_opendata_get_analysis_env again in a minute.`,
+        `Linked environment and software records could not be read (${reason}); call cern_opendata_get_analysis_env again in a minute.`,
       );
     } else {
       throw linkedOutcome.reason;
@@ -543,7 +534,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
     const { software } = result;
     const lines = [
       `## Analysis environment for record ${inline(result.recid)}: ${inlineOrNA(result.title)}`,
-      `**Type:** ${renderType(result.type)} · **Experiment:** ${result.experiment ? result.experiment.map(inline).join(', ') : NOT_AVAILABLE} · **Run periods:** ${result.run_period ? result.run_period.map(inline).join(', ') : NOT_AVAILABLE}`,
+      `**Type:** ${renderType(result.type)} · **Experiment:** ${inlineList(result.experiment)} · **Run periods:** ${inlineList(result.run_period)}`,
       '',
       '### Software',
       `**Release:** ${inlineOrNA(software.release)} · **Global tag:** ${inlineOrNA(software.global_tag)} · **Environment record:** ${inlineOrNA(software.environment_recid)}`,
@@ -570,7 +561,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
         '|:------|:-----|:------|:------------|:-------|',
         ...result.environment_records.map(
           (env) =>
-            `| ${inline(env.recid)} | ${env.kind} | ${inlineOrNA(env.title)} | ${env.run_period ? env.run_period.map(inline).join(', ') : NOT_AVAILABLE} | ${printUrl(env.portal_url)} |`,
+            `| ${inline(env.recid)} | ${env.kind} | ${inlineOrNA(env.title)} | ${inlineList(env.run_period)} | ${printUrl(env.portal_url)} |`,
         ),
       );
     }
@@ -583,7 +574,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
         '|:------|:------|:----------|:--------|:------------|:-------|',
         ...result.example_software.map(
           (sw) =>
-            `| ${inline(sw.recid)} | ${inlineOrNA(sw.title)} | ${sw.secondary.length > 0 ? sw.secondary.map(inline).join(', ') : NOT_AVAILABLE} | ${inlineOrNA(sw.license_id)} | ${sw.source_code_repository_url ? printUrl(sw.source_code_repository_url) : NOT_AVAILABLE} | ${printUrl(sw.portal_url)} |`,
+            `| ${inline(sw.recid)} | ${inlineOrNA(sw.title)} | ${inlineList(sw.secondary)} | ${inlineOrNA(sw.license_id)} | ${sw.source_code_repository_url ? printUrl(sw.source_code_repository_url) : NOT_AVAILABLE} | ${printUrl(sw.portal_url)} |`,
         ),
       );
     }

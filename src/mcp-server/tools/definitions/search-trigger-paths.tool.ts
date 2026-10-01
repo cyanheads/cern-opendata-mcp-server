@@ -11,9 +11,17 @@ import { internalError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   getCernOpenDataService,
   isPageWindowRejection,
+  PAGE_WINDOW,
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import { definedOnly, portalUrlOf, str, strList } from '@/services/cern-opendata/normalize.js';
-import { countOf, fenceHtml, inline, inlineOrNA, printUrl } from '@/services/cern-opendata/text.js';
+import {
+  countOf,
+  fenceHtml,
+  inline,
+  inlineOrNA,
+  NOT_AVAILABLE,
+  printUrl,
+} from '@/services/cern-opendata/text.js';
 import { parseTrigger } from '@/services/cern-opendata/trigger-parse.js';
 import type { RawHit, SearchParams } from '@/services/cern-opendata/types.js';
 import {
@@ -24,8 +32,6 @@ import {
 } from '../enrichment.js';
 import { blankAsUnset } from '../inputs.js';
 
-/** The deepest match the portal pages to (`page × size ≤ 10000`). */
-const PAGE_WINDOW = 10_000;
 const PATH_PATTERN = /^HLT_[A-Za-z0-9_]+\*?$/;
 /** A trailing CMSSW version suffix: `_v<digits>` or `_v*`. */
 const VERSION_SUFFIX = /_v(\d+|\*)$/i;
@@ -148,7 +154,7 @@ function toTrigger(hit: RawHit): TriggerOut {
 }
 
 function renderSeen(label: string, seen: RunSeenOut | undefined): string {
-  if (!seen) return `**${label}:** Not available`;
+  if (!seen) return `**${label}:** ${NOT_AVAILABLE}`;
   const menu = seen.menu ? `, menu ${inline(seen.menu)}` : '';
   const record = seen.menu_recid ? ` (record ${inline(seen.menu_recid)})` : '';
   return `**${label}:** run ${seen.run}${menu}${record}`;
@@ -180,7 +186,7 @@ function renderTrigger(trigger: TriggerOut): string[] {
     '',
     trigger.abstract_html
       ? `**Abstract (as text, the source of the fields above):**\n${fenceHtml(trigger.abstract_html)}`
-      : '**Abstract:** Not available',
+      : `**Abstract:** ${NOT_AVAILABLE}`,
   );
   return lines;
 }
