@@ -20,6 +20,7 @@ import {
   inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeValue,
   printUrl,
 } from '@/services/cern-opendata/text.js';
 import { composeNotice } from '../enrichment.js';
@@ -265,7 +266,7 @@ export const getRecords = tool('cern_opendata_get_records', {
     const notice = composeNotice(
       records.map((record) =>
         record.body_truncated
-          ? `The body of ${record.slug ?? record.id} was cut at 30,000 of ${record.body_length} characters; read the full page at ${record.portal_url}.`
+          ? `The body of ${noticeValue(record.slug ?? record.id)} was cut at 30,000 of ${record.body_length} characters; read the full page at ${printUrl(record.portal_url)}.`
           : undefined,
       ),
     );

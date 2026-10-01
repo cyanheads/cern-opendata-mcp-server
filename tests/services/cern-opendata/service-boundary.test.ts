@@ -300,6 +300,29 @@ describe('per-route accept-list', () => {
       expect(settled.ok).toBe(true);
       expect(http.calls).toHaveLength(2);
     });
+
+    it('keeps the reason phrase out of the message and in data.statusText', async () => {
+      const { service, ctx } = makeService([
+        docRoute(
+          new Response('down', {
+            status: 503,
+            statusText: '<img src=x> [x](https://evil.example)',
+            headers: { 'retry-after': '60' },
+          }),
+        ),
+      ]);
+      const failure = failureOf(
+        await settle(() => service.getDoc('x', service.startBudget(), ctx)),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(failure.message).toBe('CERN Open Data returned HTTP 503. (failed after 3 attempts)');
+      expect(failure.data).toMatchObject({
+        status: 503,
+        statusText: '<img src=x> [x](https://evil.example)',
+        retryAttempts: 3,
+      });
+      expect(failure.data).not.toHaveProperty('retryAfter');
+    });
   });
 
   describe('network failures', () => {

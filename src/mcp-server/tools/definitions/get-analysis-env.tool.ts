@@ -14,6 +14,7 @@ import { RecordTypeSchema } from '@/mcp-server/record-schema.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
   definedOnly,
+  pathSegment,
   portalUrlOf,
   recordTypeOf,
   str,
@@ -29,6 +30,7 @@ import {
   inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeValue,
   printUrl,
 } from '@/services/cern-opendata/text.js';
 import type { RawHit, RawLink } from '@/services/cern-opendata/types.js';
@@ -43,9 +45,11 @@ const GUIDES_FETCHED = 2;
 const SECTION_MAX_CHARS = 12_000;
 /** Only run periods of this shape enter the leg-2 query, so record data cannot break it. */
 const QUERYABLE_RUN_PERIOD = /^[A-Za-z0-9_.-]+$/;
-/** A portal doc link, relative or absolute: slug and optional anchor. */
+/** A portal doc link, relative or absolute: slug and optional fragment. */
 const DOC_LINK =
   /^(?:https?:\/\/opendata\.cern\.ch)?\/docs\/([^/?#\s]+)\/?(?:\?[^#]*)?(?:#(.*))?$/i;
+/** A fragment that can name a guide section; any other fragment is read as no anchor. */
+const GUIDE_ANCHOR = /^[A-Za-z0-9_.:-]{1,100}$/;
 const HEADING = /^ {0,3}(#{1,6})(?:\s|$)/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 
@@ -141,12 +145,17 @@ function extractSection(body: string, anchor: string | undefined) {
   return { text: lines.slice(0, end < 0 ? undefined : end).join('\n'), anchored: false };
 }
 
-/** A `usage.links` entry pointing at a portal doc page: its slug and anchor. */
+/**
+ * A `usage.links` entry pointing at a portal doc page: its slug and anchor. A
+ * slug of `.` or `..` is no doc link; a fragment that is not an anchor name
+ * is no anchor.
+ */
 function docLinkOf(url: string): { slug: string; anchor?: string } | undefined {
   const match = DOC_LINK.exec(url.trim());
-  if (!match?.[1]) return;
-  const anchor = match[2]?.trim();
-  return anchor ? { slug: match[1], anchor } : { slug: match[1] };
+  const slug = pathSegment(match?.[1]);
+  if (!slug) return;
+  const anchor = match?.[2]?.trim();
+  return anchor && GUIDE_ANCHOR.test(anchor) ? { slug, anchor } : { slug };
 }
 
 /** A short label for why a degraded leg failed. */
@@ -466,7 +475,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
         reason,
       });
       fragments.push(
-        `Linked environment and software records could not be read (${reason}); call cern_opendata_get_analysis_env again in a minute.`,
+        `Linked environment and software records could not be read (${noticeValue(reason)}); call cern_opendata_get_analysis_env again in a minute.`,
       );
     } else {
       throw linkedOutcome.reason;
@@ -477,7 +486,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
     const noteGuide = (slug: string, what: string) =>
       guideNotes.set(
         `${slug}\n${what}`,
-        `Guide ${slug} ${what}; call cern_opendata_get_records with ids ["${slug}"] for the page body.`,
+        `Guide ${noticeValue(slug)} ${what}; call cern_opendata_get_records with ids ["${noticeValue(slug)}"] for the page body.`,
       );
     const resolvedGuides = guides.map((guide, i) => {
       const outcome = i < GUIDES_FETCHED ? docOutcomes[fetchSlugs.indexOf(guide.slug)] : undefined;
@@ -497,7 +506,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       if (capped?.truncated) noteGuide(guide.slug, 'was cut at 12,000 characters');
       if (guide.anchor && extracted && !extracted.anchored) {
         fragments.push(
-          `Guide ${guide.slug} has no section anchored ${guide.anchor}; its opening section is quoted instead.`,
+          `Guide ${noticeValue(guide.slug)} has no section anchored ${noticeValue(guide.anchor)}; its opening section is quoted instead.`,
         );
       }
       return definedOnly<GuideOut>({

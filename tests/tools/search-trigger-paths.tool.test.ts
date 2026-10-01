@@ -616,6 +616,23 @@ describe('cern_opendata_search_trigger_paths errors on the wire', () => {
     });
   });
 
+  it('escapes the portal text of a non-JSON 400 in the message and keeps it as received in data', async () => {
+    const body = '<img src=x> [a](https://evil.example)';
+    installService([
+      searchRoute(
+        () => new Response(body, { status: 400, headers: { 'content-type': 'text/plain' } }),
+      ),
+    ]);
+    const result = await run({ path: 'HLT_Mu*' });
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(error.message).toBe(
+      'CERN Open Data rejected a query this server built: &lt;img src=x&gt; \\[a\\](https://evil.example)',
+    );
+    expect(error.data).toMatchObject({ upstreamMessage: body });
+    expect(textOf(result)).not.toContain('<img');
+  });
+
   it('a message that only mentions the window is not read as the window rejection', async () => {
     serve(
       { status: 400, message: 'Syntax invalid. Maximum number of 10000 results' },

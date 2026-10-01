@@ -16,6 +16,7 @@ import {
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeValue,
   oneLine,
   PORTAL_ORIGIN,
   printUrl,
@@ -313,7 +314,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     }
     if (manifest.files.length === 0 && manifest.indexes.length === 0) {
       if (manifest.children.length > 0) {
-        const named = manifest.children.slice(0, CHILDREN_NAMED).join(', ');
+        const named = manifest.children.slice(0, CHILDREN_NAMED).map(noticeValue).join(', ');
         const more = manifest.children.length > CHILDREN_NAMED ? ', …' : '';
         const which = manifest.children.length === 1 ? 'that recid' : 'one of those recids';
         fragments.push(

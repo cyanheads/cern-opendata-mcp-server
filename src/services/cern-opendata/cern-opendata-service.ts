@@ -23,7 +23,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 import type { ClassifiedId } from './identifiers.js';
 import { str, toManifest, toValidatedRunList } from './normalize.js';
-import { PORTAL_ORIGIN } from './text.js';
+import { noticeValue, PORTAL_ORIGIN } from './text.js';
 import type {
   Budget,
   CompactManifest,
@@ -235,19 +235,19 @@ function toRejection(text: string): SearchRejection {
 }
 
 /**
- * The response without its `retry-after` header. The portal sends
+ * An unexpected status as a thrown error. The response is rebuilt without its
+ * `retry-after` header and its reason phrase. The portal sends
  * `retry-after: 60` on every response; only a 429 reads it (Decision 10), so a
- * 5xx must not carry it into `httpErrorFromResponse`, whose `data.retryAfter`
- * would make `withRetry` fail fast instead of retrying.
+ * 5xx carrying it into `data.retryAfter` would make `withRetry` fail fast
+ * instead of retrying. The reason phrase is upstream text, so it stays out of
+ * the message and is kept as received in `data.statusText`.
  */
-function withoutRetryAfter(response: Response): Response {
-  if (!response.headers.has('retry-after')) return response;
+function unexpectedStatus(response: Response): Promise<McpError> {
   const headers = new Headers(response.headers);
   headers.delete('retry-after');
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
+  return httpErrorFromResponse(new Response(response.body, { status: response.status, headers }), {
+    service: SERVICE_LABEL,
+    ...(response.statusText ? { data: { statusText: response.statusText } } : {}),
   });
 }
 
@@ -405,7 +405,7 @@ export class CernOpenDataService {
     const outcome = await this.search(params, budget, ctx);
     if (outcome.kind === 'rejected') {
       throw internalError(
-        `${SERVICE_LABEL} rejected a query this server built: ${outcome.rejection.message}`,
+        `${SERVICE_LABEL} rejected a query this server built: ${noticeValue(outcome.rejection.message)}`,
         { upstreamMessage: outcome.rejection.message },
       );
     }
@@ -547,7 +547,7 @@ export class CernOpenDataService {
     if (fetched.status !== 200) {
       this.#runLists = undefined;
       throw upstreamUnreadable(
-        `${SERVICE_LABEL} answered 404 for file ${key} of validated-run list ${recid}, which the collection lists.`,
+        `${SERVICE_LABEL} answered 404 for file ${noticeValue(key)} of validated-run list ${noticeValue(recid)}, which the collection lists.`,
         { recid, key },
       );
     }
@@ -640,9 +640,7 @@ export class CernOpenDataService {
   async #dispatch<T>(spec: RequestSpec<T>, response: Response, ctx: Context): Promise<Fetched<T>> {
     const { accept, limitBytes } = ROUTES[spec.route];
     const { status } = response;
-    if (!accept.has(status)) {
-      throw await httpErrorFromResponse(withoutRetryAfter(response), { service: SERVICE_LABEL });
-    }
+    if (!accept.has(status)) throw await unexpectedStatus(response);
     if (status === 429) {
       await response.body?.cancel().catch(() => undefined);
       const retryAfter = parseRetryAfterSeconds(response.headers.get('retry-after'));

@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for upstream-text rendering helpers: entity decoding, URL
- * printing, HTML to text, fences, inline neutralization, character caps and
- * counts that agree with their noun.
+ * printing, HTML to text, fences, inline neutralization, notice values,
+ * character caps and counts that agree with their noun.
  * @module tests/services/cern-opendata/text.test
  */
 
@@ -17,6 +17,8 @@ import {
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeList,
+  noticeValue,
   oneLine,
   PORTAL_ORIGIN,
   printUrl,
@@ -249,6 +251,44 @@ describe('inline', () => {
     expect(inlineOrNA(0)).toBe('0');
     expect(inlineOrNA(1234)).toBe('1234');
     expect(inlineOrNA('a|b\nc')).toBe('a\\|b c');
+  });
+});
+
+describe('noticeValue', () => {
+  it('neutralizes a value like an inline slot: brackets, pipes and backslashes escaped, angle brackets as entities', () => {
+    expect(noticeValue('[docs](https://evil.example) <img src=y> | \\')).toBe(
+      '\\[docs\\](https://evil.example) &lt;img src=y&gt; \\| \\\\',
+    );
+  });
+
+  it('flattens line breaks and strips control and bidi characters', () => {
+    expect(noticeValue('a\nb\u{2028}c\u{0}d\u{202E}e')).toBe('a b cde');
+  });
+
+  it('leaves an ordinary slug or recid unchanged', () => {
+    expect(noticeValue('cms-guide-docker')).toBe('cms-guide-docker');
+    expect(noticeValue('1002')).toBe('1002');
+  });
+
+  it('cuts a value at 200 characters and marks the cut', () => {
+    expect(noticeValue('x'.repeat(200))).toBe('x'.repeat(200));
+    expect(noticeValue('x'.repeat(201))).toBe(`${'x'.repeat(200)}…`);
+  });
+
+  it('never splits a surrogate pair at the cut', () => {
+    expect(noticeValue(`${'x'.repeat(199)}\u{1F600}tail`)).toBe(`${'x'.repeat(199)}…`);
+  });
+
+  it('cuts before escaping, so an escape is never split', () => {
+    expect(noticeValue('<'.repeat(250))).toBe(`${'&lt;'.repeat(200)}…`);
+  });
+});
+
+describe('noticeList', () => {
+  it('joins neutralized values, or says Not available when there are none', () => {
+    expect(noticeList(['Run2012A', '<b>'])).toBe('Run2012A, &lt;b&gt;');
+    expect(noticeList([])).toBe(NOT_AVAILABLE);
+    expect(noticeList(undefined)).toBe(NOT_AVAILABLE);
   });
 });
 

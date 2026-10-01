@@ -20,6 +20,7 @@ import {
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeValue,
   printUrl,
 } from '@/services/cern-opendata/text.js';
 import { parseTrigger } from '@/services/cern-opendata/trigger-parse.js';
@@ -287,14 +288,14 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
       if (isPageWindowRejection(rejection)) {
         throw ctx.fail(
           'page_window_exceeded',
-          `The portal refused the page: ${rejection.message}`,
+          `The portal refused the page: ${noticeValue(rejection.message)}`,
           {
             upstreamMessage: rejection.message,
           },
         );
       }
       throw internalError(
-        `CERN Open Data rejected a query this server built: ${rejection.message}`,
+        `CERN Open Data rejected a query this server built: ${noticeValue(rejection.message)}`,
         {
           upstreamMessage: rejection.message,
           ...(rejection.errors ? { upstreamErrors: rejection.errors } : {}),

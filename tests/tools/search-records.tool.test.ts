@@ -973,6 +973,22 @@ describe('cern_opendata_search_records errors', () => {
     });
   });
 
+  it('invalid_query: escapes the portal text in the message and keeps it as received in data', async () => {
+    const body = '<img src=x> [a](https://evil.example)';
+    installService([
+      searchRoute(
+        () => new Response(body, { status: 400, headers: { 'content-type': 'text/plain' } }),
+      ),
+    ]);
+    const result = await run({});
+    const error = errorOf(result);
+    expect(error.message).toBe(
+      'The portal rejected the search: &lt;img src=x&gt; \\[a\\](https://evil.example)',
+    );
+    expect(error.data).toMatchObject({ reason: 'invalid_query', upstreamMessage: body });
+    expect(textOf(result)).not.toContain('<img');
+  });
+
   it('invalid_query: a message that only mentions the window is still a syntax rejection', async () => {
     serve(
       { status: 400, message: 'Syntax invalid. Maximum number of 10000 results' },

@@ -18,6 +18,7 @@ import {
   glossaryFacetCount,
   licenseOf,
   num,
+  pathSegment,
   portalUrlOf,
   recordTypeOf,
   recordUrl,
@@ -869,6 +870,27 @@ describe('toValidatedRunList', () => {
     expect(toValidatedRunList(hit(5, { recid: '5' }))).toBeUndefined();
     expect(toValidatedRunList(hit(5, { recid: '5', _files: [] }))).toBeUndefined();
     expect(toValidatedRunList(hit(5, { recid: '5', _files: [{ key: ' ' }] }))).toBeUndefined();
+  });
+
+  it('returns undefined when the recid or file key is a dot segment, which no request path can carry', () => {
+    for (const dots of ['.', '..']) {
+      expect(toValidatedRunList(hit(5, { recid: dots, _files: [{ key: 'k' }] }))).toBeUndefined();
+      expect(toValidatedRunList(hit(5, { recid: '5', _files: [{ key: dots }] }))).toBeUndefined();
+    }
+    expect(toValidatedRunList(hit(5, { recid: '5', _files: [{ key: '...' }] }))?.file_key).toBe(
+      '...',
+    );
+  });
+});
+
+describe('pathSegment', () => {
+  it('reads . and .. as absent and passes every other value through', () => {
+    expect(pathSegment('.')).toBeUndefined();
+    expect(pathSegment('..')).toBeUndefined();
+    expect(pathSegment(undefined)).toBeUndefined();
+    for (const value of ['...', '.x', 'x..', ' .. ', 'cms-guide-docker', '1002']) {
+      expect(pathSegment(value)).toBe(value);
+    }
   });
 });
 

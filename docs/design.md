@@ -96,13 +96,14 @@ These fields are written by the portal's contributors. They are data, never inst
 
 Any other string relayed from a record gets the same inline treatment.
 
-`format()` handles them through `src/services/cern-opendata/text.ts`:
+`format()`, notices and error messages handle them through `src/services/cern-opendata/text.ts`:
 
 1. **HTML to text.** Tags are dropped; `<p>`, `<br>`, `<li>`, headings and `<blockquote>` become line breaks; `<a href>` becomes `text <url>`; entities are decoded. Each step is one pass over the text, so conversion time is linear in the field (Decision 36).
 2. **Free text is fenced.** Descriptions, bodies, abstracts and quoted guide sections go inside a fence whose backtick run is longer than any run in the text, so a markdown body's own fences cannot close it.
 3. **Inline slots are neutralized.** Headings, bold labels, list items and table cells flatten CR/LF to a space, escape `[ ]` as `\[ \]`, `< >` as `&lt; &gt;` and `|` as `\|`, and strip C0/C1 control characters and the bidi controls U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069.
 4. **Printed URLs** percent-encode `[`, `]` and spaces.
 5. **`structuredContent` keeps every string as received.** HTML stays HTML, in fields suffixed `_html`. The only alterations are the doc-body cap (Decision 14) and the guide-section cap (Decision 18), both flagged in the output.
+6. **Values echoed in notices and error messages** go through `noticeValue`: cut at 200 characters (`…` marks the cut), then neutralized as an inline slot. That covers guide slugs and anchors, doc slugs and portal URLs (printed), child recids, validated-run list recids, titles and run periods, and the portal's 400 message. Error `data` (`upstreamMessage`, `recid`, `key`, `statusText`) keeps each value as received, and the HTTP reason phrase of an unexpected status never enters the message (Decision 38).
 
 An absent optional field renders as `Not available`, never as `0`, `false` or an empty string.
 
@@ -327,12 +328,12 @@ The call sequence and degrade rules are under Workflow Analysis.
 | `software` | `{ release?, global_tag?, container_images: { name, registry }[], environment_recid?, description? }` | `system_details`; `container_images` is `[]` when absent |
 | `environment_records[]` | `{ recid, title?, kind: 'condition' \| 'vm' \| 'validation' \| 'other', run_period?, portal_url }` | leg-2 hits with `type.primary: Environment`; `kind` comes from the secondary type |
 | `example_software[]` | `{ recid, title?, secondary[], license_id?, source_code_repository_url?, portal_url }` | leg-2 hits with `type.primary: Software` |
-| `guides[]` | `{ slug, url, link_description?, anchor?, title?, section?, section_truncated?, fetched }` | every `usage.links` entry whose URL is a portal doc page, relative (`/docs/{slug}[#anchor]`) or absolute (`http(s)://opendata.cern.ch/docs/…`); `url` is printed in its absolute form. The first two are fetched (Decision 18). `section` is markdown as received; `fetched: false` when not fetched or not found. |
-| `other_links[]` | `{ url, description? }` | the remaining `usage.links` entries (for example `/getting-started/cms/2011`), relative URLs made absolute on the portal host |
+| `guides[]` | `{ slug, url, link_description?, anchor?, title?, section?, section_truncated?, fetched }` | every `usage.links` entry whose URL is a portal doc page, relative (`/docs/{slug}[#anchor]`) or absolute (`http(s)://opendata.cern.ch/docs/…`); `url` is printed in its absolute form. The first two are fetched (Decision 18). `anchor` is set only for a fragment of 1–100 letters, digits, `_`, `.`, `:` or `-`; any other fragment is no anchor (Decision 39). `section` is markdown as received; `fetched: false` when not fetched or not found. |
+| `other_links[]` | `{ url, description? }` | the remaining `usage.links` entries (for example `/getting-started/cms/2011`), relative URLs made absolute on the portal host. A doc link whose slug is `.` or `..` lands here and is never fetched (Decision 39). |
 | `separately_licensed` | `true` | |
 | `license_note` | string | `Container images, software and guide code are licensed separately from the CC0 data; each software record states its own license.` |
 
-**Section extraction.** With an anchor, the section runs from the heading line containing `<a name="{anchor}">` to the next heading of the same or higher level (the same number of `#` or fewer). Without an anchor, or when no heading carries the anchor, it runs from the start of the body to the second level-2 heading (Decision 27). Lines inside fenced code blocks are never read as headings, since guide shell snippets carry `#` comments. Either way it is cut at 12,000 characters, with `section_truncated: true`. When both fetched links name the same slug, the doc is read once.
+**Section extraction.** With an anchor, the section runs from the heading line containing `<a name="{anchor}">` to the next heading of the same or higher level (the same number of `#` or fewer). Without an anchor (a fragment that is not an anchor name counts as none, and draws no notice), or when no heading carries the anchor, it runs from the start of the body to the second level-2 heading (Decision 27). Lines inside fenced code blocks are never read as headings, since guide shell snippets carry `#` comments. Either way it is cut at 12,000 characters, with `section_truncated: true`. When both fetched links name the same slug, the doc is read once.
 
 **Enrichment.** `notice?`, composed from:
 
@@ -364,7 +365,7 @@ The call sequence and degrade rules are under Workflow Analysis.
 
 Exactly one of `recid` and `run_period` is required; the handler checks the combination (a flat object, which Claude clients need).
 
-**Selection.** Lists come from the cached collection (Decision 17). Two lists are twins when their file keys share a stem: the key with `_MuonPhys`, a trailing `_v<n>` and the extension removed (14208 `…_JSON_v2.txt` pairs with 14209 `…_JSON_MuonPhys.txt`).
+**Selection.** Lists come from the cached collection (Decision 17). A collection entry with no recid or file key is not a list, and neither is one whose recid or file key is `.` or `..`, since the file request cannot carry it (Decision 39). Two lists are twins when their file keys share a stem: the key with `_MuonPhys`, a trailing `_v<n>` and the extension removed (14208 `…_JSON_v2.txt` pairs with 14209 `…_JSON_MuonPhys.txt`).
 
 - When `recid` is a list, it is selected as named. Only an explicit `variant` that differs from the list's own replaces it with its twin, and a notice says so.
 - When `recid` is a dataset, its linked recids are intersected with the collection, and each linked list is replaced by its twin when the requested variant (`full` when omitted) differs.
@@ -492,7 +493,7 @@ Supporting modules under `src/services/cern-opendata/`:
 - `vocabulary.ts`: canonical tables;
 - `identifiers.ts`: recid spelling reduction and the `get_records` id classification (shared by `recidInput` and the handler);
 - `normalize.ts`: hits and records to output shapes, license and citation;
-- `text.ts`: HTML to text, inline neutralization, one-line flattening, fences;
+- `text.ts`: HTML to text, inline neutralization, notice values, one-line flattening, fences;
 - `trigger-parse.ts`;
 - `types.ts`.
 
@@ -507,7 +508,7 @@ Supporting modules under `src/services/cern-opendata/`:
 | `findRecord(recid, budget, ctx)` | `q=recid:{n}&skip_files=1&ondemand=true&size=1` | 8 MiB | hit or `null` |
 | `getManifest(recid, budget, ctx)` | `GET /api/records/{recid}` | 32 MiB | compact manifest or `null` on 404; cached |
 | `getDoc(slug, budget, ctx)` | `GET /api/docs/{slug}` | 2 MiB | doc or `null` on 404 |
-| `getValidatedRunLists(budget, ctx)` | `collections=CMS-Validated-Runs&ondemand=true&size=100`, files included | 8 MiB | the lists with file keys; cached |
+| `getValidatedRunLists(budget, ctx)` | `collections=CMS-Validated-Runs&ondemand=true&size=100`, files included | 8 MiB | the lists with file keys, minus entries whose recid or key is missing, `.` or `..`; cached |
 | `getRunList(recid, key, budget, ctx)` | `GET /record/{recid}/files/{key}` (key URI-encoded) | 2 MiB | `{ [run]: [first, last][] }`, validated with an internal Zod schema. A 404 for a key the collection listed clears the collection cache and throws `upstream_unreadable`. |
 | `startBudget()` | — | — | `{ deadlineAt: now() + 50_000 }`, one per tool call |
 | `dispose()` | — | — | disposes the pacer, clears caches; wired to `createApp({ teardown })` |
@@ -522,7 +523,7 @@ Supporting modules under `src/services/cern-opendata/`:
    - 400 (search only): read it and return it as a rejection result.
    - 404: not-found result for a record, doc or file GET; for search, `upstream_unreadable`.
    - 429: throw `rateLimited(…, { reason: 'rate_limited', retryAfter })`, reading `retry-after` (default 60) only on this status (Decision 10). `withRetry` fails fast, because 60 s exceeds `maxDelayMs`. The pacer's cooldown closes the gate for every queued caller.
-   - Anything else: `throw await httpErrorFromResponse(response, { service: 'CERN Open Data' })`.
+   - Anything else: `httpErrorFromResponse` with `service: 'CERN Open Data'`, on the response rebuilt without `retry-after` (Decision 10) and without its reason phrase. The message reads `CERN Open Data returned HTTP {status}.`; the reason phrase is passed as received in `data.statusText` (Decision 38).
 5. **Bounded read.** Stream `response.body`, counting bytes. Past the ceiling, cancel the reader and throw `serviceUnavailable(…, { reason: 'upstream_unreadable', retryable: false, limitBytes })`. Decode UTF-8. A `JSON.parse` failure, or a failed envelope check (`hits.hits` array and numeric `hits.total` for search; a `metadata` object for record and doc GETs), throws `upstream_unreadable` without `retryable: false`, so it is retried.
 6. **Outside `withRetry`**, rethrow any `data.reason === 'pacer_shed'` (the pacer's own shed and the header gate's) as `rateLimited(…, { reason: 'rate_limited', retryAfter }, { cause })`, so the declared `rate_limited` recovery reaches the wire. The header gate sheds with `pacer_shed` because both `defaultIsTransient` and the pacer's 429 cooldown skip that reason: a client-side shed is never retried and never closes the cooldown gate.
 
@@ -645,6 +646,8 @@ Each decision is grounded in a live probe of the portal (API Reference).
 35. **List items over their element cap skip canonicalization, and the `type` separator is found in one scan.** The list preprocess runs before the element's `.max()`, so canonicalizing an oversized item spent time on text the schema then rejected. An item longer than the cap now passes through trimmed and fails `too_big` as written; `listInput` and `requiredListInput` therefore take a `z.ZodString` element that declares `.max()`. `type` separator normalization finds the first `/` or `:` with one search and trims either side of it, where the earlier `\s*` pattern rescanned a whitespace run from each of its positions. The `collision_energy` whole-value check still reads the untrimmed string: it is linear, and a padded combined value then fails `too_big` instead of splitting into two values with a different meaning.
 36. **Portal HTML, trigger titles and guide markdown are read by single-pass scanners.** `htmlToText` (comments, `<script>` and `<style>`, anchors, block tags, the tag strip), `oneLine`, the trigger title, the abstract's line split and record links, and `get_analysis_env`'s guide-anchor lookup each read their input once. Patterns like `[^>]*` after a tag opener or `\s*` around an optional suffix rescanned the rest of the text from every unclosed tag or space, so time grew with the square of the field (a 200 KB abstract of unclosed anchors took over a second, a 2 MiB guide page minutes). The scanners return exactly what those patterns matched, edge cases included: a quoted `href` may hold `>`, an unclosed comment, script or anchor stays as text, and a title whose path holds a line break gives no path. Time is linear in the field, so these fields carry no size cap and no truncation flag.
 37. **Lookups keyed by portal text match the server's own entries only.** Named character references and environment kinds are `Map`s, so a portal string naming a built-in object member matches nothing: `&constructor;` stays literal, and a secondary type of `constructor` reads as `other` rather than failing the output schema.
+38. **Portal values in notices and error messages pass through one helper, `noticeValue`.** The text trailer renders a notice as one `>` line and an error message as markdown, both with markdown and HTML live, so a slug, anchor, list title or 400 body echoed raw could carry a link, an image or an instruction into the caller's context. `noticeValue` cuts the value at 200 characters and neutralizes it like an inline slot; one helper at every site keeps the rule checkable by search. Error `data` keeps each value as received, as `structuredContent` does. The HTTP reason phrase of an unexpected status is upstream text too, so the response is rebuilt without it before `httpErrorFromResponse` builds the message, and it is passed through as `data.statusText`.
+39. **A portal value is used in a request path or a section lookup only when it has the shape that use needs.** `encodeURIComponent` leaves `.` and `..` as they are, and the URL parser resolves them as dot segments, so a doc slug of `..` would fetch `/api/` and a list key of `..` another route on the portal host. A doc link with such a slug is listed under `other_links` and never fetched, and a collection entry with such a recid or file key is not a list, the same as one missing either. A guide anchor is a fragment of 1–100 letters, digits, `_`, `.`, `:` or `-`, the shape the portal's `<a name>` anchors take; any other fragment is read as no anchor, so it neither enters the section lookup nor draws the anchor notice, and the opening section is quoted.
 
 ## Known Limitations
 

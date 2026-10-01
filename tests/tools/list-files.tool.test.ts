@@ -505,6 +505,23 @@ describe('cern_opendata_list_files children (umbrella records only)', () => {
       'This record holds no files itself; its files sit in 2 child records (80021, 80022). Call cern_opendata_list_files with one of those recids.',
     );
   });
+
+  it('escapes child recids in the umbrella notice and keeps them as received in children', async () => {
+    serve({
+      '710': recordBody({
+        recid: '710',
+        relations: [
+          { type: 'isParentOf', recid: '<img src=x>' },
+          { type: 'isParentOf', recid: '[c](https://evil.example)' },
+        ],
+      }),
+    });
+    const result = success(await run({ recid: '710' }));
+    expect(result.children).toEqual(['<img src=x>', '[c](https://evil.example)']);
+    expect(result.notice).toBe(
+      'This record holds no files itself; its files sit in 2 child records (&lt;img src=x&gt;, \\[c\\](https://evil.example)). Call cern_opendata_list_files with one of those recids.',
+    );
+  });
 });
 
 describe('cern_opendata_list_files enrichment', () => {

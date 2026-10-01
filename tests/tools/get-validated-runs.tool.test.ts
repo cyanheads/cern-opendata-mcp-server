@@ -866,6 +866,61 @@ describe('cern_opendata_get_validated_runs run period', () => {
     expect(result.list).not.toHaveProperty('collision_energy');
     expect(result.matched_lists[0]).not.toHaveProperty('collision_energy');
   });
+
+  it('escapes list recids and titles from the collection in the ambiguity notice', async () => {
+    const odd = validatedListHit({
+      recid: '3002<b>',
+      key: 'Cert_B_JSON.txt',
+      periods: ['Run2098A'],
+    });
+    odd.metadata.title = '[t](https://evil.example) <img src=x>';
+    const plain = validatedListHit({
+      recid: '3001',
+      key: 'Cert_A_JSON.txt',
+      periods: ['Run2098A'],
+    });
+    serve({ collection: searchBody([plain, odd]) });
+    const result = success(await run({ run_period: 'Run2098A' }));
+    expect(result.matched_lists.map((m) => m.recid).sort()).toEqual(['3001', '3002<b>']);
+    expect(result.notice).toContain(
+      '3002&lt;b&gt; — \\[t\\](https://evil.example) &lt;img src=x&gt;',
+    );
+    expect(result.notice).not.toMatch(/(?<!\\)\]\(/);
+    expect(result.notice).not.toMatch(/<(b|img)/);
+  });
+
+  it('escapes the recid of the one selected list in its notice', async () => {
+    const odd = validatedListHit({
+      recid: '3003<b>',
+      key: 'Cert_C_JSON.txt',
+      periods: ['Run2098C'],
+    });
+    installService([
+      portalRoute('/api/records/', () => jsonResponse(searchBody([odd])), {
+        query: (params) => params.get('collections') === 'CMS-Validated-Runs',
+      }),
+      portalRoute(/^\/record\/[^/]+\/files\/.+$/, () => jsonResponse({})),
+    ]);
+    const result = success(await run({ run_period: 'Run2098C' }));
+    expect(result.list?.recid).toBe('3003<b>');
+    expect(result.notice).toBe('List 3003&lt;b&gt; certifies no runs.');
+  });
+
+  it.each([
+    ['recid ..', { recid: '..', key: 'Cert_D_JSON.txt', periods: ['Run2097A'] }],
+    ['recid .', { recid: '.', key: 'Cert_D_JSON.txt', periods: ['Run2097A'] }],
+    ['file key ..', { recid: '3004', key: '..', periods: ['Run2097A'] }],
+    ['file key .', { recid: '3005', key: '.', periods: ['Run2097A'] }],
+  ])(
+    'drops a list whose %s is a dot segment: its period has no list and no file is requested',
+    async (_name, spec) => {
+      const { http } = serve({ specs: [...LIST_SPECS, spec] });
+      const error = errorOf(await run({ run_period: 'Run2097A' }));
+      expect(error.data).toMatchObject({ reason: 'no_validated_runs', run_period: 'Run2097A' });
+      expect(error.message).toBe('No CMS validated-run list covers run period Run2097A.');
+      expect(http.calls).toHaveLength(1);
+    },
+  );
 });
 
 describe('cern_opendata_get_validated_runs runs', () => {

@@ -650,6 +650,25 @@ describe('cern_opendata_get_records documentation bodies', () => {
     );
   });
 
+  it('escapes the slug and prints the portal URL in the cut notice', async () => {
+    servePool([
+      hit('777', {
+        recid: '777',
+        slug: 'x](https://evil.example) <img src=y>',
+        title: 'Odd slug',
+        type: { primary: 'Documentation' },
+        body: { content: 'x'.repeat(30_001), format: 'md' },
+      }),
+    ]);
+    const result = success(await run('777'));
+    expect(result.records[0]?.slug).toBe('x](https://evil.example) <img src=y>');
+    expect(result.notice).toBe(
+      'The body of x\\](https://evil.example) &lt;img src=y&gt; was cut at 30,000 of 30001 characters; read the full page at https://opendata.cern.ch/docs/x%5D%28https%3A%2F%2Fevil.example%29%20%3Cimg%20src%3Dy%3E.',
+    );
+    expect(result.notice).not.toMatch(/(?<!\\)\]\(/);
+    expect(result.notice).not.toContain('<img');
+  });
+
   it('never splits a surrogate pair at the cut', async () => {
     const body = `${'a'.repeat(29_999)}\u{1F600}tail`;
     servePool([

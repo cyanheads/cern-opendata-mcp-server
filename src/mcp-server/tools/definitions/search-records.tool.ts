@@ -20,7 +20,14 @@ import {
   toFacets,
   toSearchHit,
 } from '@/services/cern-opendata/normalize.js';
-import { countOf, fence, inline, NOT_AVAILABLE, printUrl } from '@/services/cern-opendata/text.js';
+import {
+  countOf,
+  fence,
+  inline,
+  NOT_AVAILABLE,
+  noticeValue,
+  printUrl,
+} from '@/services/cern-opendata/text.js';
 import type { SearchParams } from '@/services/cern-opendata/types.js';
 import {
   PARAM_TOPIC,
@@ -524,16 +531,20 @@ export const searchRecords = tool('cern_opendata_search_records', {
       if (isPageWindowRejection(rejection)) {
         throw ctx.fail(
           'page_window_exceeded',
-          `The portal refused the page: ${rejection.message}`,
+          `The portal refused the page: ${noticeValue(rejection.message)}`,
           {
             upstreamMessage: rejection.message,
           },
         );
       }
-      throw ctx.fail('invalid_query', `The portal rejected the search: ${rejection.message}`, {
-        upstreamMessage: rejection.message,
-        ...(rejection.errors ? { upstreamErrors: rejection.errors } : {}),
-      });
+      throw ctx.fail(
+        'invalid_query',
+        `The portal rejected the search: ${noticeValue(rejection.message)}`,
+        {
+          upstreamMessage: rejection.message,
+          ...(rejection.errors ? { upstreamErrors: rejection.errors } : {}),
+        },
+      );
     }
 
     const { page } = outcome;

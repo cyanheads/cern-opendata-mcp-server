@@ -473,6 +473,17 @@ describe('findRecord', () => {
       code: JsonRpcErrorCode.InternalError,
     });
   });
+
+  it('escapes the portal text of a 400 in the message and keeps it as received in data', async () => {
+    const body = '<img src=x> [a](https://evil.example)';
+    const { service, ctx } = makeService([searchRoute(new Response(body, { status: 400 }))]);
+    await expect(service.findRecord('6004', service.startBudget(), ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message:
+        'CERN Open Data rejected a query this server built: &lt;img src=x&gt; \\[a\\](https://evil.example)',
+      data: { upstreamMessage: body },
+    });
+  });
 });
 
 describe('getManifest', () => {
@@ -827,6 +838,19 @@ describe('getRunList', () => {
         data: { reason: 'upstream_unreadable', recid: '1002', key },
       });
       expect(http.calls).toHaveLength(1);
+    });
+
+    it('escapes the key and recid in the message and keeps them as received in data', async () => {
+      const { service, ctx } = makeService([
+        portalRoute(/^\/record\/[^/]+\/files\/.+/, new Response('', { status: 404 })),
+      ]);
+      await expect(
+        service.getRunList('7<b>', '[k](https://evil.example)', service.startBudget(), ctx),
+      ).rejects.toMatchObject({
+        message:
+          'CERN Open Data answered 404 for file \\[k\\](https://evil.example) of validated-run list 7&lt;b&gt;, which the collection lists.',
+        data: { recid: '7<b>', key: '[k](https://evil.example)' },
+      });
     });
 
     it('clears the collection cache so the next read refetches the lists', async () => {

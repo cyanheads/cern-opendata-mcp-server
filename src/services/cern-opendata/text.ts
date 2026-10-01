@@ -1,9 +1,10 @@
 /**
- * @fileoverview Rendering helpers for upstream-authored text in `format()`:
- * HTML to plain text, fenced free text, neutralized inline slots, printable
- * URLs, character caps, and counts that agree with their noun. Portal text is
- * data, never instructions, so it is fenced or neutralized before it reaches
- * markdown; `structuredContent` keeps every string as received.
+ * @fileoverview Rendering helpers for upstream-authored text in `format()`,
+ * notices and error messages: HTML to plain text, fenced free text,
+ * neutralized inline slots and notice values, printable URLs, character caps,
+ * and counts that agree with their noun. Portal text is data, never
+ * instructions, so it is fenced or neutralized before it reaches markdown;
+ * `structuredContent` keeps every string as received.
  * @module services/cern-opendata/text
  */
 
@@ -359,6 +360,25 @@ export function inlineOrNA(value: string | number | undefined): string {
 /** Inline-neutralized values joined by `, `, or {@link NOT_AVAILABLE} when there are none. */
 export function inlineList(values: readonly string[] | undefined): string {
   return values?.length ? values.map(inline).join(', ') : NOT_AVAILABLE;
+}
+
+const NOTICE_VALUE_MAX_CHARS = 200;
+
+/**
+ * A portal-derived value for a notice or an error message: cut at 200
+ * characters (`…` marks the cut), then neutralized like an inline slot. A
+ * notice renders as one `>` line, and an error message as plain markdown, so
+ * markdown and HTML in the value would otherwise be live.
+ */
+export function noticeValue(value: string): string {
+  const capped = capText(value, NOTICE_VALUE_MAX_CHARS);
+  const text = inline(capped.text);
+  return capped.truncated ? `${text}…` : text;
+}
+
+/** {@link noticeValue} of each value joined by `, `, or {@link NOT_AVAILABLE} when there are none. */
+export function noticeList(values: readonly string[] | undefined): string {
+  return values?.length ? values.map(noticeValue).join(', ') : NOT_AVAILABLE;
 }
 
 /** A string cut to at most `maxChars` UTF-16 units, never splitting a surrogate pair. */

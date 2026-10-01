@@ -68,6 +68,15 @@ export function strList(value: unknown): string[] | undefined {
   return strings.length > 0 ? strings : undefined;
 }
 
+/**
+ * A portal value bound for a request path segment, or `undefined` for `.` and
+ * `..`: `encodeURIComponent` leaves them as they are, and the URL parser then
+ * resolves them as dot segments, retargeting the request.
+ */
+export function pathSegment(value: string | undefined): string | undefined {
+  return value === '.' || value === '..' ? undefined : value;
+}
+
 /** `https://opendata.cern.ch/record/{recid}`. */
 export function recordUrl(recid: string): string {
   return `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}`;
@@ -483,12 +492,15 @@ export function runListStem(fileKey: string): string {
     .replace(/_MuonPhys/g, '');
 }
 
-/** A validated-run list from a collection hit; `undefined` when the hit carries no file. */
+/**
+ * A validated-run list from a collection hit; `undefined` when the hit carries
+ * no file, or no recid or file key usable in the file's request path.
+ */
 export function toValidatedRunList(hit: RawHit): ValidatedRunList | undefined {
   const meta = hit.metadata;
-  const recid = str(meta.recid);
+  const recid = pathSegment(str(meta.recid));
   const file = (Array.isArray(meta._files) ? meta._files : (meta.files ?? []))[0];
-  const fileKey = str(file?.key);
+  const fileKey = pathSegment(str(file?.key));
   if (!recid || !fileKey) return;
   return definedOnly<ValidatedRunList>({
     recid,

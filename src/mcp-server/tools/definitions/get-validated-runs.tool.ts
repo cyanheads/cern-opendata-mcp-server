@@ -23,6 +23,8 @@ import {
   inlineList,
   inlineOrNA,
   NOT_AVAILABLE,
+  noticeList,
+  noticeValue,
   oneLine,
   printUrl,
 } from '@/services/cern-opendata/text.js';
@@ -358,14 +360,14 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
           { run_period: runPeriod },
         );
       }
-      selector = `run period ${inline(canonical)}`;
+      selector = `run period ${noticeValue(canonical)}`;
       candidates = lists.filter(
         (list, i) => spellings[i] !== undefined && list.variant === variant,
       );
       if (candidates.length === 0) {
         throw ctx.fail(
           'no_validated_runs',
-          `Run period ${inline(canonical)} has validated-run lists only in the ${OTHER_VARIANT[variant]} variant, none in ${variant}.`,
+          `Run period ${noticeValue(canonical)} has validated-run lists only in the ${OTHER_VARIANT[variant]} variant, none in ${variant}.`,
           { run_period: runPeriod, variant },
         );
       }
@@ -373,7 +375,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       const { recid: selectedRecid } = selection;
       const named = lists.find((list) => list.recid === selectedRecid);
       if (named) {
-        selector = `list ${named.recid}`;
+        selector = `list ${noticeValue(named.recid)}`;
         if (input.variant === undefined || input.variant === named.variant) {
           candidates = [named];
         } else {
@@ -381,13 +383,13 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
           if (!twin) {
             throw ctx.fail(
               'no_validated_runs',
-              `List ${named.recid} is the ${named.variant} variant and has no ${input.variant} twin.`,
+              `List ${noticeValue(named.recid)} is the ${named.variant} variant and has no ${input.variant} twin.`,
               { recid: named.recid, variant: input.variant },
             );
           }
           candidates = [twin];
           fragments.push(
-            `List ${named.recid} is the ${named.variant} variant; its ${twin.variant} twin ${twin.recid} is returned because variant was set. Call cern_opendata_get_validated_runs with recid ${named.recid} and no variant for the list as named.`,
+            `List ${noticeValue(named.recid)} is the ${named.variant} variant; its ${twin.variant} twin ${noticeValue(twin.recid)} is returned because variant was set. Call cern_opendata_get_validated_runs with recid ${noticeValue(named.recid)} and no variant for the list as named.`,
           );
         }
       } else {
@@ -425,7 +427,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
           ),
         );
         if (candidates.length === 0) {
-          const recids = linked.map((list) => list.recid).join(', ');
+          const recids = linked.map((list) => noticeValue(list.recid)).join(', ');
           throw ctx.fail(
             'no_validated_runs',
             linked.length === 1
@@ -441,7 +443,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     const [selected] = candidates;
     if (candidates.length > 1 || !selected) {
       fragments.push(
-        `${candidates.length} validated-run lists match ${selector} (variant ${variant}): ${candidates.map((list) => `${list.recid} — ${inline(list.title)}`).join(', ')}. Call cern_opendata_get_validated_runs again with recid set to one of them; they differ by reconstruction pass and intended use, as their titles state.`,
+        `${candidates.length} validated-run lists match ${selector} (variant ${variant}): ${candidates.map((list) => `${noticeValue(list.recid)} — ${noticeValue(list.title)}`).join(', ')}. Call cern_opendata_get_validated_runs again with recid set to one of them; they differ by reconstruction pass and intended use, as their titles state.`,
       );
       finishListEnrichment(ctx, {
         shown: 0,
@@ -477,22 +479,23 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     const runs = inRange.slice(0, input.limit);
     const next = inRange[input.limit];
 
+    const listRecid = noticeValue(selected.recid);
     if (dataset && defaulted) {
       fragments.push(
-        `Runs are limited to ${defaulted.first}–${defaulted.last}, the first and last run record ${dataset.recid} lists; list ${selected.recid} covers ${inlineList(selected.run_periods)}. For the whole list, call cern_opendata_get_validated_runs with recid ${selected.recid}.`,
+        `Runs are limited to ${defaulted.first}–${defaulted.last}, the first and last run record ${dataset.recid} lists; list ${listRecid} covers ${noticeList(selected.run_periods)}. For the whole list, call cern_opendata_get_validated_runs with recid ${listRecid}.`,
       );
     } else if (dataset && unbounded && spansBeyond(selected, dataset.run_period)) {
       fragments.push(
         dataset.run_period
-          ? `Record ${dataset.recid} lists no run numbers, so the runs span list ${selected.recid}'s whole run periods (${inlineList(selected.run_periods)}), not only the dataset's ${inlineList(dataset.run_period)}; set run_min and run_max to narrow them.`
-          : `Record ${dataset.recid} lists no run numbers or run period, so the runs span list ${selected.recid}'s whole run periods (${inlineList(selected.run_periods)}); set run_min and run_max to narrow them.`,
+          ? `Record ${dataset.recid} lists no run numbers, so the runs span list ${listRecid}'s whole run periods (${noticeList(selected.run_periods)}), not only the dataset's ${noticeList(dataset.run_period)}; set run_min and run_max to narrow them.`
+          : `Record ${dataset.recid} lists no run numbers or run period, so the runs span list ${listRecid}'s whole run periods (${noticeList(selected.run_periods)}); set run_min and run_max to narrow them.`,
       );
     }
     if (allRuns.length === 0) {
-      fragments.push(`List ${selected.recid} certifies no runs.`);
+      fragments.push(`List ${listRecid} certifies no runs.`);
     } else if (inRange.length === 0) {
       fragments.push(
-        `No run of list ${selected.recid} falls in ${boundMin ?? firstRun}–${boundMax ?? lastRun}; the list covers runs ${firstRun}–${lastRun}.`,
+        `No run of list ${listRecid} falls in ${boundMin ?? firstRun}–${boundMax ?? lastRun}; the list covers runs ${firstRun}–${lastRun}.`,
       );
     }
     if (next) {
