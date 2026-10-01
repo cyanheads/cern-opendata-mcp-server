@@ -34,12 +34,21 @@ interface ListOptions {
   isWholeValue?: (raw: string) => boolean;
 }
 
+/** The element schema's `.max()` length; every list element declares one. */
+function lengthCap(element: z.ZodString): number {
+  if (element.maxLength === null)
+    throw new Error('A list element schema needs a .max() length cap.');
+  return element.maxLength;
+}
+
 /**
  * Accept an array of strings or one comma-separated string; split, trim, drop
  * empties, canonicalize, dedupe, and cut at `max + 1` items so an oversized
- * list fails with one `too_big` issue. An empty result becomes `undefined`.
+ * list fails with one `too_big` issue. An item longer than `itemMax` is kept
+ * trimmed but never canonicalized, so the element schema rejects it before any
+ * normalization reads it. An empty result becomes `undefined`.
  */
-function splitList(value: unknown, max: number, options: ListOptions): unknown {
+function splitList(value: unknown, max: number, itemMax: number, options: ListOptions): unknown {
   let items: unknown[];
   if (typeof value === 'string') {
     items = options.isWholeValue?.(value) ? [value] : value.split(',');
@@ -57,8 +66,9 @@ function splitList(value: unknown, max: number, options: ListOptions): unknown {
     }
     const trimmed = item.trim();
     if (trimmed === '') continue;
-    const canonical = options.canonicalize ? options.canonicalize(trimmed) : trimmed;
-    if (!out.includes(canonical)) out.push(canonical);
+    const kept =
+      options.canonicalize && trimmed.length <= itemMax ? options.canonicalize(trimmed) : trimmed;
+    if (!out.includes(kept)) out.push(kept);
   }
   return out.length > 0 ? out : undefined;
 }
@@ -69,13 +79,10 @@ function splitList(value: unknown, max: number, options: ListOptions): unknown {
  * Blank input (`''`, `[]`, `' , '`) reads as unset. Add `.describe()` naming
  * both forms and the cap.
  */
-export function listInput<E extends z.ZodType<string>>(
-  max: number,
-  element: E,
-  options: ListOptions = {},
-) {
+export function listInput(max: number, element: z.ZodString, options: ListOptions = {}) {
+  const itemMax = lengthCap(element);
   return z.preprocess(
-    (value) => splitList(value, max, options),
+    (value) => splitList(value, max, itemMax, options),
     z.array(element).max(max).optional(),
   );
 }
@@ -86,14 +93,17 @@ export function listInput<E extends z.ZodType<string>>(
  * `' , '`) reaches the array schema as `[]`, so it fails with `emptyMessage`
  * rather than as a missing value.
  */
-export function requiredListInput<E extends z.ZodType<string>>(
+export function requiredListInput(
   max: number,
-  element: E,
+  element: z.ZodString,
   emptyMessage = 'At least one value is required.',
 ) {
+  const itemMax = lengthCap(element);
   return z.preprocess(
     (value) =>
-      typeof value === 'string' || Array.isArray(value) ? (splitList(value, max, {}) ?? []) : value,
+      typeof value === 'string' || Array.isArray(value)
+        ? (splitList(value, max, itemMax, {}) ?? [])
+        : value,
     z.array(element).min(1, emptyMessage).max(max),
   );
 }
@@ -120,7 +130,8 @@ export function vocabularyListInput(param: VocabularyParam, max: number) {
           message: 'Glossary entries are not served by this server.',
         })
       : list;
-  return z.preprocess((value) => splitList(value, max, options), checked.optional());
+  const itemMax = lengthCap(element);
+  return z.preprocess((value) => splitList(value, max, itemMax, options), checked.optional());
 }
 
 /**

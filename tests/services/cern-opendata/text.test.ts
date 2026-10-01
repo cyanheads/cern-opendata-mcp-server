@@ -17,10 +17,18 @@ import {
   inline,
   inlineOrNA,
   NOT_AVAILABLE,
+  oneLine,
   PORTAL_ORIGIN,
   printUrl,
 } from '@/services/cern-opendata/text.js';
 import { TRIGGER_ABSTRACT_HTML } from '../../fixtures/cern-opendata-upstream.js';
+
+/** `run`'s result and the milliseconds it took; the bounds below are loose so a busy machine does not flake. */
+function timed<T>(run: () => T): { ms: number; value: T } {
+  const started = performance.now();
+  const value = run();
+  return { ms: performance.now() - started, value };
+}
 
 describe('decodeEntities', () => {
   it('decodes named, decimal and hex references', () => {
@@ -40,6 +48,12 @@ describe('decodeEntities', () => {
     expect(decodeEntities('&bogus; &#0; &#xD800; &#1114112; &#xZZ; & &amp')).toBe(
       '&bogus; &#0; &#xD800; &#1114112; &#xZZ; & &amp',
     );
+  });
+
+  it('leaves names of built-in object members as written', () => {
+    const members = '&constructor; &toString; &valueOf; &hasOwnProperty; &isPrototypeOf;';
+    expect(decodeEntities(members)).toBe(members);
+    expect(htmlToText(`<p>${members}</p>`)).toBe(members);
   });
 });
 
@@ -144,6 +158,34 @@ describe('htmlToText', () => {
       `See also the full list of triggers for CMS 2011 open data: list <${PORTAL_ORIGIN}/record/3000>`,
     );
   });
+
+  it('keeps an unclosed comment, script or anchor as the tag strip leaves it', () => {
+    expect(htmlToText('a<!-- b')).toBe('a<!-- b');
+    expect(htmlToText('a<script>b')).toBe('ab');
+    expect(htmlToText('<a href="/x">open')).toBe('open');
+    expect(htmlToText('a < b')).toBe('a < b');
+  });
+
+  it('reads a quoted href past a > inside the quotes', () => {
+    expect(htmlToText('<a href="/x?a>b">t</a>')).toBe(`t <${PORTAL_ORIGIN}/x?a%3Eb>`);
+  });
+
+  it.each([
+    ['20,000 unclosed anchors', '<a href=x>'.repeat(20_000), ''],
+    [
+      'an anchor whose bare href and text run 20,000 characters each',
+      `<a href=${'x'.repeat(20_000)}>${'y'.repeat(20_000)}`,
+      'y'.repeat(20_000),
+    ],
+    ['20,000 unclosed comments', '<!--'.repeat(20_000), '<!--'.repeat(20_000)],
+    ['20,000 unclosed scripts', '<script>'.repeat(20_000), ''],
+    ['20,000 block tags with no closing >', '<p'.repeat(20_000), '<p'.repeat(20_000)],
+    ['20,000 tag openers with no closing >', '<'.repeat(20_000), '<'.repeat(20_000)],
+  ])('converts %s in linear time', (_shape, html, expected) => {
+    const { ms, value } = timed(() => htmlToText(html));
+    expect(ms).toBeLessThan(250);
+    expect(value).toBe(expected);
+  });
 });
 
 describe('fence', () => {
@@ -207,6 +249,22 @@ describe('inline', () => {
     expect(inlineOrNA(0)).toBe('0');
     expect(inlineOrNA(1234)).toBe('1234');
     expect(inlineOrNA('a|b\nc')).toBe('a\\|b c');
+  });
+});
+
+describe('oneLine', () => {
+  it('collapses each whitespace run holding a line break to one space and leaves other runs', () => {
+    expect(oneLine('a \n b\r\n\tc  d\u{2028}e\u{85}f\u{2029} g')).toBe('a b c  d e f g');
+    expect(oneLine('no breaks  here')).toBe('no breaks  here');
+  });
+
+  it.each([
+    ['40,000 spaces', `a${' '.repeat(40_000)}b`, `a${' '.repeat(40_000)}b`],
+    ['40,000 spaces before a line break', `a${' '.repeat(40_000)}\nb`, 'a b'],
+  ])('flattens %s in linear time', (_shape, text, expected) => {
+    const { ms, value } = timed(() => oneLine(text));
+    expect(ms).toBeLessThan(250);
+    expect(value).toBe(expected);
   });
 });
 

@@ -420,6 +420,20 @@ describe('cern_opendata_get_analysis_env result', () => {
     });
   });
 
+  it('reads a secondary type named like a built-in object member as other', async () => {
+    const env = (recid: string, secondary: string[]) =>
+      hit(recid, { recid, type: { primary: 'Environment', secondary } });
+    serve({
+      docs: DOCS,
+      linked: linkedHits(env('1', ['constructor']), env('2', ['toString', 'VM'])),
+    });
+    const result = success(await run({ recid: '9001' }));
+    expect(result.environment_records.map((e) => [e.recid, e.kind])).toEqual([
+      ['1', 'other'],
+      ['2', 'vm'],
+    ]);
+  });
+
   it('never lists the record itself among its linked records', async () => {
     serve({ records: { '12100': environmentSystemHit }, linked: linkedHits(environmentSystemHit) });
     const result = success(await run({ recid: '12100' }));
@@ -561,6 +575,32 @@ describe('cern_opendata_get_analysis_env guides', () => {
     expect(result.guides[0]?.section).toBe(
       'Text with <a name="target">an anchor</a> in a paragraph.\n\n## H2a\n',
     );
+  });
+
+  it.each([
+    ['name', '<a class="x" name="target">'],
+    ['id, unquoted', "<a href='#' id=target>"],
+    ['id, case-insensitive', '<A ID = "TARGET"/>'],
+    ['name with a trailing space', '<a name="target" >'],
+  ])('finds the anchor in a heading tag by %s', async (_form, tag) => {
+    const record = guideRecord('9116', [{ url: '/docs/tags#target' }]);
+    serve({
+      records: { '9116': record },
+      docs: { tags: docBody('tags', `# Top\n\n## ${tag}Target</a>\n\nBody.\n\n## Next`) },
+    });
+    const result = success(await run({ recid: '9116' }));
+    expect(result.guides[0]?.section).toBe(`## ${tag}Target</a>\n\nBody.\n`);
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  it('scans a heading line of 20,000 unclosed anchor tags in linear time', async () => {
+    const record = guideRecord('9117', [{ url: '/docs/noisy#intro' }]);
+    const noisy = `## ${'<a id '.repeat(20_000)}\n\nNoise.\n\n## <a name="intro">Intro</a>\n\nIntro text.`;
+    serve({ records: { '9117': record }, docs: { noisy: docBody('noisy', noisy) } });
+    const started = performance.now();
+    const result = success(await run({ recid: '9117' }));
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(result.guides[0]?.section).toBe('## <a name="intro">Intro</a>\n\nIntro text.');
   });
 
   it('cuts a section at 12,000 characters, flags it and says how to read the whole page', async () => {

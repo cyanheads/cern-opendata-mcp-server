@@ -52,11 +52,12 @@ const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 const LICENSE_NOTE =
   'Container images, software and guide code are licensed separately from the CC0 data; each software record states its own license.';
 
-const ENVIRONMENT_KINDS: Record<string, 'condition' | 'vm' | 'validation'> = {
-  Condition: 'condition',
-  VM: 'vm',
-  Validation: 'validation',
-};
+/** A `Map`, so a secondary type named like an object member (`constructor`) reads as `other`. */
+const ENVIRONMENT_KINDS = new Map<string, 'condition' | 'vm' | 'validation'>([
+  ['Condition', 'condition'],
+  ['VM', 'vm'],
+  ['Validation', 'validation'],
+]);
 
 /** The heading level of a markdown line, or `undefined` when it is not a heading. */
 function headingLevel(line: string): number | undefined {
@@ -87,6 +88,32 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * Whether `line` holds an `<a>` tag whose `name` or `id` attribute is the
+ * anchor `value` matches (a sticky regex: the anchor, then a quote, space, `/`,
+ * `>` or the line's end), quoted or not. Tag by tag: an attribute must start
+ * before its tag's first `>`, so a tag with no `>` is read to the line's end once.
+ */
+function hasAnchorTag(line: string, value: RegExp): boolean {
+  let resume = 0;
+  for (const open of line.matchAll(/<a\s/gi)) {
+    if (open.index < resume) continue;
+    const start = open.index + open[0].length;
+    const tagEnd = line.indexOf('>', start);
+    const tag = line.slice(start, tagEnd < 0 ? undefined : tagEnd);
+    for (const attr of tag.matchAll(/\b(?:name|id)\s*=\s*(["']?)/gi)) {
+      const valueStart = start + attr.index + attr[0].length;
+      for (const at of attr[1] ? [valueStart, valueStart - 1] : [valueStart]) {
+        value.lastIndex = at;
+        if (value.test(line)) return true;
+      }
+    }
+    if (tagEnd < 0) return false;
+    resume = tagEnd;
+  }
+  return false;
+}
+
+/**
  * The section a guide link points at. With an anchor: from the heading line
  * holding `<a name="{anchor}">` to the next heading of the same or higher
  * level. Without one (or when the anchor is absent): from the start to the
@@ -96,11 +123,10 @@ function extractSection(body: string, anchor: string | undefined) {
   const lines = body.split(/\r?\n/);
   const levels = headingLevels(lines);
   if (anchor) {
-    const marker = new RegExp(
-      `<a\\s[^>]*\\b(?:name|id)\\s*=\\s*["']?${escapeRegExp(anchor)}(?:["'\\s/>]|$)`,
-      'i',
+    const value = new RegExp(`${escapeRegExp(anchor)}(?:["'\\s/>]|$)`, 'iy');
+    const start = lines.findIndex(
+      (line, i) => levels[i] !== undefined && hasAnchorTag(line, value),
     );
-    const start = lines.findIndex((line, i) => levels[i] !== undefined && marker.test(line));
     const level = start >= 0 ? levels[start] : undefined;
     if (level !== undefined) {
       const after = levels.findIndex((l, i) => i > start && l !== undefined && l <= level);
@@ -273,7 +299,7 @@ function toEnvironmentRecord(hit: RawHit): EnvironmentRecordOut {
   return definedOnly<EnvironmentRecordOut>({
     recid: str(meta.recid) ?? String(hit.id),
     title: str(meta.title),
-    kind: secondary.map((s) => ENVIRONMENT_KINDS[s]).find(Boolean) ?? 'other',
+    kind: secondary.map((s) => ENVIRONMENT_KINDS.get(s)).find(Boolean) ?? 'other',
     run_period: strList(meta.run_period),
     portal_url: portalUrlOf(hit),
   });

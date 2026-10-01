@@ -66,6 +66,14 @@ describe('canonicalize', () => {
     expect(canonicalize('collision_energy', '14 TeV')).toBe('14 TeV');
   });
 
+  it('normalizes a type separator in linear time, however much whitespace surrounds it', () => {
+    const spaces = ' '.repeat(1_000_000);
+    const started = performance.now();
+    expect(canonicalize('type', `a${spaces}b`)).toBe(`a${spaces}b`);
+    expect(canonicalize('type', `dataset${spaces}/ collision`)).toBe('Dataset::Collision');
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
   it('is idempotent over every canonical value of every table', () => {
     for (const table of REFERENCE_TABLES) {
       const param = (Object.keys(PARAM_TOPIC) as VocabularyParam[]).find(

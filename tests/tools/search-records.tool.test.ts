@@ -259,6 +259,16 @@ describe('cern_opendata_search_records input', () => {
     expect(http.calls).toHaveLength(0);
   });
 
+  it('rejects a type value holding a million spaces as too long, in linear time', () => {
+    const long = `a${' '.repeat(1_000_000)}b`;
+    for (const type of [long, [long]]) {
+      const started = performance.now();
+      const result = searchRecords.input.safeParse({ type });
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(result.error?.issues[0]).toMatchObject({ code: 'too_big', path: ['type', 0] });
+    }
+  });
+
   it('says Glossary is not served in the rejection', async () => {
     serve(emptySearchBody);
     expect(errorOf(await run({ type: 'Glossary' })).message).toContain(

@@ -106,6 +106,26 @@ describe('listInput', () => {
     expect(canonical.parse('a, A, b')).toEqual(['A', 'B']);
   });
 
+  it('passes an item over the element cap through uncanonicalized, so the element schema rejects it', () => {
+    const seen: string[] = [];
+    const canonical = listInput(5, element, {
+      canonicalize: (item) => {
+        seen.push(item);
+        return item.toUpperCase();
+      },
+    });
+    const result = canonical.safeParse(['a', ` ${'x'.repeat(101)} `]);
+    expect(seen).toEqual(['a']);
+    expect(result.error?.issues).toHaveLength(1);
+    expect(result.error?.issues[0]).toMatchObject({ code: 'too_big', path: [1] });
+    expect(canonical.parse(`a, ${'x'.repeat(100)}`)).toEqual(['A', 'X'.repeat(100)]);
+  });
+
+  it('requires an element schema with a length cap', () => {
+    expect(() => listInput(3, z.string())).toThrow('.max()');
+    expect(() => requiredListInput(3, z.string())).toThrow('.max()');
+  });
+
   it('treats a string isWholeValue accepts as one value instead of splitting it', () => {
     const whole = listInput(5, element, { isWholeValue: (raw) => raw === 'x, y' });
     expect(whole.parse('x, y')).toEqual(['x, y']);
@@ -272,6 +292,41 @@ describe('recidInput', () => {
     expect(optional.parse(undefined)).toBeUndefined();
     expect(optional.parse('recid:6004')).toBe('6004');
     expect(optional.safeParse('abc').success).toBe(false);
+  });
+});
+
+describe('preprocessing a megabyte of caller text', () => {
+  const spaces = ' '.repeat(1_000_000);
+  const long = `a${spaces}b`;
+  const vocabularyParams = [
+    'type',
+    'experiment',
+    'collision_energy',
+    'collision_type',
+    'file_type',
+    'availability',
+  ] as const;
+
+  it.each<[string, z.ZodType, unknown]>([
+    ...vocabularyParams.map((param): [string, z.ZodType, unknown] => [
+      `a ${param} item`,
+      vocabularyListInput(param, 5),
+      long,
+    ]),
+    ['a type item in an array', vocabularyListInput('type', 7), [long]],
+    ['a collection item', listInput(10, element), long],
+    ['an identifier', requiredListInput(20, z.string().max(500)), long],
+    ['a padded recid', recidInput(), `${spaces}6004x`],
+    [
+      'a record URL with a long recid',
+      recidInput(),
+      `https://opendata.cern.ch/record/${'1'.repeat(1_000_000)}x`,
+    ],
+  ])('rejects %s in linear time', (_name, schema, value) => {
+    const started = performance.now();
+    const result = schema.safeParse(value);
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(result.success).toBe(false);
   });
 });
 

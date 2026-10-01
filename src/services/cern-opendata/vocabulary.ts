@@ -262,9 +262,16 @@ const TABLES = Object.fromEntries(
   }),
 ) as Record<VocabularyParam, Map<string, string>>;
 
-/** `/` or a single `:` between primary and secondary becomes `::`. */
+/**
+ * The first `/`, `:` or `::` between primary and secondary becomes `::`, the
+ * whitespace around it dropped. Found with one scan and trims, so the time is
+ * linear however long the whitespace runs.
+ */
 function normalizeTypeSeparator(value: string): string {
-  return value.replace(/\s*(?:::|:|\/)\s*/, '::');
+  const at = value.search(/[:/]/);
+  if (at < 0) return value;
+  const width = value.startsWith('::', at) ? 2 : 1;
+  return `${value.slice(0, at).trimEnd()}::${value.slice(at + width).trimStart()}`;
 }
 
 /**

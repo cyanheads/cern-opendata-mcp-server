@@ -9,7 +9,7 @@
  */
 
 import { str } from './normalize.js';
-import { decodeEntities } from './text.js';
+import { decodeEntities, splitTags, stripTags } from './text.js';
 import type { RawMetadata } from './types.js';
 
 /** A run where the path was seen online, with the HLT menu named beside it. */
@@ -45,10 +45,13 @@ export interface ParsedTrigger {
   versions: TriggerVersion[];
 }
 
-const TITLE = /^High-Level Trigger path information\s+(.+?)(?:\s+\(([^()]+?)\s+dataset\))?\s*$/i;
-const LINE_BREAK = /<\/?(?:p|br|blockquote|div|li|ul|ol)\b[^>]*>/gi;
-const RECORD_HREF =
-  /<a\b[^>]*?\bhref\s*=\s*["']?(?:https?:\/\/opendata\.cern\.ch)?\/record\/(\d+)\b/i;
+const TITLE_PREFIX = /^High-Level Trigger path information(?=\s)/i;
+const DATASET_SUFFIX = /^dataset\)$/i;
+const LINE_TERMINATOR = /[\n\r\u{2028}\u{2029}]/u;
+/** Opens a line-breaking element; {@link splitTags} runs the tag to its `>`. */
+const LINE_BREAK = /<\/?(?:p|br|blockquote|div|li|ul|ol)\b/gi;
+/** A record link's href, read from inside one `<a>` tag. */
+const RECORD_HREF = /\bhref\s*=\s*["']?(?:https?:\/\/opendata\.cern\.ch)?\/record\/(\d+)\b/i;
 const SEEN = /^(first|last)\s+seen\s+online\s+on\s+run\s+(\d+)\b\s*(?:\((.*)\))?/i;
 const VERSION =
   /^V(\d+)\s*:\s*\(\s*runs?\s+(\d+)(?:\s*-\s*(\d+))?\s*\)(?:\s*seeded\s+by\s*:\s*(.+))?$/i;
@@ -60,15 +63,75 @@ interface AbstractLine {
   text: string;
 }
 
+/**
+ * The recid of the first `<a>` tag in `segment` whose href is a portal record
+ * link. Tag by tag, so a tag with no `>` is read to the end of the segment once.
+ */
+function recordLinkRecid(segment: string): string | undefined {
+  let resume = 0;
+  for (const open of segment.matchAll(/<a\b/gi)) {
+    if (open.index < resume) continue;
+    const tagEnd = segment.indexOf('>', open.index + 2);
+    const tag = segment.slice(open.index + 2, tagEnd < 0 ? undefined : tagEnd);
+    const recid = RECORD_HREF.exec(tag)?.[1];
+    if (recid || tagEnd < 0) return recid;
+    resume = tagEnd;
+  }
+  return;
+}
+
 function abstractLines(html: string): AbstractLine[] {
-  return html.split(LINE_BREAK).flatMap((segment) => {
-    const text = decodeEntities(segment.replace(/<[^>]*>/g, ''))
-      .replace(/\s+/g, ' ')
-      .trim();
+  return splitTags(html, LINE_BREAK).flatMap((segment) => {
+    const text = decodeEntities(stripTags(segment)).replace(/\s+/g, ' ').trim();
     if (!text) return [];
-    const recid = RECORD_HREF.exec(segment)?.[1];
+    const recid = recordLinkRecid(segment);
     return [recid ? { text, recid } : { text }];
   });
+}
+
+/**
+ * The path and the raw dataset text of a trimmed trigger title: what
+ * `/^High-Level Trigger path information\s+(.+?)(?:\s+\(([^()]+?)\s+dataset\))?\s*$/i`
+ * captures, read with string scans instead of backtracking. The path is the
+ * text after the prefix, or, when it ends `({Primary} dataset)` with space
+ * before the `(` and before `dataset`, the text up to that space. A path that
+ * holds a line break reads as no path.
+ */
+function titleParts(title: string): { dataset?: string; path?: string } {
+  const prefix = TITLE_PREFIX.exec(title);
+  if (!prefix) return {};
+  const rest = title.slice(prefix[0].length);
+  const body = rest.trimStart();
+  let open = -1;
+  let dataset: string | undefined;
+  if (DATASET_SUFFIX.test(body.slice(-8))) {
+    const inner = body.slice(0, -8);
+    open = inner.lastIndexOf('(');
+    const datasetEnd = Math.max(inner.trimEnd().length, open + 2);
+    if (open >= 0 && inner.indexOf(')', open) < 0 && datasetEnd < inner.length) {
+      dataset = body.slice(open + 1, datasetEnd);
+    }
+  }
+  if (dataset !== undefined && open > 0) {
+    const pathEnd = body.slice(0, open).trimEnd().length;
+    if (pathEnd < open) {
+      const path = body.slice(0, pathEnd);
+      return LINE_TERMINATOR.test(path) ? {} : { path, dataset };
+    }
+  }
+  if (!LINE_TERMINATOR.test(body)) return { path: body };
+  if (dataset === undefined || open > 0) return {};
+  /**
+   * The body is `(… dataset)` and holds a line break, so the regex backs into
+   * the space after the prefix: the path becomes one space character, the last
+   * that is not a line break and still leaves space before the `(`.
+   */
+  const gap = rest.slice(0, rest.length - body.length);
+  for (let i = gap.length - 2; i >= 1; i--) {
+    const char = gap.charAt(i);
+    if (!LINE_TERMINATOR.test(char)) return { path: char, dataset };
+  }
+  return {};
 }
 
 function seenRun(run: string, menu: string | undefined, recid: string | undefined): TriggerRunSeen {
@@ -85,10 +148,10 @@ function seenRun(run: string, menu: string | undefined, recid: string | undefine
  * abstract (`abstract.description`, HTML) gives the rest. Never throws.
  */
 export function parseTrigger(meta: RawMetadata): ParsedTrigger {
-  const title = TITLE.exec(str(meta.title)?.trim() ?? '');
+  const title = titleParts(str(meta.title)?.trim() ?? '');
   const out: ParsedTrigger = { parsed: false, versions: [] };
-  if (title?.[1]) out.path = title[1];
-  if (title?.[2]) out.dataset = title[2].trim();
+  if (title.path) out.path = title.path;
+  if (title.dataset) out.dataset = title.dataset.trim();
 
   for (const line of abstractLines(str(meta.abstract?.description) ?? '')) {
     const seen = SEEN.exec(line.text);

@@ -128,6 +128,12 @@ describe('parseTrigger: title', () => {
     ],
     ['High-Level Trigger path information HLT_Jet30_v1 (Jet dataset)', 'HLT_Jet30_v1', 'Jet'],
     ['High-Level Trigger path information HLT_X (Mu Run2011A dataset)', 'HLT_X', 'Mu Run2011A'],
+    ['High-Level Trigger path information HLT_X(Mu dataset)', 'HLT_X(Mu dataset)', undefined],
+    ['High-Level Trigger path information (Mu dataset)', '(Mu dataset)', undefined],
+    ['High-Level Trigger path information HLT_X (a)b dataset)', 'HLT_X (a)b dataset)', undefined],
+    ['High-Level Trigger path information HLT_X (Mu\ndataset)', 'HLT_X', 'Mu'],
+    ['High-Level Trigger path information HLT_X ( \n dataset)', 'HLT_X', ''],
+    ['High-Level Trigger path information   (Mu\ndataset)', ' ', 'Mu'],
   ])('reads %j as path %s and dataset %s', (title, path, dataset) => {
     const parsed = parseTrigger({ title });
     expect(parsed.path).toBe(path);
@@ -139,6 +145,11 @@ describe('parseTrigger: title', () => {
     ['an unrelated title', 'Something else entirely'],
     ['an empty title', ''],
     ['the prefix alone', 'High-Level Trigger path information'],
+    ['a path holding a line break', 'High-Level Trigger path information HLT\n_X (Mu dataset)'],
+    [
+      'a dataset suffix holding a line break two spaces after the prefix',
+      'High-Level Trigger path information  (Mu\ndataset)',
+    ],
   ])('reads %s as no path and no dataset', (_name, title) => {
     const parsed = parseTrigger({ title });
     expect(parsed).not.toHaveProperty('path');
@@ -357,5 +368,55 @@ describe('parseTrigger: malformed metadata never throws', () => {
     const parsed = parseTrigger(meta(lines('first seen online on run 0 (/m/V1)', ...rows)));
     expect(parsed.versions).toHaveLength(2_000);
     expect(parsed.parsed).toBe(true);
+  });
+
+  it('leaves names of built-in object members as written in menus and seeds', () => {
+    const parsed = parseTrigger(
+      meta(
+        lines('first seen online on run 1 (&constructor;)', 'V1: (run 1) seeded by: L1_&valueOf;'),
+      ),
+    );
+    expect(parsed.first_seen).toEqual({ run: 1, menu: '&constructor;' });
+    expect(parsed.versions[0]?.l1_seed).toBe('L1_&valueOf;');
+  });
+});
+
+describe('parseTrigger: long and unclosed text is read in linear time', () => {
+  /** `run`'s result and the milliseconds it took; the bound is loose so a busy machine does not flake. */
+  const timed = <T>(run: () => T) => {
+    const started = performance.now();
+    const value = run();
+    return { ms: performance.now() - started, value };
+  };
+
+  it('reads a title whose path holds 40,000 spaces', () => {
+    const path = `x${' '.repeat(40_000)}y`;
+    const { ms, value } = timed(() =>
+      parseTrigger({ title: `High-Level Trigger path information ${path}` }),
+    );
+    expect(ms).toBeLessThan(250);
+    expect(value.path).toBe(path);
+    expect(value).not.toHaveProperty('dataset');
+  });
+
+  it('reads a dataset suffix padded with 40,000 spaces', () => {
+    const spaces = ' '.repeat(40_000);
+    const { ms, value } = timed(() =>
+      parseTrigger({
+        title: `High-Level Trigger path information HLT_X${spaces}(Mu${spaces}dataset)`,
+      }),
+    );
+    expect(ms).toBeLessThan(250);
+    expect(value).toMatchObject({ path: 'HLT_X', dataset: 'Mu' });
+  });
+
+  it.each([
+    ['20,000 block tags with no closing >', '<p'.repeat(20_000)],
+    ['20,000 anchors with no closing >', '<a '.repeat(20_000)],
+    ['20,000 tag openers with no closing >', '<'.repeat(20_000)],
+  ])('reads an abstract of %s', (_shape, description) => {
+    const { ms, value } = timed(() => parseTrigger({ title: TITLE, abstract: { description } }));
+    expect(ms).toBeLessThan(250);
+    expect(value).toMatchObject({ parsed: false, versions: [] });
   });
 });
