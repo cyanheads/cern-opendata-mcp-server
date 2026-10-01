@@ -2,16 +2,32 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cern-opendata-mcp-server",
   "version": "0.1.0",
-  "description": "CERN Open Data Portal: search LHC collision and simulated datasets, analysis environments, and trigger configurations from ATLAS, CMS, ALICE, and LHCb.",
+  "description": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "https://github.com/cyanheads/cern-opendata-mcp-server",
+  "homepage": "https://github.com/cyanheads/cern-opendata-mcp-server#readme",
   "repository": "https://github.com/cyanheads/cern-opendata-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "cern", "open-data", "particle-physics", "lhc", "cms", "atlas"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "cern",
+    "cern-open-data",
+    "open-data",
+    "particle-physics",
+    "high-energy-physics",
+    "lhc",
+    "cms",
+    "atlas",
+    "alice",
+    "lhcb",
+    "xrootd"
+  ],
   "mcpServers": {
     "cern-opendata-mcp-server": {
       "command": "npx",

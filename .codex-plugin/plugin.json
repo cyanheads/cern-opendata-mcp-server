@@ -1,23 +1,39 @@
 {
   "name": "cern-opendata-mcp-server",
   "version": "0.1.0",
-  "description": "CERN Open Data Portal: search LHC collision and simulated datasets, analysis environments, and trigger configurations from ATLAS, CMS, ALICE, and LHCb.",
+  "description": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "https://github.com/cyanheads/cern-opendata-mcp-server",
+  "homepage": "https://github.com/cyanheads/cern-opendata-mcp-server#readme",
   "repository": "https://github.com/cyanheads/cern-opendata-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "cern", "open-data", "particle-physics", "lhc", "cms", "atlas"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "cern",
+    "cern-open-data",
+    "open-data",
+    "particle-physics",
+    "high-energy-physics",
+    "lhc",
+    "cms",
+    "atlas",
+    "alice",
+    "lhcb",
+    "xrootd"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "cern-opendata-mcp-server",
-    "shortDescription": "Search LHC collision datasets, simulations, and analysis environments from the CERN Open Data Portal.",
-    "longDescription": "Read access to the CERN Open Data Portal, the public archive of experimental particle physics data from the Large Hadron Collider. Search collision and simulated datasets from ATLAS, CMS, ALICE, and LHCb by experiment, beam energy, collision type, and data format, inspect file manifests and DOIs, and find the analysis environments, validated run lists, and trigger configurations tied to a dataset. No API key required.",
+    "shortDescription": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths.",
+    "longDescription": "Read the CERN Open Data Portal, the public archive of collision, simulated and derived datasets, analysis software, environments and documentation from ALICE, ATLAS, CMS, LHCb and other experiments. Search it with exact-vocabulary filters (experiment, record type, collision energy and type, file format, year, event count, availability) and live facet counts; open records by recid, DOI, CMS dataset path or documentation slug, each with its license and a ready citation; page through file manifests for XRootD URIs and HTTPS download URLs; and assemble a record's analysis environment: container images, CMSSW release, global tag, condition and VM records, example software, and quoted guide sections. For CMS data it also returns validated-run (good-run) lists and High-Level Trigger path records. A reference tool decodes the portal's vocabulary. No API key required, and requests are paced under the portal's limit of 60 a minute. Dataset metadata and data are CC0 under the CERN Open Data Terms of Use; software, container images and guide code are licensed per record.",
     "developerName": "cyanheads",
-    "category": "Research",
+    "category": "research",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/cern-opendata-mcp-server",
     "defaultPrompt": []

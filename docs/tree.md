@@ -1,6 +1,6 @@
 # cern-opendata-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 10:44:29
+Generated on: 2026-10-01 12:11:10
 
 ```text
 cern-opendata-mcp-server/
@@ -24,6 +24,7 @@ cern-opendata-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -200,12 +201,14 @@ cern-opendata-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
