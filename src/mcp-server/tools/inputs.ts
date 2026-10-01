@@ -137,14 +137,14 @@ export function vocabularyListInput(param: VocabularyParam, max: number) {
 /**
  * A required recid: trims, strips a leading `recid:` (any case), reduces
  * `http(s)://opendata.cern.ch/record/{n}` or `/api/records/{n}` (any trailing
- * path, query or fragment) to `n`, strips leading zeros, then requires digits
- * (so an all-zero recid is rejected). For an optional recid use
+ * path, query or fragment) to `n`, strips leading zeros, then requires 1-12
+ * digits (so an all-zero recid is rejected). For an optional recid use
  * `blankAsUnset(recidInput().optional())`.
  */
 export function recidInput() {
   return z.preprocess(
     (value) => (typeof value === 'string' ? reduceRecidSpelling(value) : value),
-    z.string().regex(/^\d+$/, 'A recid is digits, such as 6004.'),
+    z.string().regex(/^\d{1,12}$/, 'A recid is 1-12 digits, such as 6004.'),
   );
 }
 

@@ -205,16 +205,21 @@ describe('cern_opendata_get_validated_runs input', () => {
     expect(result.list?.recid).toBe('1002');
   });
 
-  it.each([['abc'], ['60o4'], ['-1'], ['12.5'], ['0'], ['https://evil.example/record/1002']])(
-    'rejects the recid %j as invalid arguments before any request',
-    async (recid) => {
-      const { http } = serve();
-      const result = await run({ recid });
-      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(errorOf(result).data).toMatchObject({ reason: 'invalid_arguments' });
-      expect(http.calls).toHaveLength(0);
-    },
-  );
+  it.each([
+    ['abc'],
+    ['60o4'],
+    ['-1'],
+    ['12.5'],
+    ['0'],
+    ['https://evil.example/record/1002'],
+    ['1234567890123'],
+  ])('rejects the recid %j as invalid arguments before any request', async (recid) => {
+    const { http } = serve();
+    const result = await run({ recid });
+    expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorOf(result).data).toMatchObject({ reason: 'invalid_arguments' });
+    expect(http.calls).toHaveLength(0);
+  });
 
   it('reads blank strings on every optional input as unset', () => {
     expect(

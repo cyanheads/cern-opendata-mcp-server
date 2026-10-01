@@ -230,7 +230,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: blankAsUnset(recidInput().optional()).describe(
-      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): digits, recid:N or a portal record URL. Give this or run_period.',
+      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): up to 12 digits, recid:N or a portal record URL. Give this or run_period.',
     ),
     run_period: blankAsUnset(
       z.preprocess(

@@ -28,6 +28,7 @@ import type { RawHit, SearchParams } from '@/services/cern-opendata/types.js';
 import {
   composeNotice,
   finishListEnrichment,
+  lastPageNotice,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
@@ -333,7 +334,16 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
       fragments.push(
         hasMore
           ? `Showing ${from}–${to} of ${page.total}; call cern_opendata_search_trigger_paths again with page ${input.page + 1}, or add year.`
-          : `Showing ${from}–${to} of ${page.total}; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.`,
+          : lastPageNotice(
+              'cern_opendata_search_trigger_paths',
+              'Add year or a longer path prefix',
+              {
+                from,
+                to,
+                total: page.total,
+                limit: input.limit,
+              },
+            ),
       );
     }
 

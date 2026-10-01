@@ -38,6 +38,7 @@ import {
 import {
   composeNotice,
   finishListEnrichment,
+  lastPageNotice,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
@@ -617,7 +618,12 @@ export const searchRecords = tool('cern_opendata_search_records', {
         );
       } else {
         fragments.push(
-          `Showing ${from}–${to} of ${page.total}; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.`,
+          lastPageNotice('cern_opendata_search_records', 'Add filters', {
+            from,
+            to,
+            total: page.total,
+            limit: input.limit,
+          }),
         );
       }
     }

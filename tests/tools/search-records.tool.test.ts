@@ -752,13 +752,58 @@ describe('cern_opendata_search_records enrichment', () => {
     );
   });
 
-  it('ends paging at the last whole page when the limit does not divide 10,000', async () => {
-    serve(searchBody(syntheticHits(30), { total: 60_383 }));
-    const result = success(await run({ limit: 30, page: 333 }));
-    expect(result).toMatchObject({ truncated: true, has_more: false });
-    expect(result.notice).toBe(
-      'Showing 9961–9990 of 60383; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.',
-    );
+  describe('the last page at a limit that does not divide 10,000 names the call for the matches after it', () => {
+    const lastPage = 'this is the last page at limit';
+    const window = 'since the portal pages no deeper than match 10,000';
+    it.each([
+      [
+        30,
+        333,
+        60_383,
+        `Showing 9961–9990 of 60383; ${lastPage} 30, ${window}. For matches 9991–10000, call cern_opendata_search_records again with limit 10 and page 1000. Add filters to reach the matches past 10,000.`,
+      ],
+      [
+        30,
+        333,
+        9_995,
+        `Showing 9961–9990 of 9995; ${lastPage} 30, ${window}. For matches 9991–9995, call cern_opendata_search_records again with limit 10 and page 1000.`,
+      ],
+      [
+        30,
+        333,
+        9_991,
+        `Showing 9961–9990 of 9991; ${lastPage} 30, ${window}. For match 9991, call cern_opendata_search_records again with limit 10 and page 1000.`,
+      ],
+      [
+        7,
+        1_428,
+        60_383,
+        `Showing 9990–9996 of 60383; ${lastPage} 7, ${window}. For matches 9997–10000, call cern_opendata_search_records again with limit 10 and page 1000; its matches 9991–9996 are already on this page. Add filters to reach the matches past 10,000.`,
+      ],
+      [
+        41,
+        243,
+        60_383,
+        `Showing 9923–9963 of 60383; ${lastPage} 41, ${window}. For matches 9964–10000, call cern_opendata_search_records again with limit 40 and page 250; its matches 9961–9963 are already on this page. Add filters to reach the matches past 10,000.`,
+      ],
+      [
+        29,
+        344,
+        9_990,
+        `Showing 9948–9976 of 9990; ${lastPage} 29, ${window}. For matches 9977–9990, call cern_opendata_search_records again with limit 25 and page 400; its match 9976 is already on this page.`,
+      ],
+      [
+        3,
+        3_333,
+        60_383,
+        `Showing 9997–9999 of 60383; ${lastPage} 3, ${window}. For match 10000, call cern_opendata_search_records again with limit 10 and page 1000; its matches 9997–9999 are already on this page. Add filters to reach the matches past 10,000.`,
+      ],
+    ])('limit %i, page %i, total %i', async (limit, page, total, notice) => {
+      serve(searchBody(syntheticHits(limit), { total }));
+      const result = success(await run({ limit, page }));
+      expect(result).toMatchObject({ truncated: true, has_more: false, shown: limit });
+      expect(result.notice).toBe(notice);
+    });
   });
 
   it('reports more pages from the total when the portal sends no links.next', async () => {

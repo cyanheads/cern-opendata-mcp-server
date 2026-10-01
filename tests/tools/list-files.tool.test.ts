@@ -161,6 +161,17 @@ describe('cern_opendata_list_files input', () => {
     expect(http.calls).toHaveLength(0);
   });
 
+  it.each([['1234567890123'], ['7'.repeat(1_000_000)]])(
+    'rejects a recid of 13 digits or more before any request, without echoing it (%#)',
+    async (recid) => {
+      const { http } = serve();
+      const result = await run({ recid });
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(JSON.stringify(result)).not.toContain(recid.slice(0, 13));
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
   it('requires a recid even for a form client that sends only blanks', async () => {
     serve();
     const result = await run({ recid: '', index: '', cursor: '', limit: '' } as never);

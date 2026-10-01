@@ -21,9 +21,9 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   params: z.object({
     recid: z
       .string()
-      .regex(/^0*[1-9]\d*$/, 'A recid is digits, such as 6004.')
+      .regex(/^0*[1-9]\d{0,11}$/, 'A recid is 1-12 digits, such as 6004.')
       .describe(
-        'Record id: digits, such as 6004; leading zeros are ignored. cern_opendata_search_records and cern_opendata_get_records return it.',
+        'Record id: up to 12 digits, such as 6004; leading zeros are ignored. cern_opendata_search_records and cern_opendata_get_records return it.',
       ),
   }),
   output: RecordSchema,

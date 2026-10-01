@@ -350,7 +350,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
-      'Record id: digits (6004), recid:6004, or a portal record URL. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), recid:6004, or a portal record URL. cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
   }),
   output: GetAnalysisEnvOutput,

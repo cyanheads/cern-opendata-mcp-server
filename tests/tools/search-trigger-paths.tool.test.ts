@@ -536,6 +536,29 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
     expect(result.notice).not.toContain('page 201');
   });
 
+  it.each([
+    [
+      30,
+      333,
+      35_747,
+      'Showing 9961–9990 of 35747; this is the last page at limit 30, since the portal pages no deeper than match 10,000. For matches 9991–10000, call cern_opendata_search_trigger_paths again with limit 10 and page 1000. Add year or a longer path prefix to reach the matches past 10,000.',
+    ],
+    [
+      41,
+      243,
+      9_970,
+      'Showing 9923–9963 of 9970; this is the last page at limit 41, since the portal pages no deeper than match 10,000. For matches 9964–9970, call cern_opendata_search_trigger_paths again with limit 40 and page 250; its matches 9961–9963 are already on this page.',
+    ],
+  ])(
+    'on the last page at limit %i (page %i, total %i), names the call for the matches after it',
+    async (limit, page, total, notice) => {
+      serve(searchBody(triggerHits(limit), { total }));
+      const result = success(await run({ path: 'HLT_Mu*', limit, page }));
+      expect(result).toMatchObject({ truncated: true, has_more: false, shown: limit });
+      expect(result.notice).toBe(notice);
+    },
+  );
+
   it('points the page before the window edge at the next page normally', async () => {
     serve(searchBody(triggerHits(50), { total: 35_747, hasNext: true }));
     const result = success(await run({ path: 'HLT_Mu*', limit: 50, page: 199 }));

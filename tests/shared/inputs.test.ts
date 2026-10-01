@@ -259,8 +259,18 @@ describe('recidInput', () => {
     ['http://opendata.cern.ch/record/6004', '6004'],
     ['https://opendata.cern.ch/api/records/6004', '6004'],
     ['https://opendata.cern.ch/record/6004/files/x.root?download=1#top', '6004'],
+    ['123456789012', '123456789012'],
+    ['0123456789012', '123456789012'],
   ])('reduces %j to %j', (raw, expected) => {
     expect(recid.parse(raw)).toBe(expected);
+  });
+
+  it('rejects a recid of 13 digits or more without echoing it', () => {
+    for (const raw of ['1234567890123', '7'.repeat(1_000_000)]) {
+      const result = recid.safeParse(raw);
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result.error?.issues)).not.toContain(raw.slice(0, 13));
+    }
   });
 
   it.each([
@@ -282,7 +292,7 @@ describe('recidInput', () => {
 
   it('explains the expected form in the error', () => {
     const result = recid.safeParse('abc');
-    expect(result.error?.issues[0]?.message).toBe('A recid is digits, such as 6004.');
+    expect(result.error?.issues[0]?.message).toBe('A recid is 1-12 digits, such as 6004.');
   });
 
   it('reads a blank as unset when wrapped with blankAsUnset(...optional())', () => {

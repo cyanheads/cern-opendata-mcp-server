@@ -200,16 +200,22 @@ describe('cern_opendata_get_analysis_env input', () => {
     expect(requestedUrls(http)[0]?.searchParams.get('q')).toBe('recid:9001');
   });
 
-  it.each([[''], ['   '], ['abc'], ['-1'], ['12.5'], ['0'], ['https://evil.example/record/9001']])(
-    'rejects the recid %j as invalid arguments before any request',
-    async (recid) => {
-      const { http } = serve();
-      const result = await run({ recid });
-      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(errorOf(result).data).toMatchObject({ reason: 'invalid_arguments' });
-      expect(http.calls).toHaveLength(0);
-    },
-  );
+  it.each([
+    [''],
+    ['   '],
+    ['abc'],
+    ['-1'],
+    ['12.5'],
+    ['0'],
+    ['https://evil.example/record/9001'],
+    ['1234567890123'],
+  ])('rejects the recid %j as invalid arguments before any request', async (recid) => {
+    const { http } = serve();
+    const result = await run({ recid });
+    expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorOf(result).data).toMatchObject({ reason: 'invalid_arguments' });
+    expect(http.calls).toHaveLength(0);
+  });
 
   it('requires a recid: a missing key is invalid arguments', async () => {
     const { http } = serve();

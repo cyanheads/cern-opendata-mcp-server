@@ -98,14 +98,26 @@ describe('cern-opendata://record/{recid} registration', () => {
 });
 
 describe('cern-opendata://record/{recid} params', () => {
-  it.each([['6004'], ['1'], ['0123']])('accepts the digits %j', (recid) => {
-    expect(paramsFor(recid)).toEqual({ recid });
-  });
+  it.each([['6004'], ['1'], ['0123'], ['123456789012'], ['0123456789012']])(
+    'accepts the digits %j',
+    (recid) => {
+      expect(paramsFor(recid)).toEqual({ recid });
+    },
+  );
 
   it.each([[''], ['abc'], ['60o4'], [' 6004'], ['6004 '], ['-1'], ['12.5'], ['recid:6004']])(
     'rejects %j',
     (recid) => {
       expect(recordResource.params?.safeParse({ recid }).success).toBe(false);
+    },
+  );
+
+  it.each([['1234567890123'], ['7'.repeat(1_000_000)]])(
+    'rejects a recid of 13 digits or more without echoing it (%#)',
+    (recid) => {
+      const result = recordResource.params?.safeParse({ recid });
+      expect(result?.success).toBe(false);
+      expect(JSON.stringify(result?.error?.issues)).not.toContain(recid.slice(0, 13));
     },
   );
 });

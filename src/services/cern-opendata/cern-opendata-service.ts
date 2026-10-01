@@ -48,6 +48,8 @@ const MAX_QUEUE_WAIT_MS = 20_000;
 const ATTEMPT_TIMEOUT_MS = 30_000;
 /** `retry-after` default for a 429 that omits it (the portal's window is a minute). */
 const DEFAULT_RETRY_AFTER_S = 60;
+/** The portal's rate-limit window: 60 requests per client IP per minute. */
+const RATE_WINDOW_MS = 60_000;
 const CACHE_TTL_MS = 15 * 60_000;
 const VALIDATED_RUNS_COLLECTION = 'CMS-Validated-Runs';
 const SERVICE_LABEL = 'CERN Open Data';
@@ -357,7 +359,7 @@ export class CernOpenDataService {
     this.#listCacheTtlMs = options.listCacheTtlMs ?? CACHE_TTL_MS;
     this.#pacer = createPacer({
       name: 'cern-opendata',
-      limits: [{ requests: 50, perMs: 60_000 }],
+      limits: [{ requests: 50, perMs: RATE_WINDOW_MS }],
       maxConcurrent: 4,
       cooldown: { baseMs: 60_000, maxMs: 120_000 },
     });
@@ -619,6 +621,7 @@ export class CernOpenDataService {
       const response = await this.#fetch(spec.url, {
         signal: AbortSignal.any([signal, perAttempt.signal]),
         headers: { accept: 'application/json', 'user-agent': this.#userAgent },
+        redirect: 'manual',
       });
       this.#updateGate(response.headers);
       return await this.#dispatch(spec, response, ctx);
@@ -640,6 +643,13 @@ export class CernOpenDataService {
   async #dispatch<T>(spec: RequestSpec<T>, response: Response, ctx: Context): Promise<Fetched<T>> {
     const { accept, limitBytes } = ROUTES[spec.route];
     const { status } = response;
+    if (status >= 300 && status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      throw serviceUnavailable(
+        `${SERVICE_LABEL} answered ${status}, a redirect this server does not follow.`,
+        { status, retryable: false },
+      );
+    }
     if (!accept.has(status)) throw await unexpectedStatus(response);
     if (status === 429) {
       await response.body?.cancel().catch(() => undefined);
@@ -695,11 +705,17 @@ export class CernOpenDataService {
     );
   }
 
+  /**
+   * Record the last rate-limit headers. The reset is clamped to one window past
+   * now: the portal's window is a minute, and a later reset (a skewed clock or
+   * a faulty header) would otherwise shed every call until then, since a shed
+   * sends no request that could bring fresher headers.
+   */
   #updateGate(headers: Headers): void {
     const remaining = Number.parseInt(headers.get('x-ratelimit-remaining') ?? '', 10);
     const reset = Number.parseInt(headers.get('x-ratelimit-reset') ?? '', 10);
     if (Number.isFinite(remaining) && Number.isFinite(reset)) {
-      this.#gate = { remaining, resetAtMs: reset * 1000 };
+      this.#gate = { remaining, resetAtMs: Math.min(reset * 1000, this.#now() + RATE_WINDOW_MS) };
     }
   }
 }

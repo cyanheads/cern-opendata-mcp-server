@@ -325,6 +325,30 @@ describe('per-route accept-list', () => {
     });
   });
 
+  describe('redirects', () => {
+    it.each([[301], [302], [303], [307], [308]])(
+      'does not follow a %i: it fails once, naming the status and never the target',
+      async (status) => {
+        const { service, http, ctx } = makeService([
+          docRoute(
+            new Response('moved to https://evil.example/x', {
+              status,
+              headers: { location: 'https://evil.example/x' },
+            }),
+          ),
+        ]);
+        const failure = failureOf(
+          await settle(() => service.getDoc('x', service.startBudget(), ctx)),
+        );
+        expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(failure.message).toContain(String(status));
+        expect(JSON.stringify([failure.message, failure.data])).not.toContain('evil.example');
+        expect(http.calls).toHaveLength(1);
+        expect(http.calls[0]?.request.redirect).toBe('manual');
+      },
+    );
+  });
+
   describe('network failures', () => {
     it('wraps a failed connection as ServiceUnavailable with the cause, after three attempts', async () => {
       const cause = new TypeError('fetch failed');
@@ -804,7 +828,7 @@ describe('header gate', () => {
     const { service, http, ctx } = makeService(
       [
         docRoute(() =>
-          jsonResponse(DOC_BODY, { headers: rateLimitHeaders(0, resetIn(clock, 120)) }),
+          jsonResponse(DOC_BODY, { headers: rateLimitHeaders(0, resetIn(clock, 55)) }),
         ),
       ],
       { now: clock.now, sleep: clock.sleep },
@@ -818,10 +842,54 @@ describe('header gate', () => {
     );
     expect(failure).toBeInstanceOf(McpError);
     expect(failure.code).toBe(JsonRpcErrorCode.RateLimited);
-    expect(failure.data).toMatchObject({ reason: 'rate_limited', retryAfter: 120 });
+    expect(failure.data).toMatchObject({ reason: 'rate_limited', retryAfter: 55 });
     expect((failure.cause as McpError).data).toMatchObject({ reason: 'pacer_shed' });
     expect(clock.sleeps).toEqual([]);
     expect(http.calls).toHaveLength(1);
+  });
+
+  describe('a reset more than a minute ahead is read as the end of the one-minute window', () => {
+    const farReset = (clock: ReturnType<typeof fakeClock>) =>
+      makeService(
+        [
+          docRoute(() =>
+            jsonResponse(DOC_BODY, { headers: rateLimitHeaders(0, resetIn(clock, 1e9)) }),
+          ),
+        ],
+        { now: clock.now, sleep: clock.sleep },
+      );
+
+    it('sheds a call made at once with retryAfter 60, without a request', async () => {
+      const clock = fakeClock();
+      const { service, http, ctx } = farReset(clock);
+      await service.getDoc('x', service.startBudget(), ctx);
+      await expect(service.getDoc('x', service.startBudget(), ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'rate_limited', retryAfter: 60 },
+      });
+      expect(clock.sleeps).toEqual([]);
+      expect(http.calls).toHaveLength(1);
+    });
+
+    it('lets a call 15 s later sleep out the rest of the minute and proceed', async () => {
+      const clock = fakeClock();
+      const { service, http, ctx } = farReset(clock);
+      await service.getDoc('x', service.startBudget(), ctx);
+      clock.advance(15_000);
+      await service.getDoc('x', service.startBudget(), ctx);
+      expect(clock.sleeps).toEqual([45_000]);
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it('lets a call after the minute proceed without sleeping', async () => {
+      const clock = fakeClock();
+      const { service, http, ctx } = farReset(clock);
+      await service.getDoc('x', service.startBudget(), ctx);
+      clock.advance(61_000);
+      await service.getDoc('x', service.startBudget(), ctx);
+      expect(clock.sleeps).toEqual([]);
+      expect(http.calls).toHaveLength(2);
+    });
   });
 
   it('sleeps when the wait is exactly what is left of the budget', async () => {
