@@ -228,7 +228,7 @@ One search sends `q=<clauses joined by OR>` with `skip_files=1&ondemand=true&siz
 | `id` | string | hit `id` |
 | `kind` | `record` \| `doc` | `doc` when `metadata.slug` is set (documentation and news) |
 | `recid?`, `slug?` | string | |
-| `matched_inputs` | string[] | the `ids` entries that resolved here; the resource sets `[recid]` |
+| `matched_inputs` | string[] | the `ids` entries that resolved here; the resource sets `[recid]`, leading zeros stripped |
 | `title?`, `title_additional?` | string | |
 | `type` | `{ primary, secondary[] }` | |
 | `experiment?`, `collections?`, `date_created?`, `run_period?`, `run_numbers?` | string[] | |
@@ -350,14 +350,14 @@ The call sequence and degrade rules are under Workflow Analysis.
 
 ### `cern_opendata_get_validated_runs`
 
-**Description (draft).** Get a CMS validated-run (good-run) list, which certifies the luminosity sections that are good for physics in each run. Select it by a CMS collision dataset recid, a validated-run list recid, or a run period such as Run2012B. Choose the full validation or the muons-only variant, and narrow to a run range. Returns the runs with their luminosity-section ranges and the list file's download URL. CMS only.
+**Description (draft).** Get a CMS validated-run (good-run) list, which certifies the luminosity sections that are good for physics in each run. Select it by a CMS collision dataset recid, a validated-run list recid, or a run period such as Run2012B. Choose the full validation or the muons-only variant, and narrow to a run range; a dataset recid defaults the range to the first and last run the dataset lists. Returns the runs with their luminosity-section ranges and the list file's download URL. CMS only.
 
 | Param | Type | Maps to | Notes |
 |:------|:-----|:--------|:------|
-| `recid` | `recidInput`, optional | a list recid, or a dataset's `abstract.links`/`note.links` | |
+| `recid` | `recidInput`, optional | a list recid, or a dataset's `abstract.links`/`note.links` and `run_numbers` | |
 | `run_period` | string ≤ 40, optional | the list's `run_period[]` | blankAsUnset. Matched case-insensitively against the run periods the collection lists; a bare `2012B` also matches `Run2012B`. |
 | `variant` | `full` \| `muons_only`, optional | file-key naming | blankAsUnset. A list is `muons_only` when its file key contains `_MuonPhys`, `full` otherwise (Decision 17). Omitted: a list `recid` is used as named, and a dataset `recid` or `run_period` selects `full` (Decision 22). |
-| `run_min`, `run_max` | int ≥ 1, optional | local filter | inclusive |
+| `run_min`, `run_max` | int ≥ 1, optional | local filter | inclusive. With a dataset `recid` and neither bound set, both default to the lowest and highest run in the dataset's `run_numbers` (Decision 31). |
 | `limit` | int 1–2000, default 200 | local cap | |
 
 Exactly one of `recid` and `run_period` is required; the handler checks the combination (a flat object, which Claude clients need).
@@ -366,9 +366,11 @@ Exactly one of `recid` and `run_period` is required; the handler checks the comb
 
 - When `recid` is a list, it is selected as named. Only an explicit `variant` that differs from the list's own replaces it with its twin, and a notice says so.
 - When `recid` is a dataset, its linked recids are intersected with the collection, and each linked list is replaced by its twin when the requested variant (`full` when omitted) differs.
-- `run_period` selects the lists that cover the period and match the requested variant (`full` when omitted).
+- `run_period` selects the lists that cover the period and match the requested variant (`full` when omitted). Messages and notices name the period as the lists spell it (`run2011a` reads as `Run2011A`).
 
 One match: its file is read (leg 3) and parsed. Several: no file is read, `matched_lists` carries the candidates, and the notice asks for a choice. None: `no_validated_runs`.
+
+**Run range.** One list covers a whole data-taking period or year, while a dataset covers part of it, so a dataset `recid` with neither bound set filters the runs to the lowest and highest run the dataset's `run_numbers` lists (all-digit entries only), echoed as `run_bounds` with `source: dataset`. A dataset with no usable `run_numbers` keeps the whole list, and a notice says so when the list covers a run period the dataset does not state (Decision 31). Caller bounds are echoed with `source: input`.
 
 **Output**
 
@@ -377,17 +379,20 @@ One match: its file is read (leg 3) and parsed. Several: no file is read, `match
 | `matched_lists[]` | `{ recid, title, variant, run_periods[], collision_energy? }` | every list the selector matched |
 | `list?` | `{ recid, title, file_key, variant, run_periods[], collision_energy?, https_url, xrootd_uri?, portal_url }` | the selected list; `https_url` = `https://opendata.cern.ch/record/{recid}/files/{key}` |
 | `dataset?` | `{ recid, title?, run_period?[] }` | when `recid` was a dataset |
-| `summary?` | `{ run_count, lumi_section_count, first_run?, last_run? }` | the whole list, before `run_min`/`run_max`; `first_run`/`last_run` absent for a list certifying no runs |
-| `runs[]` | `{ run, lumi_sections, lumi_ranges: { first, last }[] }` | ascending by run, filtered, cut at `limit`; `[]` when no list was selected |
+| `summary?` | `{ run_count, lumi_section_count, first_run?, last_run? }` | the whole list, before `run_bounds`; `first_run`/`last_run` absent for a list certifying no runs |
+| `run_bounds?` | `{ run_min?, run_max?, source: 'input' \| 'dataset' }` | the range `runs` was filtered to, when a list was read and a bound applies; `dataset` means both were defaulted from the dataset's `run_numbers` |
+| `runs[]` | `{ run, lumi_sections, lumi_ranges: { first, last }[] }` | ascending by run, inside `run_bounds`, cut at `limit`; `[]` when no list was selected |
 
-**Enrichment.** The required list fields from Shared enrichment (`totalCount` = runs after the run filter), plus `notice?`.
+**Enrichment.** The required list fields from Shared enrichment (`totalCount` = runs inside `run_bounds`), plus `notice?`.
 
 | Condition | Fragment |
 |:----------|:---------|
 | Several lists matched | `{n} validated-run lists match {selector} (variant {variant}): {recid — title, …}. Call cern_opendata_get_validated_runs again with recid set to one of them; they differ by reconstruction pass and intended use, as their titles state.` |
 | A list `recid` was swapped for its twin | `List {recid} is the {its variant} variant; its {variant} twin {twin recid} is returned because variant was set. Call cern_opendata_get_validated_runs with recid {recid} and no variant for the list as named.` |
-| `has_more` (as `guidance`) | `Showing {shown} of {total} runs; call cern_opendata_get_validated_runs again with run_min set to {next run}, or download the whole list from list.https_url.` |
-| A filter leaves 0 runs | `No run of list {recid} falls in {run_min}–{run_max}; the list covers runs {first_run}–{last_run}.` (an unset bound reads as the list's own) |
+| Bounds defaulted from the dataset | `Runs are limited to {run_min}–{run_max}, the first and last run record {dataset recid} lists; list {recid} covers {its run periods}. For the whole list, call cern_opendata_get_validated_runs with recid {recid}.` |
+| A dataset with no usable `run_numbers`, no bound set, and a list covering a period the dataset does not state | `Record {dataset recid} lists no run numbers, so the runs span list {recid}'s whole run periods ({its run periods}), not only the dataset's {dataset run periods}; set run_min and run_max to narrow them.` With no dataset `run_period`: `Record {dataset recid} lists no run numbers or run period, so the runs span list {recid}'s whole run periods ({its run periods}); set run_min and run_max to narrow them.` |
+| `has_more` (as `guidance`) | `Showing {shown} of {total} runs; call cern_opendata_get_validated_runs again with run_min set to {next run}, or download the whole list from list.https_url.` When a `run_max` applies, `and run_max set to {run_max}` follows `{next run}`, so the next page keeps the upper bound. |
+| A filter leaves 0 runs | `No run of list {recid} falls in {run_min}–{run_max}; the list covers runs {first_run}–{last_run}.` (bounds as in `run_bounds`; an unset bound reads as the list's own) |
 | The list certifies no runs | `List {recid} certifies no runs.` |
 
 **Errors** (plus the shared entries)
@@ -591,7 +596,7 @@ Legs 2, 3a and 3b depend only on leg 1 and run together under `Promise.allSettle
 | # | Call | Purpose | On failure |
 |:--|:-----|:--------|:-----------|
 | 1 | `GET /api/records/?collections=CMS-Validated-Runs&ondemand=true&size=100` (no `skip_files`; cached 15 min) | Every list with its run periods and file key | Fails the call. |
-| 2 | `GET /api/records/?q=recid:{recid}&skip_files=1&ondemand=true&size=1`, only when `recid` is not in the collection | The dataset's `abstract.links`, `note.links` and `run_period` | Fails the call; zero hits raise `record_not_found`. |
+| 2 | `GET /api/records/?q=recid:{recid}&skip_files=1&ondemand=true&size=1`, only when `recid` is not in the collection | The dataset's `abstract.links`, `note.links`, `run_period` and `run_numbers` | Fails the call; zero hits raise `record_not_found`. |
 | 3 | `GET /record/{list recid}/files/{key}` | The good-run list JSON | Fails the call; a 404, or a body that is not a run → `[first, last][]` object, raises `upstream_unreadable`. |
 
 Leg 1 runs first, usually from cache; leg 2 runs only when `recid` is not one of its lists. Selection between legs 2 and 3 yields zero lists (`no_validated_runs`), several (the candidates are returned and leg 3 is skipped), or one (leg 3). A partial good-run list is never returned.
@@ -630,6 +635,8 @@ Each decision is grounded in a live probe of the portal (API Reference).
 28. **Recids drop leading zeros.** The portal stores recids without them, so `06004` looked up as written is reported missing. `reduceRecidSpelling` strips them after the prefix and URL reduction, covering `recidInput`, `get_records` classification and the record resource; an all-zero recid reduces to `''` and is rejected rather than queried.
 29. **The accept-list is per route, and a search 404 is `upstream_unreadable`.** Only search reads a 400 as a domain answer (query syntax, page window, range format); a 400 on a record, doc or file GET, whose URL the server builds from validated input, is mapped through `httpErrorFromResponse` like any other unexpected status. A search with no matches answers 200 with empty `hits`, so a search 404 is a portal fault, not a miss: it is accepted and raised as `upstream_unreadable` (`ServiceUnavailable`), because `NotFound` from the classifier would read as a missing record.
 30. **A record the API lists no files for, while its `distribution` states some, is reported as unlisted, not empty.** Records with availability `ondemand` (13049: 2 files, 3,504,276,797 bytes; 7200: 29 files) carry no `_files`, `files` or `_file_indices` in the record GET, with or without `ondemand=true`. Saying "This record has no files." reads as an empty dataset, so `list_files` gives the stated `distribution.number_files` and `size`, says the files are on tape and not listed by the API, and routes to the record's portal page; any other availability gets the stated count without the tape claim. `partial` records are not affected: 44260 lists all four files through its indexes, the three tape members marked `on demand`. The umbrella notice still wins when `children` is set.
+31. **A dataset selector bounds the runs to the dataset's `run_numbers`.** A good-run list covers a whole period or year: 6030 (`/DoubleMuParked/Run2012C-22Jan2013-v1/AOD`) links list 1002, whose 572 runs span Run2012A–D, so its first 200-run page held no Run2012C run. The record states its own range: `run_numbers` lists 218 runs from 198022 to 203742, and its abstract says "Run period from run number 198022 to 203742". With neither bound set, `run_min`/`run_max` default to the lowest and highest of those, echoed as `run_bounds` with a notice naming the list recid that returns the whole list. 53 CMS collision records carry no `run_numbers` (14016–14021, which link list 14208/14209 or 14206/14207, and RAW records whose `run_period` is null); they keep the whole list, with a notice when it covers a period the dataset does not state, rather than bounds guessed from the period name. The paging notice carries the effective `run_max`, since following `run_min` alone would drop it.
+
 ## Known Limitations
 
 - **60 requests/minute per client IP.** A hosted instance shares that budget across all users, and the server has no per-user quota, so a hosted deployment needs a per-client rate limit at its edge. Heavy tools (`get_analysis_env`, `get_validated_runs`) cost 2–4 requests each.
@@ -710,6 +717,7 @@ Keys: `availability`, `category` (nested `subcategory`), `collision_energy`, `co
 - Muons-only keys contain `_MuonPhys`, and twins share a stem once `_MuonPhys`, a trailing `_v<n>` and the extension are removed: 1002 `Cert_190456-208686_8TeV_22Jan2013ReReco_Collisions12_JSON.txt` ↔ 1005 `…_JSON_MuonPhys.txt`; 14202 `…_JSON_v2.txt` ↔ 14203 `…_JSON_MuonPhys_v2.txt`; 14208 `…_JSON_v2.txt` ↔ 14209 `…_JSON_MuonPhys.txt` (the version suffix differs). Lists 1000 (Run2010B), 1001 (Run2011A/B ReReco), 14200 and 14201 (Commissioning2010, keys `Commissioning10-May19ReReco_{900GeV,7TeV}.json`) have no muons-only twin.
 - Run periods covered: Commissioning2010, Run2010B, HIRun2010, Run2011A, Run2011B, HIRun2011, Run2012A–D, HIRun2013, Run2013A, Run2015C, Run2015D, Run2015E, Run2016B–H. Run2011A alone matches three full lists (1001 ReReco 7 TeV, 14206 PromptReco 7 TeV, 14208 PromptReco 2.76 TeV) and two muons-only lists (14207, 14209).
 - Dataset links: `abstract.links[]` and `note.links[]` carry `{recid, description?}`. Newer records describe them ("Validated runs, full validation", "Validated runs, muons only"); older ones give a bare recid (6004 → 1002).
+- Dataset run ranges: collision datasets carry `run_numbers[]`, run-number strings in ascending order (6030: 218 runs, 198022–203742, matching its abstract's "Run period from run number 198022 to 203742"). `q=NOT _exists_:run_numbers&type=Dataset::Collision&experiment=CMS` returns 53 records without the field.
 
 ### Trigger path records
 

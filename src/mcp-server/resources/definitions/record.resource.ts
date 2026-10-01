@@ -48,7 +48,7 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false).',
+      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false). Also raised when a search answers 404.',
       recovery:
         'Read cern-opendata://record/{recid} again in a minute; if it repeats, the portal is serving an error page or an oversized response, so read the same data on https://opendata.cern.ch instead.',
       thrownBy: 'service',
@@ -67,6 +67,6 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
     if (!match) {
       throw ctx.fail('record_not_found', `No record has recid ${recid}.`, { recid });
     }
-    return toRecord(match.hit, [params.recid]);
+    return toRecord(match.hit, [recid]);
   },
 });

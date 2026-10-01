@@ -82,6 +82,18 @@ describe('definition smoke test', () => {
     },
   );
 
+  it.each(
+    [
+      ...UPSTREAM_TOOLS.filter((tool) => tool.name !== 'cern_opendata_list_files'),
+      recordResource,
+    ].map((definition) => [definition.name, definition] as const),
+  )('%s names a search 404 among the upstream_unreadable cases', (_name, definition) => {
+    const entry = (definition.errors ?? []).find(
+      (candidate) => candidate.reason === 'upstream_unreadable',
+    );
+    expect(entry?.when).toContain('Also raised when a search answers 404');
+  });
+
   it.each(LIST_TOOLS)('%s declares the required list enrichment fields', (name) => {
     const tool = allToolDefinitions.find((candidate) => candidate.name === name);
     expect(Object.keys(tool?.enrichment ?? {})).toEqual(

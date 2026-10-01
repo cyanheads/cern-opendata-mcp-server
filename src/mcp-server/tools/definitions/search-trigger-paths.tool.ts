@@ -251,7 +251,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false).',
+      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false). Also raised when a search answers 404.',
       recovery:
         'Call cern_opendata_search_trigger_paths again in a minute; if it repeats, the portal is serving an error page or an oversized response, so read the same data on https://opendata.cern.ch instead.',
       thrownBy: 'service',

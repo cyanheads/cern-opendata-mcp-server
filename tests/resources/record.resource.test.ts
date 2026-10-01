@@ -133,6 +133,13 @@ describe('cern-opendata://record/{recid} read', () => {
     expect(params.get('ondemand')).toBe('true');
   });
 
+  it('reports the recid without leading zeros in matched_inputs', async () => {
+    const { http } = servePool([collisionDatasetHit]);
+    const record = await read('06004');
+    expect(record).toMatchObject({ recid: '6004', matched_inputs: ['6004'] });
+    expect(new URL(http.calls[0]?.request.url ?? '').searchParams.get('q')).toBe('recid:(6004)');
+  });
+
   it('returns exactly what cern_opendata_get_records returns for the same recid', async () => {
     servePool([collisionDatasetHit, licensedDatasetHit, sparseHit]);
     for (const recid of ['6004', '30517', '1120']) {

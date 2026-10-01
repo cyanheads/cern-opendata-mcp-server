@@ -38,13 +38,32 @@ const OTHER_VARIANT: Record<RunListVariant, RunListVariant> = {
   muons_only: 'full',
 };
 
-/** Whether a list covers `period`: case-insensitive, and a bare `2012B` matches `Run2012B`. */
-function coversPeriod(list: ValidatedRunList, period: string): boolean {
+/** The list's own spelling of `period`, matched case-insensitively; a bare `2012B` matches `Run2012B`. */
+function periodIn(list: ValidatedRunList, period: string): string | undefined {
   const key = period.toLowerCase();
-  return list.run_periods.some((p) => {
+  return list.run_periods.find((p) => {
     const lower = p.toLowerCase();
     return lower === key || lower === `run${key}`;
   });
+}
+
+/** The lowest and highest run a dataset's `run_numbers` lists, reading only all-digit entries. */
+function runRangeOf(runNumbers: unknown): { first: number; last: number } | undefined {
+  const runs = (strList(runNumbers) ?? []).filter((run) => /^\d+$/.test(run)).map(Number);
+  if (runs.length === 0) return undefined;
+  return {
+    first: runs.reduce((a, b) => Math.min(a, b)),
+    last: runs.reduce((a, b) => Math.max(a, b)),
+  };
+}
+
+/** Whether the list covers a run period the dataset does not state (every period, when it states none). */
+function spansBeyond(
+  list: ValidatedRunList,
+  datasetPeriods: readonly string[] | undefined,
+): boolean {
+  const own = new Set(datasetPeriods?.map((p) => p.toLowerCase()));
+  return list.run_periods.some((p) => !own.has(p.toLowerCase()));
 }
 
 /** Which selector the call uses; exactly one of `recid` and `run_period` is required. */
@@ -150,11 +169,26 @@ const GetValidatedRunsOutput = z.object({
       last_run: z.number().optional().describe('Highest run in the list.'),
     })
     .optional()
-    .describe('The whole selected list, before run_min/run_max.'),
+    .describe('The whole selected list, before run_bounds.'),
+  run_bounds: z
+    .object({
+      run_min: z.number().optional().describe('Lowest run returned, inclusive; absent when unset.'),
+      run_max: z
+        .number()
+        .optional()
+        .describe('Highest run returned, inclusive; absent when unset.'),
+      source: z
+        .enum(['input', 'dataset'])
+        .describe(
+          'input: run_min/run_max as given. dataset: both defaulted to the first and last run the dataset lists.',
+        ),
+    })
+    .optional()
+    .describe('The run range runs was filtered to; absent when no bound applies.'),
   runs: z
     .array(RunSchema)
     .describe(
-      'Certified runs, ascending, after run_min/run_max and cut at limit; empty when no single list was selected.',
+      'Certified runs, ascending, inside run_bounds and cut at limit; empty when no single list was selected.',
     ),
 });
 
@@ -192,7 +226,7 @@ function joinOrNA(values: readonly string[] | undefined): string {
 export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   title: 'Get CMS Validated Runs',
   description:
-    'Get a CMS validated-run (good-run) list, which certifies the luminosity sections that are good for physics in each run. Select it by a CMS collision dataset recid, a validated-run list recid, or a run period such as Run2012B (give exactly one of recid and run_period). Choose the full validation or the muons-only variant, and narrow to a run range. Returns the runs with their luminosity-section ranges and the list file download URL. CMS only.',
+    'Get a CMS validated-run (good-run) list, which certifies the luminosity sections that are good for physics in each run. Select it by a CMS collision dataset recid, a validated-run list recid, or a run period such as Run2012B (give exactly one of recid and run_period). Choose the full validation or the muons-only variant, and narrow to a run range; a dataset recid defaults the range to the first and last run the dataset lists. Returns the runs with their luminosity-section ranges and the list file download URL. CMS only.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: blankAsUnset(recidInput().optional()).describe(
@@ -210,17 +244,17 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       'full (every detector certified) or muons_only (certified for muon physics). Omitted: a list recid is used as named; a dataset recid or run_period selects full.',
     ),
     run_min: blankAsUnset(z.number().int().min(1).optional()).describe(
-      'Lowest run to return, inclusive.',
+      'Lowest run to return, inclusive. With a dataset recid and neither bound set, run_min and run_max default to the first and last run the dataset lists; run_bounds echoes the range applied.',
     ),
     run_max: blankAsUnset(z.number().int().min(1).optional()).describe(
-      'Highest run to return, inclusive.',
+      'Highest run to return, inclusive. Defaults with run_min for a dataset recid.',
     ),
     limit: blankAsUnset(z.number().int().min(1).max(2000).default(200)).describe(
       'Runs to return, 1-2000.',
     ),
   }),
   output: GetValidatedRunsOutput,
-  enrichment: listEnrichment('Runs in the selected list after run_min/run_max.'),
+  enrichment: listEnrichment('Runs in the selected list inside run_bounds.'),
   errors: [
     {
       reason: 'missing_selector',
@@ -274,7 +308,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false). Also raised when a list file the collection names answers 404.',
+      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false). Also raised when a search answers 404, and when a list file the collection names answers 404.',
       recovery:
         'Call cern_opendata_get_validated_runs again in a minute; if it repeats, the portal is serving an error page or an oversized response, so read the same data on https://opendata.cern.ch instead.',
       thrownBy: 'service',
@@ -313,23 +347,27 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     let candidates: ValidatedRunList[];
     let selector: string;
     let dataset: DatasetOut | undefined;
+    let datasetRange: ReturnType<typeof runRangeOf>;
 
     if (selection.kind === 'run_period') {
       const { runPeriod } = selection;
-      selector = `run period ${oneLine(runPeriod)}`;
-      const covering = lists.filter((list) => coversPeriod(list, runPeriod));
-      if (covering.length === 0) {
+      const spellings = lists.map((list) => periodIn(list, runPeriod));
+      const canonical = spellings.find((spelling) => spelling !== undefined);
+      if (canonical === undefined) {
         throw ctx.fail(
           'no_validated_runs',
           `No CMS validated-run list covers run period ${oneLine(runPeriod)}.`,
           { run_period: runPeriod },
         );
       }
-      candidates = covering.filter((list) => list.variant === variant);
+      selector = `run period ${inline(canonical)}`;
+      candidates = lists.filter(
+        (list, i) => spellings[i] !== undefined && list.variant === variant,
+      );
       if (candidates.length === 0) {
         throw ctx.fail(
           'no_validated_runs',
-          `Run period ${oneLine(runPeriod)} has validated-run lists only in the ${OTHER_VARIANT[variant]} variant, none in ${variant}.`,
+          `Run period ${inline(canonical)} has validated-run lists only in the ${OTHER_VARIANT[variant]} variant, none in ${variant}.`,
           { run_period: runPeriod, variant },
         );
       }
@@ -369,6 +407,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
           title: str(meta.title),
           run_period: strList(meta.run_period),
         });
+        datasetRange = runRangeOf(meta.run_numbers);
         const linkedRecids = new Set(
           [...(meta.abstract?.links ?? []), ...(meta.note?.links ?? [])].flatMap(
             (link) => str(link?.recid) ?? [],
@@ -415,6 +454,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         list: undefined,
         dataset,
         summary: undefined,
+        run_bounds: undefined,
         runs: [],
       });
     }
@@ -424,23 +464,40 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     );
     const firstRun = allRuns[0]?.run;
     const lastRun = allRuns.at(-1)?.run;
+    const unbounded = runMin === undefined && runMax === undefined;
+    const defaulted = unbounded ? datasetRange : undefined;
+    const boundMin = runMin ?? defaulted?.first;
+    const boundMax = runMax ?? defaulted?.last;
     const inRange = allRuns.filter(
       (run) =>
-        (runMin === undefined || run.run >= runMin) && (runMax === undefined || run.run <= runMax),
+        (boundMin === undefined || run.run >= boundMin) &&
+        (boundMax === undefined || run.run <= boundMax),
     );
     const runs = inRange.slice(0, input.limit);
     const next = inRange[input.limit];
 
+    if (dataset && defaulted) {
+      fragments.push(
+        `Runs are limited to ${defaulted.first}–${defaulted.last}, the first and last run record ${dataset.recid} lists; list ${selected.recid} covers ${joinOrNA(selected.run_periods)}. For the whole list, call cern_opendata_get_validated_runs with recid ${selected.recid}.`,
+      );
+    } else if (dataset && unbounded && spansBeyond(selected, dataset.run_period)) {
+      fragments.push(
+        dataset.run_period
+          ? `Record ${dataset.recid} lists no run numbers, so the runs span list ${selected.recid}'s whole run periods (${joinOrNA(selected.run_periods)}), not only the dataset's ${joinOrNA(dataset.run_period)}; set run_min and run_max to narrow them.`
+          : `Record ${dataset.recid} lists no run numbers or run period, so the runs span list ${selected.recid}'s whole run periods (${joinOrNA(selected.run_periods)}); set run_min and run_max to narrow them.`,
+      );
+    }
     if (allRuns.length === 0) {
       fragments.push(`List ${selected.recid} certifies no runs.`);
     } else if (inRange.length === 0) {
       fragments.push(
-        `No run of list ${selected.recid} falls in ${runMin ?? firstRun}–${runMax ?? lastRun}; the list covers runs ${firstRun}–${lastRun}.`,
+        `No run of list ${selected.recid} falls in ${boundMin ?? firstRun}–${boundMax ?? lastRun}; the list covers runs ${firstRun}–${lastRun}.`,
       );
     }
     if (next) {
+      const keepMax = boundMax === undefined ? '' : ` and run_max set to ${boundMax}`;
       fragments.push(
-        `Showing ${runs.length} of ${inRange.length} runs; call cern_opendata_get_validated_runs again with run_min set to ${next.run}, or download the whole list from list.https_url.`,
+        `Showing ${runs.length} of ${inRange.length} runs; call cern_opendata_get_validated_runs again with run_min set to ${next.run}${keepMax}, or download the whole list from list.https_url.`,
       );
     }
 
@@ -462,6 +519,14 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         first_run: firstRun,
         last_run: lastRun,
       }),
+      run_bounds:
+        boundMin === undefined && boundMax === undefined
+          ? undefined
+          : definedOnly<NonNullable<GetValidatedRunsOut['run_bounds']>>({
+              run_min: boundMin,
+              run_max: boundMax,
+              source: defaulted ? 'dataset' : 'input',
+            }),
       runs,
     });
   },
@@ -507,6 +572,12 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       lines.push(
         '',
         `**Whole list:** ${summary.run_count} runs, ${summary.lumi_section_count} luminosity sections, runs ${inlineOrNA(summary.first_run)}–${inlineOrNA(summary.last_run)}`,
+      );
+    }
+    if (result.run_bounds) {
+      const { run_min: min, run_max: max, source } = result.run_bounds;
+      lines.push(
+        `**Run bounds:** run_min ${min ?? 'none'} · run_max ${max ?? 'none'} · source ${source}`,
       );
     }
 

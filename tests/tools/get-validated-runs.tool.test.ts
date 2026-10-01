@@ -452,7 +452,10 @@ describe('cern_opendata_get_validated_runs dataset recid', () => {
     expect(result.list).toMatchObject({ recid: '1005', variant: 'muons_only' });
     expect(result.matched_lists.map((m) => m.recid)).toEqual(['1005']);
     expect(result.dataset?.recid).toBe('6004');
-    expect(result).not.toHaveProperty('notice');
+    // The fixture lists no run numbers, so only the whole-list notice applies.
+    expect(result.notice).toBe(
+      "Record 6004 lists no run numbers, so the runs span list 1005's whole run periods (Run2012A, Run2012B, Run2012C, Run2012D), not only the dataset's Run2012B; set run_min and run_max to narrow them.",
+    );
   });
 
   it('collapses links to both twins into the one list of the requested variant', async () => {
@@ -554,6 +557,138 @@ describe('cern_opendata_get_validated_runs dataset recid', () => {
   });
 });
 
+describe('cern_opendata_get_validated_runs dataset run bounds', () => {
+  const files = { '1002': syntheticRuns(10) };
+  const listing = (runNumbers: string[]) =>
+    datasetLinkingLists(
+      '6030',
+      { abstract: ['1002'] },
+      { run_period: ['Run2012C'], run_numbers: runNumbers },
+    );
+
+  it('defaults run_min and run_max to the first and last run the dataset lists, and says how to get the whole list', async () => {
+    serve({ files, records: { '6030': listing(['1003', '1004', '1006']) } });
+    const result = success(await run({ recid: '6030' }));
+    expect(result.runs.map((r) => r.run)).toEqual([1003, 1004, 1005, 1006]);
+    expect(result.run_bounds).toEqual({ run_min: 1003, run_max: 1006, source: 'dataset' });
+    expect(result).toMatchObject({ truncated: false, shown: 4, totalCount: 4 });
+    expect(result.summary).toMatchObject({ run_count: 10, first_run: 1000, last_run: 1009 });
+    expect(result.notice).toBe(
+      'Runs are limited to 1003–1006, the first and last run record 6030 lists; list 1002 covers Run2012A, Run2012B, Run2012C, Run2012D. For the whole list, call cern_opendata_get_validated_runs with recid 1002.',
+    );
+  });
+
+  it('names the twin actually read when variant swaps the linked list', async () => {
+    serve({ records: { '6030': listing(['190456', '190456']) } });
+    const result = success(await run({ recid: '6030', variant: 'muons_only' }));
+    expect(result.list?.recid).toBe('1005');
+    expect(result.runs.map((r) => r.run)).toEqual([190456]);
+    expect(result.notice).toContain('call cern_opendata_get_validated_runs with recid 1005.');
+  });
+
+  it('takes the numeric lowest and highest run in any order, skipping entries that are not run numbers', async () => {
+    serve({ files, records: { '6030': listing(['1006', 'n/a', '1002', ' ', '1004', '10e3']) } });
+    expect(success(await run({ recid: '6030' })).run_bounds).toEqual({
+      run_min: 1002,
+      run_max: 1006,
+      source: 'dataset',
+    });
+  });
+
+  it('says what the list covers when the dataset range holds none of its runs', async () => {
+    serve({ files, records: { '6030': listing(['5000', '6000']) } });
+    const result = success(await run({ recid: '6030' }));
+    expect(result.runs).toEqual([]);
+    expect(result.notice).toContain(
+      'No run of list 1002 falls in 5000–6000; the list covers runs 1000–1009.',
+    );
+  });
+
+  it('keeps a bound the caller sets and defaults neither, echoing it as input', async () => {
+    serve({ files, records: { '6030': listing(['1003', '1006']) } });
+    const result = success(await run({ recid: '6030', run_min: 1005 }));
+    expect(result.runs.map((r) => r.run)).toEqual([1005, 1006, 1007, 1008, 1009]);
+    expect(result.run_bounds).toEqual({ run_min: 1005, source: 'input' });
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  it('carries run_max in the paging notice, so following it stays inside the dataset range', async () => {
+    serve({ files, records: { '6030': listing(['1002', '1007']) } });
+    const first = success(await run({ recid: '6030', limit: 2 }));
+    expect(first.notice).toBe(
+      'Runs are limited to 1002–1007, the first and last run record 6030 lists; list 1002 covers Run2012A, Run2012B, Run2012C, Run2012D. For the whole list, call cern_opendata_get_validated_runs with recid 1002. ' +
+        'Showing 2 of 6 runs; call cern_opendata_get_validated_runs again with run_min set to 1004 and run_max set to 1007, or download the whole list from list.https_url.',
+    );
+    const seen = first.runs.map((r) => r.run);
+    let notice = first.notice;
+    for (let page = 0; page < 5; page++) {
+      const [, runMin, runMax] =
+        /run_min set to (\d+) and run_max set to (\d+)/.exec(notice ?? '') ?? [];
+      if (runMin === undefined) break;
+      const result = success(
+        await run({ recid: '6030', limit: 2, run_min: Number(runMin), run_max: Number(runMax) }),
+      );
+      seen.push(...result.runs.map((r) => r.run));
+      notice = result.notice;
+    }
+    expect(seen).toEqual([1002, 1003, 1004, 1005, 1006, 1007]);
+  });
+
+  it('says the runs span the whole list when the dataset lists no run numbers and the list covers other periods', async () => {
+    serve({ records: { '6004': collisionDatasetHit } });
+    const result = success(await run({ recid: '6004' }));
+    expect(result).not.toHaveProperty('run_bounds');
+    expect(result.runs).toHaveLength(2);
+    expect(result.notice).toBe(
+      "Record 6004 lists no run numbers, so the runs span list 1002's whole run periods (Run2012A, Run2012B, Run2012C, Run2012D), not only the dataset's Run2012B; set run_min and run_max to narrow them.",
+    );
+  });
+
+  it('says so too when the record states neither run numbers nor a run period', async () => {
+    const bare = hit('6200', {
+      recid: '6200',
+      type: { primary: 'Dataset', secondary: ['Collision'] },
+      abstract: { links: [{ recid: '1002' }] },
+    });
+    serve({ records: { '6200': bare } });
+    expect(success(await run({ recid: '6200' })).notice).toBe(
+      "Record 6200 lists no run numbers or run period, so the runs span list 1002's whole run periods (Run2012A, Run2012B, Run2012C, Run2012D); set run_min and run_max to narrow them.",
+    );
+  });
+
+  it("adds no notice when the list covers only the dataset's own periods, in any case", async () => {
+    const d = datasetLinkingLists('6106', { abstract: ['14208'] }, { run_period: ['run2011a'] });
+    serve({ records: { '6106': d } });
+    const result = success(await run({ recid: '6106' }));
+    expect(result.list?.recid).toBe('14208');
+    expect(result).not.toHaveProperty('notice');
+    expect(result).not.toHaveProperty('run_bounds');
+  });
+
+  it('adds no whole-list notice when the caller narrows with run_min or run_max', async () => {
+    serve({ records: { '6004': collisionDatasetHit } });
+    const result = success(await run({ recid: '6004', run_max: 190456 }));
+    expect(result.runs.map((r) => r.run)).toEqual([190456]);
+    expect(result.run_bounds).toEqual({ run_max: 190456, source: 'input' });
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  it('applies no bounds when several lists match and none is read', async () => {
+    const d = datasetLinkingLists(
+      '6103',
+      { abstract: ['1000'], note: ['14202'] },
+      {
+        run_numbers: ['1003', '1006'],
+      },
+    );
+    serve({ records: { '6103': d } });
+    const result = success(await run({ recid: '6103' }));
+    expect(result).not.toHaveProperty('run_bounds');
+    expect(result.notice).toMatch(/^2 validated-run lists match record 6103 \(variant full\): /);
+    expect(result.notice).not.toContain('Runs are limited');
+  });
+});
+
 describe('cern_opendata_get_validated_runs run period', () => {
   it.each([['Run2012B'], ['run2012b'], ['RUN2012B'], ['2012B'], ['2012b'], ['  Run2012B  ']])(
     'selects list 1002 for the period %j',
@@ -571,6 +706,18 @@ describe('cern_opendata_get_validated_runs run period', () => {
     const result = success(await run({ run_period: 'Run2012B', variant: 'muons_only' }));
     expect(result.list).toMatchObject({ recid: '1005', variant: 'muons_only' });
     expect(result).not.toHaveProperty('notice');
+  });
+
+  it('echoes the period as the lists spell it, not as the caller typed it', async () => {
+    serve({ specs: ALL_LIST_SPECS });
+    for (const period of ['run2011a', '2011a', 'RUN2011A']) {
+      expect(success(await run({ run_period: period })).notice, period).toMatch(
+        /^3 validated-run lists match run period Run2011A \(variant full\): /,
+      );
+    }
+    expect(errorOf(await run({ run_period: 'run2010b', variant: 'muons_only' })).message).toBe(
+      'Run period Run2010B has validated-run lists only in the full variant, none in muons_only.',
+    );
   });
 
   it('matches whole periods only: 2012 does not select Run2012B, and 2010 does not select HIRun2010', async () => {
@@ -753,7 +900,13 @@ describe('cern_opendata_get_validated_runs runs', () => {
       expect(result.runs.map((r) => r.run)).toEqual(expected);
       expect(result.totalCount).toBe(expected.length);
       expect(result.summary?.run_count).toBe(10);
+      expect(result.run_bounds).toEqual({ ...bounds, source: 'input' });
       expect(result).not.toHaveProperty('notice');
+    });
+
+    it('echoes no run_bounds when neither bound applies', async () => {
+      serve({ files });
+      expect(success(await run({ recid: '1002' }))).not.toHaveProperty('run_bounds');
     });
 
     it('keeps the summary on the whole list, before the run filter', async () => {
@@ -827,6 +980,13 @@ describe('cern_opendata_get_validated_runs runs', () => {
         runMin = Number(/run_min set to (\d+)/.exec(result.notice ?? '')?.[1]);
       }
       expect(seen).toEqual([1000, 1001, 1002, 1003, 1004]);
+    });
+
+    it('carries a run_max the caller set into the paging notice', async () => {
+      serve({ files });
+      expect(success(await run({ recid: '1002', limit: 2, run_max: 1004 })).notice).toBe(
+        'Showing 2 of 5 runs; call cern_opendata_get_validated_runs again with run_min set to 1002 and run_max set to 1004, or download the whole list from list.https_url.',
+      );
     });
 
     it('counts the total after the run filter, and names the next run inside the filter', async () => {
@@ -1344,6 +1504,22 @@ describe('cern_opendata_get_validated_runs format', () => {
     expect(text).not.toContain('**Whole list:**');
     expect(text).toContain('### Runs (0)\nNo list read; pick one recid from the matched lists.');
     expect(textOf(result, 1)).toContain('3 validated-run lists match run period Run2011A');
+  });
+
+  it('renders the run bounds the runs were filtered by, with their source', async () => {
+    const listing = datasetLinkingLists(
+      '6030',
+      { abstract: ['1002'] },
+      { run_numbers: ['190456', '190459'] },
+    );
+    serve({ records: { '6030': listing } });
+    expect(textOf(await run({ recid: '6030' }))).toContain(
+      '**Run bounds:** run_min 190456 · run_max 190459 · source dataset',
+    );
+    expect(textOf(await run({ recid: '1002', run_max: 190456 }))).toContain(
+      '**Run bounds:** run_min none · run_max 190456 · source input',
+    );
+    expect(textOf(await run({ recid: '1002' }))).not.toContain('**Run bounds:**');
   });
 
   it('renders "No runs in range." when a list was read and the filter left nothing', async () => {
