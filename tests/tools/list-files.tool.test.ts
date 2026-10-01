@@ -530,6 +530,71 @@ describe('cern_opendata_list_files enrichment', () => {
     });
   });
 
+  it('zero-result page (on-demand record the API lists no files for) reports the stated files on tape', async () => {
+    serve({
+      '13049': recordBody({
+        recid: '13049',
+        title:
+          '/ZprimeLFVToEMu_M-1000_TuneZ2star_8TeV_madgraph/Summer12_DR53X-PU_S10_START53_V19E-v1/AODSIM',
+        availability: 'ondemand',
+        _availability_details: null,
+        distribution: {
+          availability: 'ondemand',
+          formats: ['aodsim', 'root'],
+          number_events: 9996,
+          number_files: 2,
+          size: 3_504_276_797,
+        },
+      }),
+    });
+    const raw = await run({ recid: '13049' });
+    const result = success(raw);
+    expect(result).toMatchObject({
+      availability: 'ondemand',
+      files: [],
+      indexes: [],
+      children: [],
+      truncated: false,
+      totalCount: 0,
+    });
+    expect(result.notice).toBe(
+      "This record's 2 files (3504276797 bytes) are on tape (availability ondemand), and the portal's API does not list them; request them on the record's portal page (https://opendata.cern.ch/record/13049) before downloading.",
+    );
+    expect(textOf(raw, 1)).toContain('are on tape (availability ondemand)');
+  });
+
+  it('zero-result page (files stated but unlisted, not on demand) names the stated count without claiming tape', async () => {
+    serve({
+      '711': recordBody({
+        recid: '711',
+        availability: 'requested',
+        distribution: { number_files: 3 },
+      }),
+    });
+    expect(success(await run({ recid: '711' })).notice).toBe(
+      "The record states 3 files, but the portal's API lists none of them; check the record's portal page (https://opendata.cern.ch/record/711).",
+    );
+  });
+
+  it('keeps the child-record notice for an umbrella record that states the files of its children', async () => {
+    serve({
+      '712': recordBody({
+        recid: '712',
+        availability: 'ondemand',
+        distribution: { number_files: 70_611, size: 1_000 },
+        relations: [{ type: 'isParentOf', recid: '713' }],
+      }),
+    });
+    expect(success(await run({ recid: '712' })).notice).toBe(
+      'This record holds no files itself; its files sit in 1 child records (713). Call cern_opendata_list_files with one of those recids.',
+    );
+  });
+
+  it('says the record has no files when its distribution states none', async () => {
+    serve({ '714': recordBody({ recid: '714', distribution: { number_files: 0, size: 0 } }) });
+    expect(success(await run({ recid: '714' })).notice).toBe('This record has no files.');
+  });
+
   it('zero-result file page (record scope, indexes only) groups the files under the indexes and counts tape files', async () => {
     serve();
     const result = success(await run({ recid: '24464' }));

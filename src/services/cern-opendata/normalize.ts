@@ -217,6 +217,7 @@ export function licenseOf(meta: RawMetadata): License {
 }
 
 /**
+ * The portal's "Cite as" (Decision 13): `{author}; ` for each author, then
  * `{collaboration.name} ({date_published}). {title_additional ?? title}. CERN
  * Open Data Portal. DOI:{doi}`, leaving out any part the record lacks.
  */
@@ -224,7 +225,7 @@ export function citationOf(meta: RawMetadata, doi: string): Citation {
   const collaboration = str(meta.collaboration?.name);
   const date = str(meta.date_published);
   const title = str(meta.title_additional) ?? str(meta.title);
-  const parts: string[] = [];
+  const parts = (authorsOf(meta) ?? []).map((author) => `${author.name};`);
   if (collaboration && date) parts.push(`${collaboration} (${date}).`);
   else if (collaboration) parts.push(`${collaboration}.`);
   else if (date) parts.push(`(${date}).`);
@@ -435,8 +436,10 @@ function toCompactIndex(raw: RawFileIndex, recid: string): CompactIndex {
 /**
  * Compact a full record GET body into the cached manifest. Regular files come
  * from `_files` (or `files`); `children` is set only for an umbrella record
- * holding no files and no indexes (Decision 21). A file entry missing its key,
- * URI or size makes the body unreadable (`upstream_unreadable`).
+ * holding no files and no indexes (Decision 21); `number_files` and `size` are
+ * the record's stated `distribution`, kept for records the API lists no files
+ * for (Decision 30). A file entry missing its key, URI or size makes the body
+ * unreadable (`upstream_unreadable`).
  */
 export function toManifest(recid: string, meta: RawMetadata): CompactManifest {
   const rawFiles = Array.isArray(meta._files)
@@ -462,6 +465,8 @@ export function toManifest(recid: string, meta: RawMetadata): CompactManifest {
     files,
     indexes,
     children,
+    number_files: num(meta.distribution?.number_files),
+    size: num(meta.distribution?.size),
   });
 }
 

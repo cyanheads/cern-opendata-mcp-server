@@ -118,7 +118,11 @@ const TriggerSchema = z
 
 const SearchTriggerPathsOutput = z.object({
   page: z.number().describe('The page returned.'),
-  has_more: z.boolean().describe('True when the portal has another page of matches.'),
+  has_more: z
+    .boolean()
+    .describe(
+      'True when the next page holds matches and lies within the first 10,000. False on the last reachable page even when more matches exist; truncated and notice say so.',
+    ),
   triggers: z.array(TriggerSchema).describe('Matching trigger path records on this page.'),
 });
 
@@ -299,6 +303,8 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
 
     const { page } = outcome;
     const triggers = page.hits.map(toTrigger);
+    const truncated = page.total > input.page * input.limit;
+    const hasMore = truncated && (input.page + 1) * input.limit <= PAGE_WINDOW;
 
     const fragments: string[] = [];
     if (version !== undefined) {
@@ -319,11 +325,11 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
         `Page ${input.page} is past the last page (${page.total} matches); call cern_opendata_search_trigger_paths again with page ${last}.`,
       );
     }
-    if (page.hasMore && triggers.length > 0) {
+    if (truncated) {
       const from = (input.page - 1) * input.limit + 1;
       const to = from + triggers.length - 1;
       fragments.push(
-        (input.page + 1) * input.limit <= PAGE_WINDOW
+        hasMore
           ? `Showing ${from}–${to} of ${page.total}; call cern_opendata_search_trigger_paths again with page ${input.page + 1}, or add year.`
           : `Showing ${from}–${to} of ${page.total}; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.`,
       );
@@ -333,11 +339,11 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
       shown: triggers.length,
       total: page.total,
       cap: input.limit,
-      hasMore: page.hasMore,
+      truncated,
       notice: composeNotice(fragments),
     });
 
-    return { page: input.page, has_more: page.hasMore, triggers };
+    return { page: input.page, has_more: hasMore, triggers };
   },
 
   format: (result) => {

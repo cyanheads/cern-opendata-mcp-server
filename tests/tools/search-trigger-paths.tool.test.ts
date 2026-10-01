@@ -371,10 +371,17 @@ describe('cern_opendata_search_trigger_paths result: the three HLT_IsoMu24 recor
     expect(result.triggers.map((t) => t.recid)).toEqual(['2561', '6537', '29551']);
   });
 
-  it('echoes the requested page and reports has_more from links.next alone', async () => {
-    serve(searchBody(triggerHits(2), { total: 12, hasNext: true }));
+  it('echoes the requested page and derives has_more from the total', async () => {
+    serve(searchBody(triggerHits(2), { total: 12 }));
     const result = success(await run({ path: 'HLT_Mu*', page: 2, limit: 2 }));
     expect(result).toMatchObject({ page: 2, has_more: true });
+  });
+
+  it('never reads has_more from links.next', async () => {
+    serve(searchBody(triggerHits(2), { total: 2, hasNext: true }));
+    const result = success(await run({ path: 'HLT_Mu*', limit: 2 }));
+    expect(result).toMatchObject({ has_more: false, truncated: false });
+    expect(result).not.toHaveProperty('notice');
   });
 
   it('flags an unparsable abstract as parsed false and keeps the abstract and the path from the title', async () => {
@@ -523,9 +530,9 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
   });
 
   it('on the last page inside the 10,000-match window, never points past it', async () => {
-    serve(searchBody(triggerHits(50), { total: 35_747, hasNext: true }));
+    serve(searchBody(triggerHits(50), { total: 35_747 }));
     const result = success(await run({ path: 'HLT_Mu*', limit: 50, page: 200 }));
-    expect(result.truncated).toBe(true);
+    expect(result).toMatchObject({ truncated: true, has_more: false });
     expect(result.notice).toBe(
       'Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.',
     );
@@ -906,8 +913,8 @@ describe('cern_opendata_search_trigger_paths format', () => {
     expect(empty.text).toContain('No trigger path records on this page.');
   });
 
-  it('shows More pages: yes when the portal links a next page', async () => {
-    const { text } = await rendered(triggerHits(2), { total: 9, hasNext: true });
+  it('shows More pages: yes when another page holds matches', async () => {
+    const { text } = await rendered(triggerHits(2), { total: 12 });
     expect(text.split('\n')[0]).toContain('**More pages:** yes');
   });
 

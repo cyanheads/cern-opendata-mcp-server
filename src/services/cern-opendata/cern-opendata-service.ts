@@ -388,7 +388,6 @@ export class CernOpenDataService {
       page: {
         hits: body.hits.hits,
         total: body.hits.total,
-        hasMore: typeof body.links?.next === 'string',
         aggregations: body.aggregations ?? {},
       },
     };

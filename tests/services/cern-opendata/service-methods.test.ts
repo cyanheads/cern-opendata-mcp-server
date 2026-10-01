@@ -151,7 +151,7 @@ describe('search', () => {
     expect(q(new URL(http.calls[0]?.request.url ?? ''))).toBe(query);
   });
 
-  it('maps a page with its hits, total, facets and the next-page flag', async () => {
+  it('maps a page to its hits, total and facets, leaving links.next unread', async () => {
     const { service, ctx } = makeService([
       searchRoute(
         jsonResponse(
@@ -168,8 +168,8 @@ describe('search', () => {
     if (outcome.kind !== 'page') return;
     expect(outcome.page.hits.map((h) => h.id)).toEqual([6004, 'cms-guide-docker']);
     expect(outcome.page.total).toBe(926);
-    expect(outcome.page.hasMore).toBe(true);
     expect(outcome.page.aggregations).toEqual(aggregationsBody);
+    expect(Object.keys(outcome.page).sort()).toEqual(['aggregations', 'hits', 'total']);
   });
 
   it('reports an empty page and a page past the end', async () => {
@@ -180,20 +180,20 @@ describe('search', () => {
     const empty = await service.search({ q: 'nothing', size: 10 }, service.startBudget(), ctx);
     expect(empty).toEqual({
       kind: 'page',
-      page: { hits: [], total: 0, hasMore: false, aggregations: {} },
+      page: { hits: [], total: 0, aggregations: {} },
     });
     const pastEnd = await service.search({ size: 10, page: 99 }, service.startBudget(), ctx);
-    expect(pastEnd).toMatchObject({ kind: 'page', page: { hits: [], total: 120, hasMore: false } });
+    expect(pastEnd).toMatchObject({ kind: 'page', page: { hits: [], total: 120 } });
   });
 
-  it('treats a missing links object or a non-string next as no further page', async () => {
+  it('reads a page with no links object or a non-string next', async () => {
     const { service, ctx } = makeService([
       searchRoute(jsonResponse({ hits: { hits: [], total: 0 } }), true),
       searchRoute(jsonResponse({ hits: { hits: [], total: 0 }, links: { next: null } })),
     ]);
     for (let i = 0; i < 2; i++) {
       const outcome = await service.search({ size: 1 }, service.startBudget(), ctx);
-      expect(outcome).toMatchObject({ kind: 'page', page: { hasMore: false, aggregations: {} } });
+      expect(outcome).toEqual({ kind: 'page', page: { hits: [], total: 0, aggregations: {} } });
     }
   });
 

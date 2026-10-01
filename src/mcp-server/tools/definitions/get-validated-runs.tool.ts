@@ -407,7 +407,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         shown: 0,
         total: 0,
         cap: input.limit,
-        hasMore: false,
+        truncated: false,
         notice: composeNotice(fragments),
       });
       return definedOnly<GetValidatedRunsOut>({
@@ -448,7 +448,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       shown: runs.length,
       total: inRange.length,
       cap: input.limit,
-      hasMore: next !== undefined,
+      truncated: next !== undefined,
       notice: composeNotice(fragments),
     });
 

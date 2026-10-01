@@ -164,11 +164,12 @@ export interface SearchParams {
   year?: string;
 }
 
-/** A successful search page. Hits are raw; `normalize.ts` maps them to output shapes. */
+/**
+ * A successful search page. Hits are raw; `normalize.ts` maps them to output
+ * shapes. Paging is derived from `total`, never from `links.next` (Decision 25).
+ */
 export interface SearchPage {
   aggregations: Record<string, RawAggregation>;
-  /** `links.next` was present. */
-  hasMore: boolean;
   hits: RawHit[];
   total: number;
 }
@@ -235,7 +236,14 @@ export interface CompactManifest {
   /** Regular files (not index members). */
   files: CompactFile[];
   indexes: CompactIndex[];
+  /**
+   * `distribution.number_files` as the record states it. A tape-resident
+   * (`ondemand`) record states its files while the API lists none of them.
+   */
+  number_files?: number;
   recid: string;
+  /** `distribution.size` in bytes, as the record states it. */
+  size?: number;
   title?: string;
 }
 

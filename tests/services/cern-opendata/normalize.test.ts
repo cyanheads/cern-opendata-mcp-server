@@ -383,6 +383,60 @@ describe('citationOf', () => {
     );
     expect(citationOf({}, '10.1/A').text).toBe('CERN Open Data Portal. DOI:10.1/A');
   });
+
+  it('opens with the authors, each followed by a semicolon, when no collaboration is named', () => {
+    expect(
+      citationOf(
+        {
+          authors: [{ name: 'Rodriguez Marrero, Ana', orcid: '0000-0002-7145-630X' }],
+          collaboration: null,
+          date_published: '2014',
+          title: 'Two-lepton/four-lepton analysis example of CMS 2010 open data',
+        },
+        '10.7483/OPENDATA.CMS.QXY9.X47P',
+      ).text,
+    ).toBe(
+      'Rodriguez Marrero, Ana; (2014). Two-lepton/four-lepton analysis example of CMS 2010 open data. CERN Open Data Portal. DOI:10.7483/OPENDATA.CMS.QXY9.X47P',
+    );
+    expect(
+      citationOf(
+        {
+          authors: [{ name: 'Rodriguez Marrero, Ana' }, { name: 'Lassila-Perini, Kati' }],
+          date_published: '2016',
+          title: 'Two-lepton/four-lepton analysis example of CMS 2011 open data',
+        },
+        '10.7483/OPENDATA.CMS.ETJK.JKMB',
+      ).text,
+    ).toBe(
+      'Rodriguez Marrero, Ana; Lassila-Perini, Kati; (2016). Two-lepton/four-lepton analysis example of CMS 2011 open data. CERN Open Data Portal. DOI:10.7483/OPENDATA.CMS.ETJK.JKMB',
+    );
+  });
+
+  it('credits the authors before the collaboration when the record names both', () => {
+    expect(
+      citationOf(
+        {
+          authors: [{ name: 'David, Gabor' }, { name: 'Potekhin, Maxim' }],
+          collaboration: { name: 'PHENIX collaboration' },
+          date_published: '2021',
+          title:
+            'Examples of basic analysis techniques for neutral meson and photon data from the PHENIX detector',
+        },
+        '10.7483/OPENDATA.PHENIX.70SC.C9E7',
+      ).text,
+    ).toBe(
+      'David, Gabor; Potekhin, Maxim; PHENIX collaboration (2021). Examples of basic analysis techniques for neutral meson and photon data from the PHENIX detector. CERN Open Data Portal. DOI:10.7483/OPENDATA.PHENIX.70SC.C9E7',
+    );
+  });
+
+  it('skips author entries without a name and needs no date', () => {
+    expect(
+      citationOf(
+        { authors: [{ name: 'A. Person' }, { orcid: 'x' }, { name: ' ' }], title: 'T' },
+        '10.1/A',
+      ).text,
+    ).toBe('A. Person; T. CERN Open Data Portal. DOI:10.1/A');
+  });
 });
 
 describe('systemDetailsOf', () => {

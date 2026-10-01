@@ -707,13 +707,43 @@ describe('cern_opendata_search_records enrichment', () => {
   });
 
   it('on the last page inside the window, never points past it', async () => {
-    serve(searchBody(syntheticHits(50), { total: 35_747, hasNext: true }));
+    serve(searchBody(syntheticHits(50), { total: 35_747 }));
     const result = success(await run({ limit: 50, page: 200 }));
-    expect(result).toMatchObject({ truncated: true, has_more: true, shown: 50 });
+    expect(result).toMatchObject({ truncated: true, has_more: false, shown: 50 });
     expect(result.notice).toBe(
       'Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.',
     );
     expect(result.notice).not.toContain('page 201');
+  });
+
+  it('flags the last reachable page at limit 10 although the portal sends no links.next there', async () => {
+    serve(searchBody(syntheticHits(10), { total: 60_383 }));
+    const result = success(await run({ limit: 10, page: 1000 }));
+    expect(result).toMatchObject({
+      truncated: true,
+      has_more: false,
+      shown: 10,
+      totalCount: 60_383,
+    });
+    expect(result.notice).toBe(
+      'Showing 9991–10000 of 60383; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.',
+    );
+  });
+
+  it('ends paging at the last whole page when the limit does not divide 10,000', async () => {
+    serve(searchBody(syntheticHits(30), { total: 60_383 }));
+    const result = success(await run({ limit: 30, page: 333 }));
+    expect(result).toMatchObject({ truncated: true, has_more: false });
+    expect(result.notice).toBe(
+      'Showing 9961–9990 of 60383; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.',
+    );
+  });
+
+  it('reports more pages from the total when the portal sends no links.next', async () => {
+    serve(searchBody(syntheticHits(10), { total: 95 }));
+    const result = success(await run({ limit: 10, page: 3 }));
+    expect(result).toMatchObject({ truncated: true, has_more: true });
+    expect(result.notice).toContain('again with page 4');
   });
 
   it('points the page before the window edge at the last reachable page normally', async () => {
@@ -850,9 +880,11 @@ describe('cern_opendata_search_records result', () => {
     }
   });
 
-  it('reports has_more from the presence of links.next alone', async () => {
+  it('derives has_more from the total, never from links.next', async () => {
     serve(searchBody(syntheticHits(2), { total: 2, hasNext: true }));
-    expect(success(await run({})).has_more).toBe(true);
+    const result = success(await run({}));
+    expect(result).toMatchObject({ has_more: false, truncated: false });
+    expect(result).not.toHaveProperty('notice');
   });
 
   it('echoes the requested page', async () => {

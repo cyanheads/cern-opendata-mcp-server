@@ -352,7 +352,11 @@ export const searchRecords = tool('cern_opendata_search_records', {
   output: z.object({
     hits: z.array(SearchHitSchema).describe('Matching records on this page.'),
     page: z.number().describe('The page returned.'),
-    has_more: z.boolean().describe('True when the portal has another page of matches.'),
+    has_more: z
+      .boolean()
+      .describe(
+        'True when the next page holds matches and lies within the first 10,000. False on the last reachable page even when more matches exist; truncated and notice say so.',
+      ),
     facets: z
       .object({
         experiment: facetSchema('Matches by experiment.'),
@@ -536,6 +540,8 @@ export const searchRecords = tool('cern_opendata_search_records', {
     const { page } = outcome;
     const hits = page.hits.map(toSearchHit);
     const facets = toFacets(page.aggregations);
+    const truncated = page.total > input.page * input.limit;
+    const hasMore = truncated && (input.page + 1) * input.limit <= PAGE_WINDOW;
     const anyFilter =
       !typeDefaulted ||
       [
@@ -588,11 +594,10 @@ export const searchRecords = tool('cern_opendata_search_records', {
         `Page ${input.page} is past the last page (${page.total} matches); call cern_opendata_search_records again with page ${last}.`,
       );
     }
-    if (page.hasMore && hits.length > 0) {
+    if (truncated) {
       const from = (input.page - 1) * input.limit + 1;
       const to = from + hits.length - 1;
-      const nextReachable = (input.page + 1) * input.limit <= PAGE_WINDOW;
-      if (nextReachable) {
+      if (hasMore) {
         const windowNote =
           page.total > PAGE_WINDOW
             ? ' Only the first 10,000 matches can be paged; add filters to reach the rest.'
@@ -611,11 +616,11 @@ export const searchRecords = tool('cern_opendata_search_records', {
       shown: hits.length,
       total: page.total,
       cap: input.limit,
-      hasMore: page.hasMore,
+      truncated,
       notice: composeNotice(fragments),
     });
 
-    return { hits, page: input.page, has_more: page.hasMore, facets };
+    return { hits, page: input.page, has_more: hasMore, facets };
   },
 
   format: (result) => {

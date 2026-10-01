@@ -316,6 +316,13 @@ export const listFiles = tool('cern_opendata_list_files', {
         fragments.push(
           `This record holds no files itself; its files sit in ${manifest.children.length} child records (${named}${more}). Call cern_opendata_list_files with one of those recids.`,
         );
+      } else if (manifest.number_files) {
+        const stated = `${manifest.number_files} files${manifest.size === undefined ? '' : ` (${manifest.size} bytes)`}`;
+        fragments.push(
+          manifest.availability === 'ondemand'
+            ? `This record's ${stated} are on tape (availability ondemand), and the portal's API does not list them; request them on the record's portal page (${portalUrl}) before downloading.`
+            : `The record states ${stated}, but the portal's API lists none of them; check the record's portal page (${portalUrl}).`,
+        );
       } else {
         fragments.push('This record has no files.');
       }
@@ -330,7 +337,7 @@ export const listFiles = tool('cern_opendata_list_files', {
       shown: page.length,
       total,
       cap: input.limit,
-      hasMore,
+      truncated: hasMore,
       notice: composeNotice(fragments),
     });
 

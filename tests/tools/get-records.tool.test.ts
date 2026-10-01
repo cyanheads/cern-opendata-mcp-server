@@ -330,6 +330,24 @@ describe('cern_opendata_get_records results', () => {
     });
   });
 
+  it("credits the authors of a record that names no collaboration, as the portal's Cite as does", async () => {
+    const authored = hit(101, {
+      recid: '101',
+      title: 'Two-lepton/four-lepton analysis example of CMS 2010 open data',
+      type: { primary: 'Software', secondary: ['Analysis'] },
+      collaboration: null,
+      authors: [{ name: 'Rodriguez Marrero, Ana', orcid: '0000-0002-7145-630X' }],
+      date_published: '2014',
+      doi: '10.7483/OPENDATA.CMS.QXY9.X47P',
+      license: { attribution: 'GPL-3.0-only' },
+    });
+    servePool([authored]);
+    const [record] = success(await run('101')).records;
+    expect(record?.citation?.text).toBe(
+      'Rodriguez Marrero, Ana; (2014). Two-lepton/four-lepton analysis example of CMS 2010 open data. CERN Open Data Portal. DOI:10.7483/OPENDATA.CMS.QXY9.X47P',
+    );
+  });
+
   it('gives a record with no license of its own and no DOI the not-stated license and no citation', async () => {
     servePool([sparseHit]);
     const [record] = success(await run('1120')).records;

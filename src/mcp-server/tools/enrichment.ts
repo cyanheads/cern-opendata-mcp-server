@@ -53,15 +53,21 @@ export function composeNotice(fragments: readonly (string | undefined)[]): strin
 /**
  * Record the page once results arrive: `shown`, `totalCount`, and the one
  * composed notice — passed as `truncated()` guidance when more results
- * remain (that call writes `notice`), else through `notice()`.
+ * remain past this page (that call writes `notice`), else through `notice()`.
  */
 export function finishListEnrichment(
   ctx: Context,
-  page: { cap: number; hasMore: boolean; notice: string | undefined; shown: number; total: number },
+  page: {
+    cap: number;
+    notice: string | undefined;
+    shown: number;
+    total: number;
+    truncated: boolean;
+  },
 ): void {
   ctx.enrich({ shown: page.shown });
   ctx.enrich.total(page.total);
-  if (page.hasMore) {
+  if (page.truncated) {
     ctx.enrich.truncated({
       shown: page.shown,
       cap: page.cap,
