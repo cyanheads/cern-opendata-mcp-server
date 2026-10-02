@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "cern-opendata-mcp-server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths.",
   "author": { "name": "cyanheads" },
   "repository": { "type": "git", "url": "https://github.com/cyanheads/cern-opendata-mcp-server" },

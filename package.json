@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/cern-opendata-mcp-server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "mcpName": "io.github.cyanheads/cern-opendata-mcp-server",
   "description": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths via MCP. STDIO or Streamable HTTP.",
   "type": "module",

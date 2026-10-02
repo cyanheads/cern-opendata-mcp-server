@@ -1,6 +1,6 @@
 # cern-opendata-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 12:11:10
+Generated on: 2026-10-02 16:46:19
 
 ```text
 cern-opendata-mcp-server/
@@ -25,6 +25,7 @@ cern-opendata-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -156,6 +157,7 @@ cern-opendata-mcp-server/
 │   │       ├── cern-opendata-service.ts
 │   │       ├── identifiers.ts
 │   │       ├── normalize.ts
+│   │       ├── query-syntax.ts
 │   │       ├── text.ts
 │   │       ├── trigger-parse.ts
 │   │       ├── types.ts
@@ -164,7 +166,10 @@ cern-opendata-mcp-server/
 ├── tests/
 │   ├── fixtures/
 │   │   ├── cern-opendata-harness.ts
-│   │   └── cern-opendata-upstream.ts
+│   │   ├── cern-opendata-upstream.ts
+│   │   ├── cpu-time.ts
+│   │   ├── record-metadata-hits.json
+│   │   └── record-metadata-upstream.ts
 │   ├── fuzz/
 │   ├── integration/
 │   ├── resources/
@@ -173,6 +178,7 @@ cern-opendata-mcp-server/
 │   │   └── cern-opendata/
 │   │       ├── identifiers.test.ts
 │   │       ├── normalize.test.ts
+│   │       ├── query-syntax.test.ts
 │   │       ├── service-accessor.test.ts
 │   │       ├── service-boundary.test.ts
 │   │       ├── service-methods.test.ts
