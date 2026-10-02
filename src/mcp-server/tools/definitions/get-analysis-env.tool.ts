@@ -10,7 +10,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { RecordTypeSchema } from '@/mcp-server/record-schema.js';
+import { RecordTypeSchema, renderRecordType } from '@/mcp-server/record-schema.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
   definedOnly,
@@ -121,11 +121,18 @@ function hasAnchorTag(line: string, value: RegExp): boolean {
  * The section a guide link points at. With an anchor: from the heading line
  * holding `<a name="{anchor}">` to the next heading of the same or higher
  * level. Without one (or when the anchor is absent): from the start to the
- * second level-2 heading. `anchored` says whether the anchor was found.
+ * second level-2 heading. `anchored` says whether the anchor was found. Lines
+ * are joined with `\n`; `bodyOffset(at)` maps a position in `text` back to the
+ * body as the portal sent it, where a line may end in CRLF.
  */
 function extractSection(body: string, anchor: string | undefined) {
   const lines = body.split(/\r?\n/);
   const levels = headingLevels(lines);
+  const section = (from: number, to: number, anchored: boolean) => ({
+    text: lines.slice(from, to < 0 ? undefined : to).join('\n'),
+    anchored,
+    bodyOffset: (at: number) => bodyOffsetOf(body, lines, from, at),
+  });
   if (anchor) {
     const value = new RegExp(`${escapeRegExp(anchor)}(?:["'\\s/>]|$)`, 'iy');
     const start = lines.findIndex(
@@ -134,15 +141,33 @@ function extractSection(body: string, anchor: string | undefined) {
     const level = start >= 0 ? levels[start] : undefined;
     if (level !== undefined) {
       const after = levels.findIndex((l, i) => i > start && l !== undefined && l <= level);
-      return {
-        text: lines.slice(start, after < 0 ? undefined : after).join('\n'),
-        anchored: true,
-      };
+      return section(start, after, true);
     }
   }
   let seen = 0;
-  const end = levels.findIndex((l) => l === 2 && ++seen === 2);
-  return { text: lines.slice(0, end < 0 ? undefined : end).join('\n'), anchored: false };
+  return section(
+    0,
+    levels.findIndex((l) => l === 2 && ++seen === 2),
+    false,
+  );
+}
+
+/**
+ * The body offset of position `at` in `lines[from..]` joined with `\n`. A line
+ * of a `/\r?\n/` split is followed in the body by `\r\n` when the next unit is
+ * `\r`, else by `\n`.
+ */
+function bodyOffsetOf(body: string, lines: readonly string[], from: number, at: number): number {
+  let source = 0;
+  let left = at;
+  for (const [i, line] of lines.entries()) {
+    if (i >= from) {
+      if (left <= line.length) return source + left;
+      left -= line.length + 1;
+    }
+    source += line.length + (body[source + line.length] === '\r' ? 2 : 1);
+  }
+  return body.length;
 }
 
 /**
@@ -215,7 +240,11 @@ const ExampleSoftwareSchema = z
 
 const GuideSchema = z
   .object({
-    slug: z.string().describe('Doc slug; pass it to cern_opendata_get_records for the full page.'),
+    slug: z
+      .string()
+      .describe(
+        'Doc slug; pass it as the one id of cern_opendata_get_records for the page body, with body_offset to read on past a cut (the notice names the offset).',
+      ),
     url: z.string().describe('The guide link, absolute.'),
     link_description: z.string().optional().describe('The link text the record gives the guide.'),
     anchor: z.string().optional().describe('Section anchor the link points at, when it has one.'),
@@ -224,12 +253,14 @@ const GuideSchema = z
       .string()
       .optional()
       .describe(
-        'The linked section (or the opening section) as markdown, as the portal sent it; at most 12,000 characters.',
+        'The linked section (or the opening section) as markdown, as the portal sent it but with LF line ends; at most 12,000 characters.',
       ),
     section_truncated: z
       .boolean()
       .optional()
-      .describe('True when the section was cut at 12,000 characters.'),
+      .describe(
+        'True when the section was cut at 12,000 characters; the notice names the body_offset where the quote stops.',
+      ),
     fetched: z
       .boolean()
       .describe(
@@ -326,13 +357,6 @@ function toExampleSoftware(hit: RawHit): ExampleSoftwareOut {
   });
 }
 
-function renderType(type: GetAnalysisEnvOut['type']): string {
-  const primary = type.primary ? inline(type.primary) : NOT_AVAILABLE;
-  return type.secondary.length > 0
-    ? `${primary} (${type.secondary.map(inline).join(', ')})`
-    : primary;
-}
-
 function renderGuide(guide: GuideOut): string[] {
   const lines = [
     `#### ${inline(guide.slug)}${guide.anchor ? ` § ${inline(guide.anchor)}` : ''}`,
@@ -350,7 +374,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
-      'Record id: up to 12 digits (6004), recid:6004, or a portal record URL. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), optionally after an experiment prefix (cms-93956); recid:6004 or a portal record URL also work. cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
   }),
   output: GetAnalysisEnvOutput,
@@ -359,7 +383,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       .string()
       .optional()
       .describe(
-        'What could not be assembled and how to get it: an empty environment, linked records that could not be read, guides not fetched or cut, or more linked records than shown.',
+        'What could not be assembled and how to get it: an empty environment, linked records that could not be read, guides not fetched, not found or cut, a guide anchor no heading carries, or more linked records than shown.',
       ),
   },
   errors: [
@@ -481,12 +505,15 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       throw linkedOutcome.reason;
     }
 
-    /** One notice fragment per guide slug and state, in link order. */
+    /**
+     * One notice fragment per guide slug, state and cut position, in link
+     * order. A cut section names the body offset where its quote stops.
+     */
     const guideNotes = new Map<string, string>();
-    const noteGuide = (slug: string, what: string) =>
+    const noteGuide = (slug: string, what: string, bodyOffset?: number) =>
       guideNotes.set(
-        `${slug}\n${what}`,
-        `Guide ${noticeValue(slug)} ${what}; call cern_opendata_get_records with ids ["${noticeValue(slug)}"] for the page body.`,
+        `${slug}\n${what}\n${bodyOffset}`,
+        `Guide ${noticeValue(slug)} ${what}; call cern_opendata_get_records with ids ["${noticeValue(slug)}"] ${bodyOffset === undefined ? 'for the page body' : `and body_offset ${bodyOffset} to read on from the cut`}.`,
       );
     const resolvedGuides = guides.map((guide, i) => {
       const outcome = i < GUIDES_FETCHED ? docOutcomes[fetchSlugs.indexOf(guide.slug)] : undefined;
@@ -503,7 +530,13 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       const extracted = body === undefined ? undefined : extractSection(body, guide.anchor);
       const capped =
         extracted === undefined ? undefined : capText(extracted.text, SECTION_MAX_CHARS);
-      if (capped?.truncated) noteGuide(guide.slug, 'was cut at 12,000 characters');
+      if (extracted && capped?.truncated) {
+        noteGuide(
+          guide.slug,
+          'was cut at 12,000 characters',
+          extracted.bodyOffset(capped.text.length),
+        );
+      }
       if (guide.anchor && extracted && !extracted.anchored) {
         fragments.push(
           `Guide ${noticeValue(guide.slug)} has no section anchored ${noticeValue(guide.anchor)}; its opening section is quoted instead.`,
@@ -569,7 +602,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
     const { software } = result;
     const lines = [
       `## Analysis environment for record ${inline(result.recid)}: ${inlineOrNA(result.title)}`,
-      `**Type:** ${renderType(result.type)} · **Experiment:** ${inlineList(result.experiment)} · **Run periods:** ${inlineList(result.run_period)}`,
+      `**Type:** ${renderRecordType(result.type)} · **Experiment:** ${inlineList(result.experiment)} · **Run periods:** ${inlineList(result.run_period)}`,
       '',
       '### Software',
       `**Release:** ${inlineOrNA(software.release)} · **Global tag:** ${inlineOrNA(software.global_tag)} · **Environment record:** ${inlineOrNA(software.environment_recid)}`,

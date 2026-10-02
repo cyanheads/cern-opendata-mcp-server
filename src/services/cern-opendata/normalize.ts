@@ -7,7 +7,7 @@
  */
 
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { capText, PORTAL_ORIGIN } from './text.js';
+import { PORTAL_ORIGIN, sliceText } from './text.js';
 import type {
   AvailabilityCounts,
   Citation,
@@ -15,6 +15,7 @@ import type {
   CompactIndex,
   CompactManifest,
   Facet,
+  FacetBucket,
   Facets,
   License,
   LinkSource,
@@ -23,10 +24,13 @@ import type {
   RawFileIndex,
   RawHit,
   RawMetadata,
+  RecordCategory,
+  RecordHead,
   RecordLink,
   RecordRelation,
   RecordShape,
   RecordType,
+  RecordVariable,
   RunListVariant,
   SearchHit,
   SystemDetails,
@@ -156,24 +160,44 @@ const FACET_KINDS: Record<keyof Facets, FacetKind> = {
   availability: 'terms',
   year: 'histogram',
   number_events: 'range',
+  category: 'terms',
+  keywords: 'terms',
+  magnet_polarity: 'terms',
+  stripping_stream: 'terms',
+  stripping_version: 'terms',
 };
 
-function toFacet(agg: RawAggregation | undefined, kind: FacetKind, dropGlossary: boolean): Facet {
-  const buckets = (agg?.buckets ?? []).flatMap((bucket) => {
+/** Every facet search returns, in the order `cern_opendata_search_records` lists them. */
+export const FACET_KEYS = Object.keys(FACET_KINDS) as (keyof Facets)[];
+
+/** The facets whose buckets nest a second level: the raw sub-aggregation and the field it becomes. */
+const NESTED_LEVELS: Partial<
+  Record<keyof Facets, readonly ['subtype', 'subtypes'] | readonly ['subcategory', 'subcategories']>
+> = {
+  type: ['subtype', 'subtypes'],
+  category: ['subcategory', 'subcategories'],
+};
+
+function toFacet(agg: RawAggregation | undefined, key: keyof Facets): Facet {
+  const kind = FACET_KINDS[key];
+  const nested = NESTED_LEVELS[key];
+  const buckets = (agg?.buckets ?? []).flatMap((bucket): FacetBucket[] => {
     const value =
       kind === 'histogram'
         ? (str(bucket.key_as_string) ?? str(String(bucket.key ?? '')))
         : str(String(bucket.key ?? ''));
-    if (value === undefined || (dropGlossary && value === 'Glossary')) return [];
-    const subtypes = bucket.subtype?.buckets?.flatMap((sub) => {
-      const subValue = str(String(sub.key ?? ''));
-      return subValue === undefined ? [] : [{ value: subValue, count: num(sub.doc_count) ?? 0 }];
-    });
+    if (value === undefined || (key === 'type' && value === 'Glossary')) return [];
+    const level =
+      nested &&
+      bucket[nested[0]]?.buckets?.flatMap((sub) => {
+        const subValue = str(String(sub.key ?? ''));
+        return subValue === undefined ? [] : [{ value: subValue, count: num(sub.doc_count) ?? 0 }];
+      });
     return [
       {
         value,
         count: num(bucket.doc_count) ?? 0,
-        ...(subtypes ? { subtypes } : {}),
+        ...(nested && level ? { [nested[1]]: level } : {}),
       },
     ];
   });
@@ -181,17 +205,16 @@ function toFacet(agg: RawAggregation | undefined, kind: FacetKind, dropGlossary:
 }
 
 /**
- * The eight facets search exposes. `year` buckets use `key_as_string`; range
- * and histogram facets report `other_count: 0`; the Glossary bucket is dropped
- * from `type`. A facet the portal omitted comes back with no buckets.
+ * The thirteen facets search exposes. `year` buckets use `key_as_string`; range
+ * and histogram facets report `other_count: 0`; `type` buckets nest `subtypes`
+ * and `category` buckets `subcategories`; the Glossary bucket is dropped from
+ * `type`. Values are kept as received, a leading space included. A facet the
+ * portal omitted comes back with no buckets.
  */
 export function toFacets(aggregations: Record<string, RawAggregation>): Facets {
   return Object.fromEntries(
-    (Object.keys(FACET_KINDS) as (keyof Facets)[]).map((key) => [
-      key,
-      toFacet(aggregations[key], FACET_KINDS[key], key === 'type'),
-    ]),
-  ) as unknown as Facets;
+    FACET_KEYS.map((key) => [key, toFacet(aggregations[key], key)]),
+  ) as Record<keyof Facets, Facet>;
 }
 
 /** How many glossary entries the `type` facet counted (the zero-hit glossary notice). */
@@ -245,9 +268,18 @@ export function citationOf(meta: RawMetadata, doi: string): Citation {
 
 const LINK_SECTIONS = ['abstract', 'note', 'usage', 'validation', 'use_with'] as const;
 
+/** Pile-up links name their dataset in `title`, which becomes the link's `description`. */
+function pileupLinksOf(meta: RawMetadata) {
+  const links = meta.pileup?.links;
+  return Array.isArray(links)
+    ? links.map((link) => ({ recid: link?.recid, description: link?.title }))
+    : undefined;
+}
+
 function linksOf(meta: RawMetadata): RecordLink[] {
   const sections: [LinkSource, unknown][] = [
     ...LINK_SECTIONS.map((source): [LinkSource, unknown] => [source, meta[source]?.links]),
+    ['pileup', pileupLinksOf(meta)],
     ['software', meta.links],
   ];
   return sections.flatMap(([source, links]) =>
@@ -339,17 +371,58 @@ function datasetSemanticsOf(meta: RawMetadata): RecordShape['dataset_semantics']
   });
 }
 
+/** `dataset_semantics[]` as `{ variable, type?, unit?, description_html? }`; an entry without `variable` is dropped. */
+function variablesOf(meta: RawMetadata): RecordVariable[] | undefined {
+  const entries = meta.dataset_semantics;
+  if (!Array.isArray(entries)) return;
+  const variables = entries.flatMap((entry) => {
+    const variable = str(entry?.variable);
+    return variable
+      ? [
+          definedOnly<RecordVariable>({
+            variable,
+            type: str(entry.type),
+            unit: str(entry.unit),
+            description_html: str(entry.description),
+          }),
+        ]
+      : [];
+  });
+  return variables.length > 0 ? variables : undefined;
+}
+
+/** `categories` as `{ primary, secondary[], source? }`; `undefined` without a primary. */
+function categoryOf(meta: RawMetadata): RecordCategory | undefined {
+  const primary = str(meta.categories?.primary);
+  if (!primary) return;
+  return definedOnly<RecordCategory>({
+    primary,
+    secondary: strList(meta.categories?.secondary) ?? [],
+    source: str(meta.categories?.source),
+  });
+}
+
+function strippingOf(meta: RawMetadata): RecordShape['stripping'] {
+  const shaped = definedOnly<NonNullable<RecordShape['stripping']>>({
+    stream: str(meta.stripping?.stream),
+    version: str(meta.stripping?.version),
+  });
+  return Object.keys(shaped).length > 0 ? shaped : undefined;
+}
+
 /**
  * The shared Record shape for one hit (also a record GET or doc GET body).
  * `matchedInputs` lists the caller's ids that resolved here; the resource
- * passes `[recid]`. Doc and news bodies are cut at {@link DOC_BODY_MAX_CHARS}.
+ * passes `[recid]`. A doc or news body is returned as a slice of at most
+ * {@link DOC_BODY_MAX_CHARS} UTF-16 units from `bodyOffset` (Decision 50).
  */
-export function toRecord(hit: RawHit, matchedInputs: string[]): RecordShape {
+export function toRecord(hit: RawHit, matchedInputs: string[], bodyOffset = 0): RecordShape {
   const meta = hit.metadata;
   const slug = str(meta.slug);
   const doi = str(meta.doi);
   const body = str(meta.body?.content);
-  const capped = body === undefined ? undefined : capText(body, DOC_BODY_MAX_CHARS);
+  const slice = body === undefined ? undefined : sliceText(body, bodyOffset, DOC_BODY_MAX_CHARS);
+  const more = slice !== undefined && slice.end < (body?.length ?? 0);
   const collaborationName = str(meta.collaboration?.name);
   return definedOnly<RecordShape>({
     id: String(hit.id),
@@ -386,17 +459,25 @@ export function toRecord(hit: RawHit, matchedInputs: string[]): RecordShape {
     validation_html: str(meta.validation?.description),
     note_html: str(meta.note?.description),
     use_with_html: str(meta.use_with?.description),
+    pileup_html: str(meta.pileup?.description),
     links: linksOf(meta),
     relations: relationsOf(meta),
     system_details: systemDetailsOf(meta),
     source_code_repository_url: str(meta.source_code_repository?.url),
     dataset_semantics: datasetSemanticsOf(meta),
+    variables: variablesOf(meta),
+    category: categoryOf(meta),
+    keywords: strList(meta.keywords),
+    magnet_polarity: str(meta.magnet_polarity),
+    stripping: strippingOf(meta),
     short_description: str(meta.short_description?.content),
     tags: strList(meta.tags),
-    body: capped?.text,
+    body: slice?.text,
     body_format: str(meta.body?.format),
-    body_length: capped?.length,
-    body_truncated: capped?.truncated,
+    body_length: body?.length,
+    body_offset: slice?.start,
+    body_next_offset: more ? slice?.end : undefined,
+    body_truncated: slice ? more : undefined,
     license: licenseOf(meta),
     citation: doi ? citationOf(meta, doi) : undefined,
     portal_url: portalUrlOf(hit),
@@ -407,17 +488,21 @@ function unreadable(message: string): never {
   throw serviceUnavailable(message, { reason: 'upstream_unreadable' });
 }
 
+/**
+ * One file. Its XRootD URI and size are what `list_files` exists to return,
+ * so a file without either is unreadable; `key` is relayed when stated and
+ * never filled in, since some index members carry none (Decision 24).
+ */
 function toCompactFile(raw: RawFile, recid: string): CompactFile {
-  const key = str(raw?.key);
   const uri = str(raw?.uri);
   const size = num(raw?.size);
-  if (!key || !uri || size === undefined) {
+  if (!uri || size === undefined) {
     unreadable(
-      `CERN Open Data returned a file entry for record ${recid} without a key, XRootD URI or size.`,
+      `CERN Open Data returned a file entry for record ${recid} without an XRootD URI or size.`,
     );
   }
   return definedOnly<CompactFile>({
-    key,
+    key: str(raw.key),
     filename: str(raw.filename),
     size,
     checksum: str(raw.checksum),
@@ -426,9 +511,23 @@ function toCompactFile(raw: RawFile, recid: string): CompactFile {
   });
 }
 
-function toCompactIndex(raw: RawFileIndex, recid: string): CompactIndex {
+/**
+ * One file index: a `_file_indices` entry of the record GET, or the body of
+ * `GET /record/{recid}/file_index/{key}`, which is the same entry. An index
+ * lists every file it holds, so a count or size the portal does not state
+ * falls back to the member count and the members' summed size; availability
+ * is relayed as stated, `{}` when it states none. An index without a key, with
+ * a key that is not well-formed Unicode (its URI-list and JSON URLs cannot be
+ * built), or with a member lacking its URI or size, is unreadable.
+ */
+export function toCompactIndex(raw: RawFileIndex, recid: string): CompactIndex {
   const key = str(raw?.key);
   if (!key) unreadable(`CERN Open Data returned a file index for record ${recid} without a key.`);
+  if (!key.isWellFormed()) {
+    unreadable(
+      `CERN Open Data returned a file index for record ${recid} whose key is not well-formed Unicode.`,
+    );
+  }
   const files = (Array.isArray(raw.files) ? raw.files : []).map((file) =>
     toCompactFile(file, recid),
   );
@@ -443,11 +542,25 @@ function toCompactIndex(raw: RawFileIndex, recid: string): CompactIndex {
 }
 
 /**
+ * The record-level fields `list_files` reports, read alike from a record GET
+ * body and from the record's files-skipped search hit, so index-scope output
+ * does not depend on which read served it.
+ */
+export function toRecordHead(recid: string, meta: RawMetadata): RecordHead {
+  return definedOnly<RecordHead>({
+    recid,
+    title: str(meta.title),
+    availability: availabilityOf(meta),
+    availability_details: availabilityCounts(meta._availability_details),
+  });
+}
+
+/**
  * Compact a full record GET body into the cached manifest. Regular files come
  * from `_files` (or `files`); `children` is set only for an umbrella record
  * holding no files and no indexes (Decision 21); `number_files` and `size` are
  * the record's stated `distribution`, kept for records the API lists no files
- * for (Decision 30). A file entry missing its key, URI or size makes the body
+ * for (Decision 30). A file entry missing its URI or size makes the body
  * unreadable (`upstream_unreadable`).
  */
 export function toManifest(recid: string, meta: RawMetadata): CompactManifest {
@@ -466,17 +579,16 @@ export function toManifest(recid: string, meta: RawMetadata): CompactManifest {
           relation.type === 'isParentOf' && relation.recid ? [relation.recid] : [],
         )
       : [];
-  return definedOnly<CompactManifest>({
-    recid,
-    title: str(meta.title),
-    availability: availabilityOf(meta),
-    availability_details: availabilityCounts(meta._availability_details),
-    files,
-    indexes,
-    children,
-    number_files: num(meta.distribution?.number_files),
-    size: num(meta.distribution?.size),
-  });
+  return {
+    ...toRecordHead(recid, meta),
+    ...definedOnly<Omit<CompactManifest, keyof RecordHead>>({
+      files,
+      indexes,
+      children,
+      number_files: num(meta.distribution?.number_files),
+      size: num(meta.distribution?.size),
+    }),
+  };
 }
 
 /** `muons_only` when the file key contains `_MuonPhys`, else `full` (Decision 17). */

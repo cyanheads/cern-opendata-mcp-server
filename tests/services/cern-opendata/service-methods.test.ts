@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for the CernOpenData service methods: search query
  * building and result mapping, lookup (matching, collapsing, the uppercase-DOI
- * retry), findRecord, the manifest cache, docs, and the validated-run lists and
- * their files. Upstream I/O is a strict fetch fake.
+ * retry), findRecord, the manifest cache, getIndex and its index and record-head
+ * caches, docs, and the validated-run lists and their files. Upstream I/O is a
+ * strict fetch fake.
  * @module tests/services/cern-opendata/service-methods.test
  */
 
@@ -14,7 +15,7 @@ import {
   isPageWindowRejection,
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import { classifyIdentifier } from '@/services/cern-opendata/identifiers.js';
-import { twinOf } from '@/services/cern-opendata/normalize.js';
+import { toManifest, twinOf } from '@/services/cern-opendata/normalize.js';
 import {
   failureOf,
   fakeClock,
@@ -27,17 +28,23 @@ import {
   collisionDatasetHit,
   docHit,
   emptySearchBody,
+  fileIndexRoute,
   filesRecordBody,
   hit,
   indexedRecordBody,
+  jetSet2RecordBody,
   jsonResponse,
   LIST_SPECS,
+  type ListSpec,
   licensedDatasetHit,
   NOT_FOUND_BODY,
   nanoaodRecordBody,
   portalRoute,
+  prefixedCmsHit,
+  prefixedDatasetHit,
   RUN_LIST_BODY,
   recordBody,
+  recordSearchRoute,
   SYNTAX_ERROR_BODY,
   searchBody,
   softwareHit,
@@ -97,7 +104,7 @@ describe('search', () => {
         collections: ['CMS-Primary-Datasets'],
         year: '2012--',
         number_events: '--500',
-        sort: 'mostrecent',
+        sort: '-mostrecent',
         size: 25,
         page: 3,
       },
@@ -118,7 +125,7 @@ describe('search', () => {
       ['collections', 'CMS-Primary-Datasets'],
       ['year', '2012--'],
       ['number_events', '--500'],
-      ['sort', 'mostrecent'],
+      ['sort', '-mostrecent'],
       ['size', '25'],
       ['page', '3'],
       ['skip_files', '1'],
@@ -264,6 +271,20 @@ describe('lookup', () => {
       ['cms-guide-docker', ['cms-guide-docker']],
       [30517, ['recid:30517']],
     ]);
+  });
+
+  it('resolves a numeric and a prefixed recid from one search, the prefixed one lowercased', async () => {
+    const { service, http, ctx } = makeService([
+      searchRoute(jsonResponse(searchBody([prefixedDatasetHit, collisionDatasetHit]))),
+    ]);
+    const result = await service.lookup(ids('6004', 'ATLAS-160006'), service.startBudget(), ctx);
+    expect(http.calls).toHaveLength(1);
+    expect(q(requestedUrls(http)[0] as URL)).toBe('recid:(6004 OR atlas-160006)');
+    expect(result.matches.map((m) => [m.hit.id, m.matchedInputs])).toEqual([
+      [6004, ['6004']],
+      ['atlas-160006', ['ATLAS-160006']],
+    ]);
+    expect(result.missing).toEqual([]);
   });
 
   it('builds a clause only for the identifier kinds present', async () => {
@@ -465,6 +486,16 @@ describe('findRecord', () => {
     expect((await service.findRecord('6004', service.startBudget(), ctx))?.id).toBe(6004);
   });
 
+  it('finds a prefixed recid with q=recid:{prefix}-{n}', async () => {
+    const { service, http, ctx } = makeService([
+      searchRoute(jsonResponse(searchBody([collisionDatasetHit, prefixedCmsHit]))),
+    ]);
+    expect((await service.findRecord('cms-93956', service.startBudget(), ctx))?.id).toBe(
+      'cms-93956',
+    );
+    expect(q(requestedUrls(http)[0] as URL)).toBe('recid:cms-93956');
+  });
+
   it('treats a 400 as an internal error', async () => {
     const { service, ctx } = makeService([
       searchRoute(jsonResponse(SYNTAX_ERROR_BODY, { status: 400 })),
@@ -642,6 +673,394 @@ describe('getManifest', () => {
   });
 });
 
+describe('getIndex', () => {
+  const BODIES = {
+    '6004': filesRecordBody,
+    '24464': indexedRecordBody,
+    'atlas-160006': jetSet2RecordBody,
+  };
+  const indexRoutes = (bodies: typeof BODIES = BODIES) => [
+    fileIndexRoute(bodies),
+    recordSearchRoute(bodies),
+  ];
+  const indexPath = (recid: string, key: string) =>
+    `/record/${recid}/file_index/${encodeURIComponent(key)}`;
+  const searchPath = (recid: string) =>
+    `/api/records/?q=recid%3A${recid}&size=1&skip_files=1&ondemand=true`;
+  const paths = (http: ReturnType<typeof makeService>['http']) =>
+    requestedUrls(http)
+      .map((url) => `${url.pathname}${url.search}`)
+      .sort();
+  const HEAD_24464 = {
+    recid: '24464',
+    title: 'ATLAS DAOD_PHYSLITE sample',
+    availability: 'partial',
+    availability_details: { online: 2, on_demand: 2 },
+  };
+
+  it('reads the index route and the record search, never the record GET', async () => {
+    const { service, http, ctx } = makeService(indexRoutes());
+    const lookup = await service.getIndex(
+      '24464',
+      'ds_a_file_index.json',
+      service.startBudget(),
+      ctx,
+    );
+    expect(lookup).toEqual({
+      kind: 'found',
+      listing: {
+        record: HEAD_24464,
+        index: toManifest('24464', indexedRecordBody.metadata).indexes[0],
+      },
+    });
+    expect(paths(http)).toEqual([searchPath('24464'), indexPath('24464', 'ds_a_file_index.json')]);
+  });
+
+  it('sends the key as one encoded path segment with no query string', async () => {
+    const { service, http, ctx } = makeService(indexRoutes());
+    await service.getIndex('24464', 'a b/c?d#e&qos=online.json', service.startBudget(), ctx);
+    const index = requestedUrls(http).find((url) => url.pathname.includes('/file_index/'));
+    expect(index?.pathname).toBe('/record/24464/file_index/a%20b%2Fc%3Fd%23e%26qos%3Donline.json');
+    expect(index?.search).toBe('');
+  });
+
+  it('reads a prefixed record, whose members carry no key', async () => {
+    const { service, http, ctx } = makeService(indexRoutes());
+    const lookup = await service.getIndex(
+      'atlas-160006',
+      'training_files.json',
+      service.startBudget(),
+      ctx,
+    );
+    expect(paths(http)).toEqual([
+      searchPath('atlas-160006'),
+      indexPath('atlas-160006', 'training_files.json'),
+    ]);
+    if (lookup.kind !== 'found') throw new Error(`Expected found, got ${lookup.kind}`);
+    expect(lookup.listing.record).toEqual({
+      recid: 'atlas-160006',
+      title: 'ATLAS multi-process simulation for ML-based jet flavour tagging (JetSet2)',
+      availability: 'online',
+    });
+    expect(lookup.listing.index).toMatchObject({
+      number_files: 3,
+      size: 14_190_227_850_197,
+      availability: {},
+    });
+    expect(lookup.listing.index.files.map((file) => file.filename)).toEqual([
+      'jetset2-release_v1.pp_output_train-full_0.h5',
+      'jetset2-release_v1.pp_output_train-full_1.h5',
+      'jetset2-release_v1.pp_output_train-full_10.h5',
+    ]);
+    for (const file of lookup.listing.index.files) expect(file).not.toHaveProperty('key');
+  });
+
+  it('serves an index of a cached manifest with no request, and a miss as the index route would', async () => {
+    const { service, http, ctx } = makeService([
+      recordRoute(jsonResponse(indexedRecordBody)),
+      ...indexRoutes(),
+    ]);
+    const manifest = await service.getManifest('24464', service.startBudget(), ctx);
+    const found = await service.getIndex(
+      '24464',
+      'ds_b_file_index.json',
+      service.startBudget(),
+      ctx,
+    );
+    const missing = await service.getIndex('24464', 'nope.json', service.startBudget(), ctx);
+    expect(found).toEqual({
+      kind: 'found',
+      listing: { record: HEAD_24464, index: manifest?.indexes[1] },
+    });
+    expect(missing).toEqual({ kind: 'index_not_found' });
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it.each([['.'], ['..'], ['a\ud800.json']])(
+    'answers the dot segment or ill-formed key %j as index_not_found without a request',
+    async (key) => {
+      const { service, http, ctx } = makeService(indexRoutes());
+      expect(await service.getIndex('24464', key, service.startBudget(), ctx)).toEqual({
+        kind: 'index_not_found',
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it('settles a 404 as index_not_found when the search finds the record, else record_not_found', async () => {
+    const { service, ctx } = makeService(indexRoutes());
+    expect(await service.getIndex('6004', 'x.json', service.startBudget(), ctx)).toEqual({
+      kind: 'index_not_found',
+    });
+    expect(await service.getIndex('999999', 'x.json', service.startBudget(), ctx)).toEqual({
+      kind: 'record_not_found',
+    });
+  });
+
+  it('lists an index the portal serves even when its search finds no hit, with the recid alone', async () => {
+    const { service, ctx } = makeService([
+      fileIndexRoute(BODIES),
+      searchRoute(jsonResponse(emptySearchBody)),
+    ]);
+    const lookup = await service.getIndex(
+      '24464',
+      'ds_a_file_index.json',
+      service.startBudget(),
+      ctx,
+    );
+    expect(lookup.kind === 'found' && lookup.listing.record).toEqual({ recid: '24464' });
+  });
+
+  describe('cache', () => {
+    it('serves the same index again with no request', async () => {
+      const { service, http, ctx } = makeService(indexRoutes());
+      const first = await service.getIndex(
+        '24464',
+        'ds_a_file_index.json',
+        service.startBudget(),
+        ctx,
+      );
+      const second = await service.getIndex(
+        '24464',
+        'ds_a_file_index.json',
+        service.startBudget(),
+        ctx,
+      );
+      expect(second).toEqual(first);
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it('reads another index of the same record with one request, the record search not repeated', async () => {
+      const { service, http, ctx } = makeService(indexRoutes());
+      await service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx);
+      const other = await service.getIndex(
+        '24464',
+        'ds_b_file_index.json',
+        service.startBudget(),
+        ctx,
+      );
+      expect(other).toEqual({
+        kind: 'found',
+        listing: {
+          record: HEAD_24464,
+          index: toManifest('24464', indexedRecordBody.metadata).indexes[1],
+        },
+      });
+      const missing = await service.getIndex('24464', 'nope.json', service.startBudget(), ctx);
+      expect(missing).toEqual({ kind: 'index_not_found' });
+      expect(paths(http)).toEqual([
+        searchPath('24464'),
+        indexPath('24464', 'ds_a_file_index.json'),
+        indexPath('24464', 'ds_b_file_index.json'),
+        indexPath('24464', 'nope.json'),
+      ]);
+    });
+
+    it('expires after its TTL, and after 15 minutes by default, reading both again', async () => {
+      const clock = fakeClock();
+      const short = makeService(indexRoutes(), { now: clock.now, indexCache: { ttlMs: 1_000 } });
+      const read = (service: CernOpenDataService, ctx = short.ctx) =>
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx);
+      await read(short.service);
+      clock.advance(999);
+      await read(short.service);
+      expect(short.http.calls).toHaveLength(2);
+      clock.advance(1);
+      await read(short.service);
+      expect(short.http.calls).toHaveLength(4);
+
+      const standard = makeService(indexRoutes(), { now: clock.now });
+      await read(standard.service);
+      clock.advance(15 * 60_000 - 1);
+      await read(standard.service);
+      expect(standard.http.calls).toHaveLength(2);
+      clock.advance(1);
+      await read(standard.service);
+      expect(paths(standard.http)).toEqual([
+        searchPath('24464'),
+        searchPath('24464'),
+        indexPath('24464', 'ds_a_file_index.json'),
+        indexPath('24464', 'ds_a_file_index.json'),
+      ]);
+    });
+
+    it('evicts the least recently used index past the size', async () => {
+      const { service, http, ctx } = makeService(indexRoutes(), { indexCache: { size: 1 } });
+      const read = (key: string) => service.getIndex('24464', key, service.startBudget(), ctx);
+      await read('ds_a_file_index.json');
+      await read('ds_b_file_index.json');
+      await read('ds_a_file_index.json');
+      expect(
+        requestedUrls(http).filter((url) => url.pathname.includes('/file_index/')),
+      ).toHaveLength(3);
+    });
+
+    it('does not cache an index read that a manifest of the record overtook in flight', async () => {
+      const clock = fakeClock();
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { service, http, ctx } = makeService(
+        [
+          portalRoute(
+            /\/file_index\//,
+            async () => {
+              await held;
+              return jsonResponse(indexedRecordBody.metadata._file_indices?.[0]);
+            },
+            { once: true },
+          ),
+          recordRoute(jsonResponse(indexedRecordBody)),
+          ...indexRoutes(),
+        ],
+        { now: clock.now, manifestCache: { ttlMs: 1_000 } },
+      );
+      const read = () =>
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx);
+      const inFlight = read();
+      await service.getManifest('24464', service.startBudget(), ctx);
+      release();
+      expect((await inFlight).kind).toBe('found');
+      clock.advance(1_000);
+      await read();
+      expect(paths(http)).toEqual([
+        '/api/records/24464',
+        searchPath('24464'),
+        searchPath('24464'),
+        indexPath('24464', 'ds_a_file_index.json'),
+        indexPath('24464', 'ds_a_file_index.json'),
+      ]);
+    });
+
+    it('does not cache a 404 or a failed read', async () => {
+      const { service, http, ctx } = makeService([
+        portalRoute(/\/file_index\//, new Response('', { status: 503 }), { once: true }),
+        portalRoute(/\/file_index\//, new Response('', { status: 503 }), { once: true }),
+        portalRoute(/\/file_index\//, new Response('', { status: 503 }), { once: true }),
+        ...indexRoutes(),
+      ]);
+      const failure = failureOf(
+        await settle(() =>
+          service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx),
+        ),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      await service.getIndex('24464', 'nope.json', service.startBudget(), ctx);
+      await service.getIndex('24464', 'nope.json', service.startBudget(), ctx);
+      const found = await service.getIndex(
+        '24464',
+        'ds_a_file_index.json',
+        service.startBudget(),
+        ctx,
+      );
+      expect(found.kind).toBe('found');
+      expect(
+        requestedUrls(http).filter((url) => url.pathname.includes('/file_index/')),
+      ).toHaveLength(6);
+    });
+
+    it('is cleared by dispose', async () => {
+      const { service, ctx } = makeService(indexRoutes());
+      await service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx);
+      service.dispose();
+      await expect(
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    });
+  });
+
+  describe('a failure in either read fails the call with its own reason', () => {
+    it('raises the index route 429 as rate_limited while the search succeeds', async () => {
+      const { service, ctx } = makeService([
+        portalRoute(
+          /\/file_index\//,
+          new Response('', { status: 429, headers: { 'retry-after': '20' } }),
+        ),
+        recordSearchRoute(BODIES),
+      ]);
+      await expect(
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'rate_limited', retryAfter: 20 },
+      });
+    });
+
+    it('raises a search 404 as upstream_unreadable while the index answers', async () => {
+      const { service, ctx } = makeService([
+        fileIndexRoute(BODIES),
+        searchRoute(jsonResponse(NOT_FOUND_BODY, { status: 404 })),
+      ]);
+      await expect(
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_unreadable' },
+      });
+    });
+
+    it('raises a search 429 as rate_limited while the index answers', async () => {
+      const { service, ctx } = makeService([
+        fileIndexRoute(BODIES),
+        searchRoute(new Response('', { status: 429, headers: { 'retry-after': '15' } })),
+      ]);
+      await expect(
+        service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx),
+      ).rejects.toMatchObject({ data: { reason: 'rate_limited', retryAfter: 15 } });
+    });
+
+    it('raises an index member without a URI as upstream_unreadable, the index uncached', async () => {
+      const broken = recordBody({
+        recid: '24464',
+        _file_indices: [{ key: 'k.json', files: [{ filename: 'f.root', size: 1 }] }],
+      });
+      const { service, http, ctx } = makeService(indexRoutes({ ...BODIES, '24464': broken }));
+      for (let i = 0; i < 2; i++) {
+        await expect(
+          service.getIndex('24464', 'k.json', service.startBudget(), ctx),
+        ).rejects.toMatchObject({ data: { reason: 'upstream_unreadable' } });
+      }
+      expect(paths(http)).toEqual([
+        searchPath('24464'),
+        indexPath('24464', 'k.json'),
+        indexPath('24464', 'k.json'),
+      ]);
+    });
+
+    it('rejects with the cancellation when the caller cancels while the search is in flight, never a partial listing', async () => {
+      const controller = new AbortController();
+      const ctx = createMockContext({ signal: controller.signal });
+      const { service, http } = makeService(
+        [
+          fileIndexRoute(BODIES),
+          searchRoute(
+            (request) =>
+              new Promise<Response>((_resolve, reject) => {
+                request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                  once: true,
+                });
+              }),
+          ),
+        ],
+        {},
+        ctx,
+      );
+      const pending = service
+        .getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx)
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(http.calls).toHaveLength(2);
+      controller.abort(new Error('caller left'));
+      const settled = await pending;
+      expect(settled).toMatchObject({ ok: false, error: { message: 'caller left' } });
+    });
+  });
+});
+
 describe('getDoc', () => {
   it('returns the doc body as the portal sent it', async () => {
     const body = { id: 'cms-guide-docker', metadata: docHit.metadata };
@@ -675,6 +1094,27 @@ describe('getValidatedRunLists', () => {
       '14203',
       '14208',
       '14209',
+    ]);
+  });
+
+  it('orders a prefixed list recid by its number among the numeric ones', async () => {
+    const specs: ListSpec[] = [
+      { recid: '14202', key: 'Cert_b_JSON.txt', periods: ['RunB'] },
+      { recid: 'cms-93999', key: 'Cert_e_JSON.txt', periods: ['RunE'] },
+      { recid: 'cms-1001', key: 'Cert_a2_JSON.txt', periods: ['RunA'] },
+      { recid: '1000', key: 'Cert_a_JSON.txt', periods: ['RunA'] },
+      { recid: '93950', key: 'Cert_d_JSON.txt', periods: ['RunD'] },
+    ];
+    const { service, ctx } = makeService([
+      searchRoute(jsonResponse(validatedRunsSearchBody(specs))),
+    ]);
+    const lists = await service.getValidatedRunLists(service.startBudget(), ctx);
+    expect(lists.map((list) => list.recid)).toEqual([
+      '1000',
+      'cms-1001',
+      '14202',
+      '93950',
+      'cms-93999',
     ]);
   });
 

@@ -15,8 +15,13 @@ import {
   unrecognizedValues,
   vocabularyListInput,
 } from '@/mcp-server/tools/inputs.js';
+import { expectLinearTime } from '../fixtures/cpu-time.js';
 
 const element = z.string().max(100);
+const MEGABYTE_SIZES = [62_500, 250_000, 1_000_000] as const;
+
+const RECID_MESSAGE =
+  'A recid is 1-12 digits (6004), optionally after an experiment prefix (atlas-160006).';
 
 describe('blankAsUnset', () => {
   const schema = z.object({
@@ -242,6 +247,73 @@ describe('vocabularyListInput', () => {
     });
   });
 
+  describe('category', () => {
+    const category = vocabularyListInput('category', 20);
+    const COMMA_VALUE = 'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos';
+
+    it('keeps a known value that holds a comma whole, in any case and separator', () => {
+      expect(category.parse(COMMA_VALUE)).toEqual([COMMA_VALUE]);
+      expect(category.parse('exotica/heavy fermions,heavy righ-handed neutrinos')).toEqual([
+        COMMA_VALUE,
+      ]);
+    });
+
+    it('splits a string that is not one known value on commas', () => {
+      expect(category.parse('Exotica::Dark Matter, Supersymmetry')).toEqual([
+        'Exotica::Dark Matter',
+        'Supersymmetry',
+      ]);
+      expect(category.parse('susy, higgs')).toEqual(['Susy', 'Higgs']);
+    });
+
+    it('keeps the comma value whole beside other values in one string, any order or spelling', () => {
+      expect(category.parse(`${COMMA_VALUE}, Supersymmetry`)).toEqual([
+        COMMA_VALUE,
+        'Supersymmetry',
+      ]);
+      expect(
+        category.parse('supersymmetry, exotica/heavy fermions, heavy righ-handed neutrinos, susy'),
+      ).toEqual(['Supersymmetry', COMMA_VALUE, 'Susy']);
+      expect(category.parse(`,${COMMA_VALUE},`)).toEqual([COMMA_VALUE]);
+    });
+
+    it('checks every adjacent pair of a long string for a rejoin in linear time', () => {
+      const make = (n: number) => 'a,'.repeat(n / 2);
+      expect(category.parse(make(200_000))).toEqual(['a']);
+      expectLinearTime(make, (value) => category.safeParse(value), {
+        sizes: [12_500, 50_000, 200_000],
+        maxMs: 250,
+      });
+    });
+
+    it('treats the array form as separate items, so the comma value can sit beside others', () => {
+      expect(category.parse([COMMA_VALUE, 'supersymmetry'])).toEqual([
+        COMMA_VALUE,
+        'Supersymmetry',
+      ]);
+    });
+
+    it('normalizes the primary/secondary separator as type does', () => {
+      expect(category.parse('higgs physics/standard model, EXOTICA : dark matter')).toEqual([
+        'Higgs Physics::Standard Model',
+        'Exotica::Dark Matter',
+      ]);
+    });
+  });
+
+  it.each([
+    ['magnet_polarity', 2, 'magdown, MAG UP', ['MagDown', 'MagUp']],
+    ['stripping_stream', 11, 'dimuon, charm.mdst', ['DIMUON', 'CHARM.MDST']],
+    [
+      'stripping_version',
+      12,
+      'Stripping21r1, STRIPPING29R2P3',
+      ['stripping21r1', 'stripping29r2p3'],
+    ],
+  ] as const)('canonicalizes the LHCb filter %s', (param, max, raw, expected) => {
+    expect(vocabularyListInput(param, max).parse(raw)).toEqual(expected);
+  });
+
   it('maps PbPb spellings to the canonical value', () => {
     expect(vocabularyListInput('collision_type', 5).parse('Pb-Pb, pp')).toEqual(['PbPb', 'pp']);
   });
@@ -261,8 +333,36 @@ describe('recidInput', () => {
     ['https://opendata.cern.ch/record/6004/files/x.root?download=1#top', '6004'],
     ['123456789012', '123456789012'],
     ['0123456789012', '123456789012'],
+    ['06004', '6004'],
+    ['atlas-160006', 'atlas-160006'],
+    ['ATLAS-160006', 'atlas-160006'],
+    ['recid:atlas-160006', 'atlas-160006'],
+    ['https://opendata.cern.ch/record/atlas-160006', 'atlas-160006'],
+    ['http://opendata.cern.ch/api/records/atlas-160006/files', 'atlas-160006'],
+    ['atlas-0160006', 'atlas-160006'],
+    ['cms-93956', 'cms-93956'],
+    ['abcdefghijklmnop-123456789012', 'abcdefghijklmnop-123456789012'],
   ])('reduces %j to %j', (raw, expected) => {
     expect(recid.parse(raw)).toBe(expected);
+  });
+
+  it.each([
+    ['atlas-'],
+    ['atlas-0'],
+    ['atlas_160006'],
+    ['atlas-160006x'],
+    ['atlas-1234567890123'],
+    ['abcdefghijklmnopq-160006'],
+    ['-160006'],
+    ['atlas--160006'],
+    ['at las-160006'],
+    ['recid:atlas-'],
+    ['https://opendata.cern.ch/record/atlas-160006evil'],
+  ])('rejects the prefixed spelling %j with the grammar, never echoing it', (raw) => {
+    const [issue, ...rest] = recid.safeParse(raw).error?.issues ?? [];
+    expect(rest).toEqual([]);
+    expect(issue?.message).toBe(RECID_MESSAGE);
+    expect(JSON.stringify({ ...issue, message: undefined })).not.toContain(raw);
   });
 
   it('rejects a recid of 13 digits or more without echoing it', () => {
@@ -292,7 +392,7 @@ describe('recidInput', () => {
 
   it('explains the expected form in the error', () => {
     const result = recid.safeParse('abc');
-    expect(result.error?.issues[0]?.message).toBe('A recid is 1-12 digits, such as 6004.');
+    expect(result.error?.issues[0]?.message).toBe(RECID_MESSAGE);
   });
 
   it('reads a blank as unset when wrapped with blankAsUnset(...optional())', () => {
@@ -306,8 +406,8 @@ describe('recidInput', () => {
 });
 
 describe('preprocessing a megabyte of caller text', () => {
-  const spaces = ' '.repeat(1_000_000);
-  const long = `a${spaces}b`;
+  const spaces = (n: number) => ' '.repeat(n);
+  const long = (n: number) => `a${spaces(n)}b`;
   const vocabularyParams = [
     'type',
     'experiment',
@@ -315,28 +415,44 @@ describe('preprocessing a megabyte of caller text', () => {
     'collision_type',
     'file_type',
     'availability',
+    'category',
+    'magnet_polarity',
+    'stripping_stream',
+    'stripping_version',
   ] as const;
 
-  it.each<[string, z.ZodType, unknown]>([
-    ...vocabularyParams.map((param): [string, z.ZodType, unknown] => [
+  it.each<[string, z.ZodType, (n: number) => unknown]>([
+    ...vocabularyParams.map((param): [string, z.ZodType, (n: number) => unknown] => [
       `a ${param} item`,
       vocabularyListInput(param, 5),
       long,
     ]),
-    ['a type item in an array', vocabularyListInput('type', 7), [long]],
+    ['a type item in an array', vocabularyListInput('type', 7), (n) => [long(n)]],
+    [
+      'a category pair padded around its separator, matched whole before splitting',
+      vocabularyListInput('category', 20),
+      (n) => `higgs physics${spaces(n)}/${spaces(n)}standard model, x`,
+    ],
     ['a collection item', listInput(10, element), long],
     ['an identifier', requiredListInput(20, z.string().max(500)), long],
-    ['a padded recid', recidInput(), `${spaces}6004x`],
+    ['a padded recid', recidInput(), (n) => `${spaces(n)}6004x`],
     [
       'a record URL with a long recid',
       recidInput(),
-      `https://opendata.cern.ch/record/${'1'.repeat(1_000_000)}x`,
+      (n) => `https://opendata.cern.ch/record/${'1'.repeat(n)}x`,
     ],
-  ])('rejects %s in linear time', (_name, schema, value) => {
-    const started = performance.now();
-    const result = schema.safeParse(value);
-    expect(performance.now() - started).toBeLessThan(250);
-    expect(result.success).toBe(false);
+    ['a recid with a long prefix', recidInput(), (n) => `${'a'.repeat(n)}-6004`],
+    [
+      'a record URL with a long prefix and no number',
+      recidInput(),
+      (n) => `https://opendata.cern.ch/record/${'a'.repeat(n)}-x`,
+    ],
+  ])('rejects %s in linear time', (_name, schema, make) => {
+    expect(schema.safeParse(make(1_000_000)).success).toBe(false);
+    expectLinearTime(make, (value) => schema.safeParse(value), {
+      sizes: MEGABYTE_SIZES,
+      maxMs: 250,
+    });
   });
 });
 

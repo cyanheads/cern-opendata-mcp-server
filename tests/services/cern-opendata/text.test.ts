@@ -16,21 +16,22 @@ import {
   htmlToText,
   inline,
   inlineOrNA,
+  inlineSpelling,
   NOT_AVAILABLE,
   noticeList,
   noticeValue,
   oneLine,
   PORTAL_ORIGIN,
   printUrl,
+  sliceText,
+  stripTags,
 } from '@/services/cern-opendata/text.js';
-import { TRIGGER_ABSTRACT_HTML } from '../../fixtures/cern-opendata-upstream.js';
-
-/** `run`'s result and the milliseconds it took; the bounds below are loose so a busy machine does not flake. */
-function timed<T>(run: () => T): { ms: number; value: T } {
-  const started = performance.now();
-  const value = run();
-  return { ms: performance.now() - started, value };
-}
+import {
+  METHODOLOGY_5202_HTML,
+  METHODOLOGY_5208_HTML,
+  TRIGGER_ABSTRACT_HTML,
+} from '../../fixtures/cern-opendata-upstream.js';
+import { expectLinearTime } from '../../fixtures/cpu-time.js';
 
 describe('decodeEntities', () => {
   it('decodes named, decimal and hex references', () => {
@@ -173,20 +174,112 @@ describe('htmlToText', () => {
   });
 
   it.each([
-    ['20,000 unclosed anchors', '<a href=x>'.repeat(20_000), ''],
+    ['a tag pair', 'a<b>c</b>d', 'acd'],
+    ['a letter after < with a > later', 'a<b>c', 'ac'],
+    ['a tag with attributes', '<span class="x" id=y>t</span>', 't'],
+    ['self-closing breaks', 'a<br/>b<br />c', 'a\nb\nc'],
+    ['a comment', 'a<!-- note -->b', 'ab'],
+    ['a doctype and a processing instruction', '<!DOCTYPE html><?xml version="1.0"?>t', 't'],
+    ['an end tag with no name', 'a</>b', 'ab'],
+    ['an anchor', 'see <a href="/record/1">one</a>.', `see one <${PORTAL_ORIGIN}/record/1>.`],
+    ['an anchor whose label holds a tag', '<a href="/x"><i>it</i></a>', `it <${PORTAL_ORIGIN}/x>`],
+    ['an unclosed tag', 'a<b c', 'a<b c'],
+    ['an unclosed end tag', 'a</b c', 'a</b c'],
+    ['a < at the end', 'a<', 'a<'],
+  ])('renders %s as it always has', (_shape, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it.each([
+    [
+      '5202',
+      METHODOLOGY_5202_HTML,
+      'An event was selected if there were two muons in the event, both with |eta| < 2.4, at least one muon was a global muon, the invariant mass of the two muons was > 0.3 GeV and < 300 GeV, and they have opposite-sign charge.',
+    ],
+    [
+      '5208',
+      METHODOLOGY_5208_HTML,
+      'An event was selected if there were two muons in the event with pT > 20 GeV and |eta| < 2.1 and the invariant mass of the two muons was > 60 GeV and < 120 GeV.',
+    ],
+  ])('renders every selection cut of record %s in full', (_recid, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it.each([
+    ['a space', 'x < 2 and y > 1', 'x < 2 and y > 1'],
+    ['a digit', 'a<2>b', 'a<2>b'],
+    ['an equals sign', 'x <= 5 and y >= 3', 'x <= 5 and y >= 3'],
+    ['another <', 'a << b >> c', 'a << b >> c'],
+    ['a non-ASCII letter', 'a <é> b', 'a <é> b'],
+    ['a space, before a real tag', '|eta| < 2.4 <b>and</b> more', '|eta| < 2.4 and more'],
+  ])('keeps a < followed by %s as text', (_follower, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it('keeps a bare < in an anchor label', () => {
+    expect(htmlToText('<a href="/x">pT < 20 GeV, mass > 5 GeV</a>')).toBe(
+      `pT < 20 GeV, mass > 5 GeV <${PORTAL_ORIGIN}/x>`,
+    );
+  });
+
+  it.each([
+    [
+      'an inline tag in an anchor label',
+      '<a href="/x">mass <<b>GeV</b></a> and m > 3',
+      `mass <GeV <${PORTAL_ORIGIN}/x> and m > 3`,
+    ],
+    ['a comment', 'x <<!-- c -->y > z', 'x <y > z'],
+    ['a script', 'x <<script>s</script>y > z', 'x <y > z'],
+    ['a style element', 'x <<style>p{}</style>y > z', 'x <y > z'],
+    ['an anchor', 'x <<a href="/y">z</a> > w', `x <z <${PORTAL_ORIGIN}/y> > w`],
+  ])('keeps a bare < as text once %s after it is gone', (_removed, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it.each<[string, (count: number) => string, (count: number) => string]>([
+    ['20,000 unclosed anchors', (n) => '<a href=x>'.repeat(n), () => ''],
     [
       'an anchor whose bare href and text run 20,000 characters each',
-      `<a href=${'x'.repeat(20_000)}>${'y'.repeat(20_000)}`,
-      'y'.repeat(20_000),
+      (n) => `<a href=${'x'.repeat(n)}>${'y'.repeat(n)}`,
+      (n) => 'y'.repeat(n),
     ],
-    ['20,000 unclosed comments', '<!--'.repeat(20_000), '<!--'.repeat(20_000)],
-    ['20,000 unclosed scripts', '<script>'.repeat(20_000), ''],
-    ['20,000 block tags with no closing >', '<p'.repeat(20_000), '<p'.repeat(20_000)],
-    ['20,000 tag openers with no closing >', '<'.repeat(20_000), '<'.repeat(20_000)],
-  ])('converts %s in linear time', (_shape, html, expected) => {
-    const { ms, value } = timed(() => htmlToText(html));
-    expect(ms).toBeLessThan(250);
-    expect(value).toBe(expected);
+    ['20,000 unclosed comments', (n) => '<!--'.repeat(n), (n) => '<!--'.repeat(n)],
+    ['20,000 unclosed scripts', (n) => '<script>'.repeat(n), () => ''],
+    ['20,000 block tags with no closing >', (n) => '<p'.repeat(n), (n) => '<p'.repeat(n)],
+    ['20,000 tag openers with no closing >', (n) => '<'.repeat(n), (n) => '<'.repeat(n)],
+  ])('converts %s in linear time', (_shape, make, expected) => {
+    expect(htmlToText(make(20_000))).toBe(expected(20_000));
+    expectLinearTime(make, htmlToText, { sizes: [1_250, 5_000, 20_000], maxMs: 250 });
+  });
+
+  it.each<[string, (length: number) => string]>([
+    ['a run of bare <', (n) => '<'.repeat(n)],
+    ['< followed by a space', (n) => '< '.repeat(n / 2)],
+    ['a bare < before an inline tag', (n) => 'm <<b>x</b> '.repeat(n / 12)],
+    ['a bare < before a comment', (n) => 'x <<!-- c -->y '.repeat(n / 15)],
+    ['unclosed block openers', (n) => '<p'.repeat(n / 2)],
+  ])('converts %s in time linear in its length', (_shape, make) => {
+    expectLinearTime(make, htmlToText, { maxMs: 200 });
+  });
+});
+
+describe('stripTags', () => {
+  it('opens a tag only at a < followed by an ASCII letter, /, ! or ?', () => {
+    expect(stripTags('a<b>c</b><!x><?y>d')).toBe('acd');
+    expect(stripTags('|eta| < 2.4, mass > 0.3 and < 300')).toBe(
+      '|eta| < 2.4, mass > 0.3 and < 300',
+    );
+    expect(stripTags('a<1>b<=c>d<<e>')).toBe('a<1>b<=c>d<');
+  });
+
+  it.each<[string, (length: number) => string]>([
+    ['a run of < with no closer', (n) => '<'.repeat(n)],
+    ['< followed by a space', (n) => '< '.repeat(n / 2)],
+    ['unclosed openers', (n) => '<a'.repeat(n / 2)],
+    ['nested openers, <a<a<a…>>>', (n) => `${'<a'.repeat(n / 4)}${'>'.repeat(n / 2)}`],
+    ['closed tags between bare < and >', (n) => '<b>x < y > z'.repeat(n / 12)],
+  ])('strips %s in time linear in its length', (_shape, make) => {
+    expectLinearTime(make, stripTags, { maxMs: 50 });
   });
 });
 
@@ -254,6 +347,34 @@ describe('inline', () => {
   });
 });
 
+describe('inlineSpelling', () => {
+  it('renders a value without edge whitespace or a comma exactly as inline does', () => {
+    for (const value of ['Heavy-Ion Physics', 'a|b', '<b>', 'x\ny', '']) {
+      expect(inlineSpelling(value), value).toBe(inline(value));
+    }
+  });
+
+  it('quotes a value with leading or trailing whitespace and keeps that whitespace', () => {
+    expect(inlineSpelling(' Heavy-Ion Physics')).toBe('" Heavy-Ion Physics"');
+    expect(inlineSpelling('MagUp  ')).toBe('"MagUp  "');
+    expect(inlineSpelling(' a ')).toBe('" a "');
+  });
+
+  it('quotes a value holding a comma, so a list of values does not read it as two', () => {
+    expect(inlineSpelling('13TeV, 13.6TeV')).toBe('"13TeV, 13.6TeV"');
+    expect(inlineSpelling('Heavy Fermions, Heavy Righ-Handed Neutrinos')).toBe(
+      '"Heavy Fermions, Heavy Righ-Handed Neutrinos"',
+    );
+    expect(inlineSpelling(' a,b')).toBe('" a,b"');
+  });
+
+  it('neutralizes a quoted value like an inline slot', () => {
+    expect(inlineSpelling('\n[x](https://evil.example) |‮')).toBe(
+      '" \\[x\\](https://evil.example) \\|"',
+    );
+  });
+});
+
 describe('noticeValue', () => {
   it('neutralizes a value like an inline slot: brackets, pipes and backslashes escaped, angle brackets as entities', () => {
     expect(noticeValue('[docs](https://evil.example) <img src=y> | \\')).toBe(
@@ -298,13 +419,12 @@ describe('oneLine', () => {
     expect(oneLine('no breaks  here')).toBe('no breaks  here');
   });
 
-  it.each([
-    ['40,000 spaces', `a${' '.repeat(40_000)}b`, `a${' '.repeat(40_000)}b`],
-    ['40,000 spaces before a line break', `a${' '.repeat(40_000)}\nb`, 'a b'],
-  ])('flattens %s in linear time', (_shape, text, expected) => {
-    const { ms, value } = timed(() => oneLine(text));
-    expect(ms).toBeLessThan(250);
-    expect(value).toBe(expected);
+  it.each<[string, (count: number) => string, (count: number) => string]>([
+    ['40,000 spaces', (n) => `a${' '.repeat(n)}b`, (n) => `a${' '.repeat(n)}b`],
+    ['40,000 spaces before a line break', (n) => `a${' '.repeat(n)}\nb`, () => 'a b'],
+  ])('flattens %s in linear time', (_shape, make, expected) => {
+    expect(oneLine(make(40_000))).toBe(expected(40_000));
+    expectLinearTime(make, oneLine, { sizes: [2_500, 10_000, 40_000], maxMs: 250 });
   });
 });
 
@@ -323,6 +443,43 @@ describe('capText', () => {
     const capped = capText(text, 3);
     expect(capped).toEqual({ text: 'ab', length: text.length, truncated: true });
     expect(capText(text, 4).text).toBe('ab\u{1F600}');
+  });
+});
+
+describe('sliceText', () => {
+  it('returns up to maxUnits code units from the offset, with where it starts and ends', () => {
+    expect(sliceText('abcdef', 0, 10)).toEqual({ text: 'abcdef', start: 0, end: 6 });
+    expect(sliceText('abcdef', 2, 3)).toEqual({ text: 'cde', start: 2, end: 5 });
+    expect(sliceText('abcdef', 4, 3)).toEqual({ text: 'ef', start: 4, end: 6 });
+  });
+
+  it('ends before a surrogate pair the cap would split', () => {
+    expect(sliceText('ab\u{1F600}cd', 0, 3)).toEqual({ text: 'ab', start: 0, end: 2 });
+    expect(sliceText('ab\u{1F600}cd', 0, 4)).toEqual({ text: 'ab\u{1F600}', start: 0, end: 4 });
+  });
+
+  it('starts an offset on the second half of a pair at its first half', () => {
+    expect(sliceText('ab\u{1F600}cd', 3, 3)).toEqual({ text: '\u{1F600}c', start: 2, end: 5 });
+    expect(sliceText('ab\u{1F600}cd', 2, 3)).toEqual({ text: '\u{1F600}c', start: 2, end: 5 });
+  });
+
+  it('rebuilds the text exactly when each slice starts where the last one ended', () => {
+    const text = `abcd\u{1F600}efgh\u{1F601}\u{1F602}ij\u{1F603}`;
+    const slices: string[] = [];
+    let offset = 0;
+    while (offset < text.length) {
+      const slice = sliceText(text, offset, 5);
+      expect(slice.start).toBe(offset);
+      expect(slice.end).toBeGreaterThan(offset);
+      expect(slice.text.length).toBeLessThanOrEqual(5);
+      expect(Number.isNaN(slice.text.codePointAt(0))).toBe(false);
+      const last = slice.text.charCodeAt(slice.text.length - 1);
+      if (slice.end < text.length) expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+      slices.push(slice.text);
+      offset = slice.end;
+    }
+    expect(slices.join('')).toBe(text);
+    expect(slices.length).toBeGreaterThan(3);
   });
 });
 

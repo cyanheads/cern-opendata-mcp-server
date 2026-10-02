@@ -1,8 +1,8 @@
 /**
  * @fileoverview CERN Open Data Portal client: a paced, retried, deadline-bound
- * plain-fetch boundary with a per-route status accept-list and byte ceiling,
- * plus the record, doc, manifest and validated-run-list reads every tool
- * builds on. One instance per process; caches live here.
+ * plain-fetch boundary with a per-route status accept-list, byte ceiling and
+ * attempt cap, plus the record, index, doc, manifest and validated-run-list
+ * reads every tool builds on. One instance per process; caches live here.
  * @module services/cern-opendata/cern-opendata-service
  */
 
@@ -22,14 +22,27 @@ import {
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
 import type { ClassifiedId } from './identifiers.js';
-import { str, toManifest, toValidatedRunList } from './normalize.js';
+import {
+  definedOnly,
+  pathSegment,
+  recordUrl,
+  str,
+  toCompactIndex,
+  toManifest,
+  toRecordHead,
+  toValidatedRunList,
+} from './normalize.js';
 import { noticeValue, PORTAL_ORIGIN } from './text.js';
 import type {
   Budget,
   CompactManifest,
+  IndexListing,
+  IndexLookup,
   LookupMatch,
+  RawFileIndex,
   RawHit,
   RawSearchResponse,
+  RecordHead,
   RunList,
   SearchOutcome,
   SearchPage,
@@ -44,7 +57,10 @@ const MiB = 1024 * 1024;
 const CALL_BUDGET_MS = 50_000;
 /** Longest a request may wait in the pacer queue before shedding. */
 const MAX_QUEUE_WAIT_MS = 20_000;
-/** Longest one HTTP attempt (headers and body) may take. */
+/**
+ * Longest one HTTP attempt (headers and body) may take on every route but the
+ * record GET, leaving room for a retry after a slow first byte.
+ */
 const ATTEMPT_TIMEOUT_MS = 30_000;
 /** `retry-after` default for a 429 that omits it (the portal's window is a minute). */
 const DEFAULT_RETRY_AFTER_S = 60;
@@ -55,17 +71,40 @@ const VALIDATED_RUNS_COLLECTION = 'CMS-Validated-Runs';
 const SERVICE_LABEL = 'CERN Open Data';
 
 /**
- * The upstream routes, each with its own byte ceiling and accepted statuses.
- * Only search reads a 400 as a result; a search 404 is accepted so it can be
- * reported as an unreadable portal answer, not as a missing record.
+ * The upstream routes, each with its own byte ceiling, accepted statuses and
+ * attempt cap. Only search reads a 400 as a result; a search 404 is accepted
+ * so it can be reported as an unreadable portal answer, not as a missing
+ * record. A record GET attempt has no cap of its own and runs to the call's
+ * deadline: a retry restarts a download of the same size, so cutting a slow
+ * transfer turns a late success into a certain failure (Decision 45).
  */
-type Route = 'search' | 'record' | 'doc' | 'file';
+type Route = 'search' | 'record' | 'index' | 'doc' | 'file';
 
-const ROUTES: Record<Route, { accept: ReadonlySet<number>; limitBytes: number }> = {
-  search: { accept: new Set([200, 400, 404, 429]), limitBytes: 8 * MiB },
+const ROUTES: Record<
+  Route,
+  { accept: ReadonlySet<number>; attemptTimeoutMs?: number; limitBytes: number }
+> = {
+  search: {
+    accept: new Set([200, 400, 404, 429]),
+    limitBytes: 8 * MiB,
+    attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+  },
   record: { accept: new Set([200, 404, 429]), limitBytes: 32 * MiB },
-  doc: { accept: new Set([200, 404, 429]), limitBytes: 2 * MiB },
-  file: { accept: new Set([200, 404, 429]), limitBytes: 2 * MiB },
+  index: {
+    accept: new Set([200, 404, 429]),
+    limitBytes: 8 * MiB,
+    attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+  },
+  doc: {
+    accept: new Set([200, 404, 429]),
+    limitBytes: 2 * MiB,
+    attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+  },
+  file: {
+    accept: new Set([200, 404, 429]),
+    limitBytes: 2 * MiB,
+    attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+  },
 };
 
 /** What one boundary request yields: a parsed body, a 400 rejection, or a 404. */
@@ -75,9 +114,13 @@ type Fetched<T> =
   | { status: 404 };
 
 interface RequestSpec<T> {
+  /** Called with the status of every response, attempt by attempt. */
+  onStatus?: (status: number) => void;
   operation: string;
   /** Envelope check: the typed body, or `undefined` when the JSON is not the expected shape. */
   parse: (json: unknown) => T | undefined;
+  /** The recid a record GET reads, named in its deadline message. */
+  recid?: string;
   route: Route;
   url: string;
 }
@@ -89,6 +132,11 @@ export type Sleep = (ms: number, signal: AbortSignal) => Promise<void>;
 export interface CernOpenDataServiceOptions {
   /** Fetch implementation (tests pass `createFetchMock(routes).fetch`). */
   fetch?: typeof fetch;
+  /**
+   * Index-read LRUs, one entry per recid and key and one record head per
+   * recid: entry count (default 16) and TTL (default 15 min).
+   */
+  indexCache?: { size?: number; ttlMs?: number };
   /** Validated-run collection TTL (default 15 min). */
   listCacheTtlMs?: number;
   /** Compact-manifest LRU: entry count (default 8) and TTL (default 15 min). */
@@ -147,6 +195,15 @@ class TtlLru<V> {
     }
   }
 
+  delete(key: string): void {
+    this.#entries.delete(key);
+  }
+
+  /** Drop every entry whose key `match` accepts. */
+  deleteWhere(match: (key: string) => boolean): void {
+    for (const key of this.#entries.keys()) if (match(key)) this.#entries.delete(key);
+  }
+
   clear(): void {
     this.#entries.clear();
   }
@@ -172,6 +229,32 @@ function parseSearchEnvelope(json: unknown): RawSearchResponse | undefined {
 function parseMetadataEnvelope(json: unknown): RawHit | undefined {
   if (!isRecord(json) || !isRecord(json.metadata)) return;
   return json as unknown as RawHit;
+}
+
+/** The per-index route's envelope: the entry for exactly `key`, with a `files` array. */
+function indexEnvelope(key: string): (json: unknown) => RawFileIndex | undefined {
+  return (json) =>
+    isRecord(json) && json.key === key && Array.isArray(json.files)
+      ? (json as RawFileIndex)
+      : undefined;
+}
+
+/** A manifest's record-level fields, without its file lists. */
+function headOf({ recid, title, availability, availability_details }: RecordHead): RecordHead {
+  return definedOnly<RecordHead>({ recid, title, availability, availability_details });
+}
+
+/**
+ * The message for a call whose 50 s budget ran out mid-request: it names the
+ * portal, the budget and the next step, never an operation name or a
+ * millisecond figure. A record GET names the record and its portal page,
+ * whose pager lists the files the API could not send in time.
+ */
+function deadlineMessage(recid: string | undefined): string {
+  const budget = `this call's ${CALL_BUDGET_MS / 1000} s budget`;
+  return recid === undefined
+    ? `${SERVICE_LABEL} did not answer within ${budget}; call again in a minute.`
+    : `${SERVICE_LABEL} did not finish sending record ${recid} within ${budget}; call again in a minute, or browse its files at ${recordUrl(recid)}.`;
 }
 
 function upstreamUnreadable(
@@ -281,6 +364,11 @@ function searchQuery(params: SearchParams): URLSearchParams {
   appendAll(query, 'file_type', params.file_type);
   appendAll(query, 'availability', params.availability);
   appendAll(query, 'collections', params.collections);
+  appendAll(query, 'category', params.category);
+  appendAll(query, 'keywords', params.keywords);
+  appendAll(query, 'magnet_polarity', params.magnet_polarity);
+  appendAll(query, 'stripping_stream', params.stripping_stream);
+  appendAll(query, 'stripping_version', params.stripping_version);
   if (params.year !== undefined) query.set('year', params.year);
   if (params.number_events !== undefined) query.set('number_events', params.number_events);
   if (params.sort !== undefined) query.set('sort', params.sort);
@@ -341,6 +429,12 @@ export class CernOpenDataService {
   readonly #userAgent: string;
   readonly #pacer: Pacer;
   readonly #manifests: TtlLru<CompactManifest>;
+  /** Index reads whose search found the record, with its head, by `{recid}/{key}` (a recid holds no `/`). */
+  readonly #indexes: TtlLru<IndexListing>;
+  /** Record heads from index reads' searches, by recid, so another key of the record skips the search. */
+  readonly #heads: TtlLru<RecordHead>;
+  /** Counts manifests cached; an index read that saw it change while in flight is not cached. */
+  #manifestEpoch = 0;
   readonly #listCacheTtlMs: number;
   #runLists: { expiresAt: number; lists: ValidatedRunList[] } | undefined;
   /** Last rate-limit headers seen (best effort; the portal's counter is per backend). */
@@ -356,6 +450,10 @@ export class CernOpenDataService {
       options.manifestCache?.ttlMs ?? CACHE_TTL_MS,
       this.#now,
     );
+    const indexCacheSize = options.indexCache?.size ?? 16;
+    const indexCacheTtlMs = options.indexCache?.ttlMs ?? CACHE_TTL_MS;
+    this.#indexes = new TtlLru(indexCacheSize, indexCacheTtlMs, this.#now);
+    this.#heads = new TtlLru(indexCacheSize, indexCacheTtlMs, this.#now);
     this.#listCacheTtlMs = options.listCacheTtlMs ?? CACHE_TTL_MS;
     this.#pacer = createPacer({
       name: 'cern-opendata',
@@ -371,21 +469,36 @@ export class CernOpenDataService {
   }
 
   /**
-   * One search page. Resolves with `{ kind: 'page' }`, or `{ kind: 'rejected' }`
+   * One search page. Resolves with `{ kind: 'page' }`, `{ kind: 'rejected' }`
    * carrying the portal's 400 (`The syntax of the search query is invalid.`,
-   * `Maximum number of 10000 results have been reached.`, …).
+   * `Maximum number of 10000 results have been reached.`, …), or
+   * `{ kind: 'server_error' }` carrying the error retries ended on when every
+   * attempt answered 500. Every other failure throws.
    */
   async search(params: SearchParams, budget: Budget, ctx: Context): Promise<SearchOutcome> {
-    const fetched = await this.#request(
-      {
-        route: 'search',
-        url: `${PORTAL_ORIGIN}/api/records/?${searchQuery(params).toString()}`,
-        operation: 'CernOpenData.search',
-        parse: parseSearchEnvelope,
-      },
-      budget,
-      ctx,
-    );
+    const statuses: number[] = [];
+    let fetched: Fetched<RawSearchResponse>;
+    try {
+      fetched = await this.#request(
+        {
+          route: 'search',
+          url: `${PORTAL_ORIGIN}/api/records/?${searchQuery(params).toString()}`,
+          operation: 'CernOpenData.search',
+          parse: parseSearchEnvelope,
+          onStatus: (status) => statuses.push(status),
+        },
+        budget,
+        ctx,
+      );
+    } catch (error) {
+      const everyAttempt500 =
+        error instanceof McpError &&
+        error.data?.status === 500 &&
+        statuses.length === error.data.retryAttempts &&
+        statuses.every((status) => status === 500);
+      if (everyAttempt500) return { kind: 'server_error', error };
+      throw error;
+    }
     if (fetched.status === 400) return { kind: 'rejected', rejection: fetched.rejection };
     if (fetched.status === 404) throw upstreamUnreadable(`${SERVICE_LABEL} search answered 404.`);
     const { body } = fetched;
@@ -401,10 +514,12 @@ export class CernOpenDataService {
 
   /**
    * A search the server built itself, from validated input only: a 400 means
-   * the server built it wrong, so it is raised as `InternalError`.
+   * the server built it wrong, so it is raised as `InternalError`, and a 500
+   * on every attempt is thrown as the `ServiceUnavailable` retries ended on.
    */
   async searchBuilt(params: SearchParams, budget: Budget, ctx: Context): Promise<SearchPage> {
     const outcome = await this.search(params, budget, ctx);
+    if (outcome.kind === 'server_error') throw outcome.error;
     if (outcome.kind === 'rejected') {
       throw internalError(
         `${SERVICE_LABEL} rejected a query this server built: ${noticeValue(outcome.rejection.message)}`,
@@ -472,7 +587,10 @@ export class CernOpenDataService {
 
   /**
    * The record's compact file manifest from `GET /api/records/{recid}` (32 MiB
-   * ceiling), or `null` on 404. Successful reads are cached (LRU, 15 min).
+   * ceiling, an attempt cut only at the call's deadline), or `null` on 404.
+   * Successful reads are cached (LRU, 15 min) and drop the record's cached
+   * index reads and head, so once the manifest is evicted no older read of
+   * the record is served again.
    */
   async getManifest(recid: string, budget: Budget, ctx: Context): Promise<CompactManifest | null> {
     const cached = this.#manifests.get(recid);
@@ -483,6 +601,7 @@ export class CernOpenDataService {
         url: `${PORTAL_ORIGIN}/api/records/${encodeURIComponent(recid)}`,
         operation: 'CernOpenData.getManifest',
         parse: parseMetadataEnvelope,
+        recid,
       },
       budget,
       ctx,
@@ -490,7 +609,64 @@ export class CernOpenDataService {
     if (fetched.status !== 200) return null;
     const manifest = toManifest(recid, fetched.body.metadata);
     this.#manifests.set(recid, manifest);
+    this.#manifestEpoch++;
+    this.#heads.delete(recid);
+    this.#indexes.deleteWhere((key) => key.startsWith(`${recid}/`));
     return manifest;
+  }
+
+  /**
+   * One file index with its record's head, read without the full record
+   * (Decision 44). A cached manifest answers with no request. Otherwise
+   * `GET /record/{recid}/file_index/{key}` (8 MiB ceiling, the key one path
+   * segment, no query string, since `?qos=online` drops files) runs beside the
+   * record's files-skipped `q=recid:` search, which supplies the head and
+   * tells a 404 for a missing index from one for a missing record. Either read
+   * failing fails the call. A head already cached for the recid stands in for
+   * the search. `.`, `..` and a key that is not well-formed Unicode (it cannot
+   * be percent-encoded) are `index_not_found` without a request (Decision 39).
+   * A found index is cached per recid and key when the search found its
+   * record, and the head per recid (LRU, 15 min), unless a manifest was cached
+   * while the read was in flight.
+   */
+  async getIndex(recid: string, key: string, budget: Budget, ctx: Context): Promise<IndexLookup> {
+    const manifest = this.#manifests.get(recid);
+    if (manifest) {
+      const index = manifest.indexes.find((entry) => entry.key === key);
+      return index
+        ? { kind: 'found', listing: { record: headOf(manifest), index } }
+        : { kind: 'index_not_found' };
+    }
+    if (pathSegment(key) === undefined || !key.isWellFormed()) return { kind: 'index_not_found' };
+    const cacheKey = `${recid}/${key}`;
+    const cached = this.#indexes.get(cacheKey);
+    if (cached) return { kind: 'found', listing: cached };
+
+    const cachedHead = this.#heads.get(recid);
+    const epoch = this.#manifestEpoch;
+    const [fetched, hit] = await Promise.all([
+      this.#request(
+        {
+          route: 'index',
+          url: `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}/file_index/${encodeURIComponent(key)}`,
+          operation: 'CernOpenData.getIndex',
+          parse: indexEnvelope(key),
+        },
+        budget,
+        ctx,
+      ),
+      cachedHead ? undefined : this.findRecord(recid, budget, ctx),
+    ]);
+    const head = cachedHead ?? (hit ? toRecordHead(recid, hit.metadata) : undefined);
+    const cacheable = epoch === this.#manifestEpoch;
+    if (hit && head && cacheable) this.#heads.set(recid, head);
+    if (fetched.status !== 200) return { kind: head ? 'index_not_found' : 'record_not_found' };
+    const listing: IndexListing = {
+      record: head ?? { recid },
+      index: toCompactIndex(fetched.body, recid),
+    };
+    if (head && cacheable) this.#indexes.set(cacheKey, listing);
+    return { kind: 'found', listing };
   }
 
   /** A documentation or news page from `GET /api/docs/{slug}` (2 MiB ceiling), or `null` on 404. */
@@ -510,7 +686,8 @@ export class CernOpenDataService {
 
   /**
    * Every list of the `CMS-Validated-Runs` collection, with file keys, sorted
-   * by recid. One search with files included; cached for 15 minutes.
+   * by the number in the recid (`cms-1001` sorts as 1001). One search with
+   * files included; cached for 15 minutes.
    */
   async getValidatedRunLists(budget: Budget, ctx: Context): Promise<ValidatedRunList[]> {
     if (this.#runLists && this.#runLists.expiresAt > this.#now()) return this.#runLists.lists;
@@ -519,9 +696,10 @@ export class CernOpenDataService {
       budget,
       ctx,
     );
+    const recidNumber = (recid: string) => Number(recid.slice(recid.lastIndexOf('-') + 1));
     const lists = page.hits
       .flatMap((hit) => toValidatedRunList(hit) ?? [])
-      .sort((a, b) => Number(a.recid) - Number(b.recid));
+      .sort((a, b) => recidNumber(a.recid) - recidNumber(b.recid));
     this.#runLists = { lists, expiresAt: this.#now() + this.#listCacheTtlMs };
     return lists;
   }
@@ -560,13 +738,16 @@ export class CernOpenDataService {
   dispose(): void {
     this.#pacer.dispose();
     this.#manifests.clear();
+    this.#indexes.clear();
+    this.#heads.clear();
     this.#runLists = undefined;
   }
 
   /**
    * The HTTP boundary: retry outside, pacer inside, one deadline across every
    * attempt. A pacer or header-gate shed (`pacer_shed`) is re-thrown as the
-   * declared `rate_limited` with its `retryAfter`.
+   * declared `rate_limited` with its `retryAfter`; a deadline expiry stays
+   * `Timeout` with `retry_deadline_exceeded`, reworded for the caller.
    */
   async #request<T>(spec: RequestSpec<T>, budget: Budget, ctx: Context): Promise<Fetched<T>> {
     const remainingMs = budget.deadlineAt - this.#now();
@@ -602,11 +783,19 @@ export class CernOpenDataService {
           { cause: error },
         );
       }
+      if (error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded') {
+        throw timeout(deadlineMessage(spec.recid), error.data, { cause: error });
+      }
       throw error;
     }
   }
 
-  /** One attempt: header gate, fetch under a per-attempt timer, status dispatch, bounded read. */
+  /**
+   * One attempt: header gate, fetch under the route's flat attempt timer
+   * (none for the record GET), status dispatch, bounded read. The timer is
+   * never clamped to the time left: `signal` alone carries the call's
+   * deadline, so its expiry always reads as `retry_deadline_exceeded`.
+   */
   async #attempt<T>(
     spec: RequestSpec<T>,
     budget: Budget,
@@ -614,9 +803,12 @@ export class CernOpenDataService {
     ctx: Context,
   ): Promise<Fetched<T>> {
     await this.#headerGate(budget, signal);
-    const timeoutMs = Math.max(1, Math.min(ATTEMPT_TIMEOUT_MS, budget.deadlineAt - this.#now()));
+    const { attemptTimeoutMs } = ROUTES[spec.route];
     const perAttempt = new AbortController();
-    const timer = setTimeout(() => perAttempt.abort(), timeoutMs);
+    const timer =
+      attemptTimeoutMs === undefined
+        ? undefined
+        : setTimeout(() => perAttempt.abort(), attemptTimeoutMs);
     try {
       const response = await this.#fetch(spec.url, {
         signal: AbortSignal.any([signal, perAttempt.signal]),
@@ -627,8 +819,10 @@ export class CernOpenDataService {
       return await this.#dispatch(spec, response, ctx);
     } catch (error) {
       if (signal.aborted || error instanceof McpError) throw error;
-      if (perAttempt.signal.aborted) {
-        throw timeout(`${SERVICE_LABEL} did not answer within ${timeoutMs} ms.`, { timeoutMs });
+      if (attemptTimeoutMs !== undefined && perAttempt.signal.aborted) {
+        throw timeout(`${SERVICE_LABEL} did not answer within ${attemptTimeoutMs / 1000} s.`, {
+          timeoutMs: attemptTimeoutMs,
+        });
       }
       throw serviceUnavailable(
         `Could not reach ${SERVICE_LABEL}: ${error instanceof Error ? error.message : String(error)}`,
@@ -643,6 +837,7 @@ export class CernOpenDataService {
   async #dispatch<T>(spec: RequestSpec<T>, response: Response, ctx: Context): Promise<Fetched<T>> {
     const { accept, limitBytes } = ROUTES[spec.route];
     const { status } = response;
+    spec.onStatus?.(status);
     if (status >= 300 && status < 400) {
       await response.body?.cancel().catch(() => undefined);
       throw serviceUnavailable(

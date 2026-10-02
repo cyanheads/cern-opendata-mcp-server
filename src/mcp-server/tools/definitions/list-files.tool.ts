@@ -1,8 +1,9 @@
 /**
  * @fileoverview cern_opendata_list_files — page through one record's file
  * manifest: its file indexes with URI-list URLs, and per file the XRootD URI,
- * HTTPS download URL, size, checksum and availability. Reads the record once
- * (cached as a compact manifest) and pages locally with an opaque cursor.
+ * HTTPS download URL, size, checksum and availability. Record scope reads the
+ * record once (cached as a compact manifest); index scope reads only that
+ * index unless the manifest is cached. Pages locally with an opaque cursor.
  * @module mcp-server/tools/definitions/list-files.tool
  */
 
@@ -21,7 +22,12 @@ import {
   PORTAL_ORIGIN,
   printUrl,
 } from '@/services/cern-opendata/text.js';
-import type { CompactFile, CompactIndex } from '@/services/cern-opendata/types.js';
+import type {
+  CompactFile,
+  CompactIndex,
+  CompactManifest,
+  RecordHead,
+} from '@/services/cern-opendata/types.js';
 import {
   composeNotice,
   finishListEnrichment,
@@ -59,18 +65,49 @@ function decodeCursor(raw: string): FilesCursor | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-/** A file key as a URL path: each `/`-separated segment percent-encoded. */
-function keyPath(key: string): string {
-  return key.split('/').map(encodeURIComponent).join('/');
+/** A file key or EOS path as a URL path: each `/`-separated segment percent-encoded. */
+function urlPath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
 }
 
-function fileUrl(recid: string, key: string): string {
-  return `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}/files/${keyPath(key)}`;
+/**
+ * Whether a path can stand in a URL as a file: well-formed Unicode
+ * (`encodeURIComponent` throws on a lone surrogate) with no `.` or `..`
+ * segment, which the URL parser resolves, retargeting the URL, and no empty
+ * segment, which names a directory or a doubled slash.
+ */
+function isUrlSafePath(path: string): boolean {
+  return (
+    path.isWellFormed() &&
+    path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+  );
 }
 
+/** The XRootD path of a file on the public EOS instance, from `/eos/opendata/` on (port optional). */
+const EOS_OPENDATA_URI = /^root:\/\/eospublic\.cern\.ch(?::\d+)?\/+(eos\/opendata\/.+)$/;
+
+/**
+ * A file's HTTPS download URL. A keyed file is served at
+ * `/record/{recid}/files/{key}`. A keyless one (some index members) is not,
+ * so it gets the portal's EOS route built from its XRootD path,
+ * `root://eospublic.cern.ch[:port]//eos/opendata/…` →
+ * `https://opendata.cern.ch/eos/opendata/…`, and no URL for any other URI.
+ * Either gets no URL when its key or path is not URL-safe (Decision 24).
+ */
+function httpsUrlOf(recid: string, file: CompactFile): string | undefined {
+  if (file.key !== undefined) {
+    if (!isUrlSafePath(file.key)) return;
+    return `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}/files/${urlPath(file.key)}`;
+  }
+  const path = EOS_OPENDATA_URI.exec(file.uri)?.[1];
+  if (path === undefined || !isUrlSafePath(path)) return;
+  return `${PORTAL_ORIGIN}/${urlPath(path)}`;
+}
+
+/** An index's URI-list or JSON URL, the key one encoded path segment as `getIndex` requests it. */
 function indexUrl(recid: string, key: string, extension: 'txt' | 'json'): string {
   const keyed = key.replace(/\.(?:json|txt)$/i, '');
-  return `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}/file_index/${keyPath(`${keyed}.${extension}`)}`;
+  return `${PORTAL_ORIGIN}/record/${encodeURIComponent(recid)}/file_index/${encodeURIComponent(`${keyed}.${extension}`)}`;
 }
 
 function toFileOut(recid: string, file: CompactFile) {
@@ -80,7 +117,7 @@ function toFileOut(recid: string, file: CompactFile) {
     size_in_bytes: file.size,
     checksum: file.checksum,
     xrootd_uri: file.uri,
-    https_url: fileUrl(recid, file.key),
+    https_url: httpsUrlOf(recid, file),
     availability: file.availability,
   });
 }
@@ -99,12 +136,22 @@ function toIndexOut(recid: string, index: CompactIndex) {
 
 const FileSchema = z
   .object({
-    key: z.string().describe('File key; index members read <index>.json_<n>.'),
+    key: z
+      .string()
+      .optional()
+      .describe(
+        'File key as the portal states it; index members read <index>.json_<n>. Absent when the portal lists the file without one; filename then names it.',
+      ),
     filename: z.string().optional().describe('Real file name, for index members.'),
     size_in_bytes: z.number().describe('File size in bytes.'),
     checksum: z.string().optional().describe('Checksum, such as adler32:1a2b3c4d.'),
     xrootd_uri: z.string().describe('XRootD URI (root://eospublic.cern.ch//eos/opendata/…).'),
-    https_url: z.string().describe('HTTPS download URL on the portal.'),
+    https_url: z
+      .string()
+      .optional()
+      .describe(
+        "HTTPS download URL on the portal: the record's files route for a keyed file, the /eos/opendata/ route for a keyless one. Absent when a keyless file's XRootD URI is not a file path under eospublic.cern.ch/eos/opendata/, or when the key or path holds a lone surrogate or an empty, . or .. segment.",
+      ),
     availability: z
       .string()
       .optional()
@@ -114,11 +161,25 @@ const FileSchema = z
 
 const IndexSchema = z
   .object({
-    key: z.string().describe('Index key (…_file_index.json); pass it as index to page its files.'),
+    key: z
+      .string()
+      .describe(
+        'Index key (…_file_index.json, or a name such as training_files.json); pass it as index to page its files.',
+      ),
     description: z.string().optional().describe('Index description as the portal states it.'),
-    number_files: z.number().describe('Files in the index.'),
-    size_in_bytes: z.number().describe('Total size of the index files in bytes.'),
-    availability: AvailabilityCountsSchema,
+    number_files: z
+      .number()
+      .describe(
+        'Files in the index, as the portal states it, else the count of the files the index lists.',
+      ),
+    size_in_bytes: z
+      .number()
+      .describe(
+        "Total size of the index files in bytes, as the portal states it, else the sum of the listed files' sizes.",
+      ),
+    availability: AvailabilityCountsSchema.describe(
+      'File counts by availability state, as the portal states them; empty ({}) when it states none.',
+    ),
     uri_list_url: z
       .string()
       .describe('Plain-text list of every XRootD URI in the index, one per line.'),
@@ -167,11 +228,11 @@ type ListFilesOut = z.infer<typeof ListFilesOutput>;
 export const listFiles = tool('cern_opendata_list_files', {
   title: 'List CERN Open Data Record Files',
   description:
-    "List one record's files: its file indexes (groups of up to ~1,300 files) with their XRootD URI-list URLs, and per file the XRootD URI, HTTPS download URL, size, adler32 checksum and availability. Without index, returns the record's indexes and its regular files; with index, pages through that index's files. Files marked on demand sit on tape and must be requested on the record's portal page before download.",
+    "List one record's files: its file indexes (groups of up to ~1,500 files) with their XRootD URI-list URLs, and per file the XRootD URI, HTTPS download URL, size, adler32 checksum and availability. Without index, returns the record's indexes and its regular files; with index, reads only that index and pages through its files. Files marked on demand sit on tape and must be requested on the record's portal page before download.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
-      'Record id: up to 12 digits (6004), recid:6004, or a portal record URL. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); recid:6004 or a portal record URL also work. cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
     index: blankAsUnset(
       z.preprocess(
@@ -196,7 +257,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     {
       reason: 'record_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No record has this recid (the portal answered 404).',
+      when: 'No record has this recid: the portal answered 404 for the record, or, with index set, for the index while the record search found nothing.',
       recovery:
         'Call cern_opendata_search_records to find the record and its recid, then call cern_opendata_list_files with that recid.',
       severity: 'notice',
@@ -204,7 +265,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     {
       reason: 'index_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'index names no file index of this record.',
+      when: 'index names no file index of this record: the portal answered 404 for it while the record exists, the record lists no such key, or the key is ., .. or not well-formed Unicode.',
       recovery:
         "Call cern_opendata_list_files with this recid and no index to list the record's index keys, then pass one of them exactly.",
       severity: 'notice',
@@ -229,7 +290,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     {
       reason: 'upstream_unreadable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, or over the byte ceiling (then data.retryable is false).',
+      when: 'The portal answered with a body the server could not read: not JSON, missing the expected envelope, a file without its XRootD URI or size, a file index whose key is missing or cannot be URL-encoded, or over the byte ceiling (then data.retryable is false); or the record search answered 404.',
       recovery:
         'Call cern_opendata_list_files again in a minute; if it repeats, the portal is serving an error page or an oversized response, so read the same data on https://opendata.cern.ch instead.',
       thrownBy: 'service',
@@ -256,29 +317,34 @@ export const listFiles = tool('cern_opendata_list_files', {
     }
 
     const service = getCernOpenDataService();
-    const manifest = await service.getManifest(input.recid, service.startBudget(), ctx);
-    if (!manifest) {
-      throw ctx.fail('record_not_found', `No record has recid ${input.recid}.`, {
-        recid: input.recid,
-      });
-    }
+    const budget = service.startBudget();
+    const recordNotFound = () =>
+      ctx.fail('record_not_found', `No record has recid ${input.recid}.`, { recid: input.recid });
 
+    /** Set in record scope only: the record-wide notices read it. */
+    let manifest: CompactManifest | undefined;
+    let record: RecordHead;
     let scopeFiles: CompactFile[];
     let indexes: CompactIndex[];
     if (indexKey === null) {
+      manifest = (await service.getManifest(input.recid, budget, ctx)) ?? undefined;
+      if (!manifest) throw recordNotFound();
+      record = manifest;
       scopeFiles = manifest.files;
       indexes = manifest.indexes;
     } else {
-      const selected = manifest.indexes.find((index) => index.key === indexKey);
-      if (!selected) {
+      const lookup = await service.getIndex(input.recid, indexKey, budget, ctx);
+      if (lookup.kind === 'record_not_found') throw recordNotFound();
+      if (lookup.kind === 'index_not_found') {
         throw ctx.fail(
           'index_not_found',
-          `Record ${input.recid} has no file index with key "${oneLine(indexKey)}"; it has ${countOf(manifest.indexes.length, 'file index', 'file indexes')}.`,
-          { recid: input.recid, index: indexKey, indexCount: manifest.indexes.length },
+          `Record ${input.recid} has no file index with key "${oneLine(indexKey)}".`,
+          { recid: input.recid, index: indexKey },
         );
       }
-      scopeFiles = selected.files;
-      indexes = [selected];
+      record = lookup.listing.record;
+      scopeFiles = lookup.listing.index.files;
+      indexes = [lookup.listing.index];
     }
 
     const total = scopeFiles.length;
@@ -292,10 +358,10 @@ export const listFiles = tool('cern_opendata_list_files', {
 
     const page = scopeFiles.slice(offset, offset + input.limit);
     const hasMore = offset + page.length < total;
-    const portalUrl = recordUrl(manifest.recid);
+    const portalUrl = recordUrl(record.recid);
 
     const fragments: string[] = [];
-    if (indexKey === null && manifest.files.length === 0 && indexes.length > 0) {
+    if (manifest && manifest.files.length === 0 && indexes.length > 0) {
       const indexed = indexes.reduce((sum, index) => sum + index.number_files, 0);
       fragments.push(
         `Files are grouped into ${countOf(indexes.length, 'file index', 'file indexes')} (${countOf(indexed, 'file')}); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once.`,
@@ -303,16 +369,14 @@ export const listFiles = tool('cern_opendata_list_files', {
     }
     const onTape =
       scopeFiles.filter((file) => file.availability === 'on demand').length +
-      (indexKey === null
-        ? indexes.reduce((sum, index) => sum + (index.availability.on_demand ?? 0), 0)
-        : 0);
+      (manifest ? indexes.reduce((sum, index) => sum + (index.availability.on_demand ?? 0), 0) : 0);
     if (onTape > 0) {
       const [are, them] = onTape === 1 ? ['is', 'it'] : ['are', 'them'];
       fragments.push(
         `${countOf(onTape, 'file')} ${are} on tape (availability on demand); request ${them} on the record's portal page (${portalUrl}) before downloading.`,
       );
     }
-    if (manifest.files.length === 0 && manifest.indexes.length === 0) {
+    if (manifest && manifest.files.length === 0 && manifest.indexes.length === 0) {
       if (manifest.children.length > 0) {
         const named = manifest.children.slice(0, CHILDREN_NAMED).map(noticeValue).join(', ');
         const more = manifest.children.length > CHILDREN_NAMED ? ', …' : '';
@@ -350,14 +414,14 @@ export const listFiles = tool('cern_opendata_list_files', {
     });
 
     return definedOnly<ListFilesOut>({
-      recid: manifest.recid,
-      title: manifest.title,
-      availability: manifest.availability,
-      availability_details: manifest.availability_details,
+      recid: record.recid,
+      title: record.title,
+      availability: record.availability,
+      availability_details: record.availability_details,
       scope: indexKey === null ? 'record' : 'index',
-      indexes: indexes.map((index) => toIndexOut(manifest.recid, index)),
-      files: page.map((file) => toFileOut(manifest.recid, file)),
-      children: manifest.children,
+      indexes: indexes.map((index) => toIndexOut(record.recid, index)),
+      files: page.map((file) => toFileOut(record.recid, file)),
+      children: manifest?.children ?? [],
       has_more: hasMore,
       next_cursor: hasMore
         ? encodeCursor({ r: input.recid, i: indexKey, o: offset + page.length })
@@ -401,7 +465,7 @@ export const listFiles = tool('cern_opendata_list_files', {
       );
       for (const file of result.files) {
         lines.push(
-          `| ${inline(file.key)} | ${inlineOrNA(file.filename)} | ${file.size_in_bytes} | ${inlineOrNA(file.checksum)} | ${inlineOrNA(file.availability)} | ${printUrl(file.xrootd_uri)} | ${printUrl(file.https_url)} |`,
+          `| ${inlineOrNA(file.key)} | ${inlineOrNA(file.filename)} | ${file.size_in_bytes} | ${inlineOrNA(file.checksum)} | ${inlineOrNA(file.availability)} | ${printUrl(file.xrootd_uri)} | ${file.https_url ? printUrl(file.https_url) : NOT_AVAILABLE} |`,
         );
       }
     }

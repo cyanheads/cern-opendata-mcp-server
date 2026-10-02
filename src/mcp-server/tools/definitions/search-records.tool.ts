@@ -8,7 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { RecordTypeSchema } from '@/mcp-server/record-schema.js';
+import { RecordTypeSchema, renderRecordType } from '@/mcp-server/record-schema.js';
 import {
   getCernOpenDataService,
   isPageWindowRejection,
@@ -16,23 +16,29 @@ import {
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
   definedOnly,
+  FACET_KEYS,
   glossaryFacetCount,
   toFacets,
   toSearchHit,
 } from '@/services/cern-opendata/normalize.js';
 import {
+  type DelimiterProblem,
+  findUnbalancedDelimiter,
+} from '@/services/cern-opendata/query-syntax.js';
+import {
   countOf,
   fence,
   inline,
-  NOT_AVAILABLE,
+  inlineSpelling,
   noticeValue,
   printUrl,
 } from '@/services/cern-opendata/text.js';
-import type { SearchParams } from '@/services/cern-opendata/types.js';
+import type { SearchParams, SortKey } from '@/services/cern-opendata/types.js';
 import {
   PARAM_TOPIC,
-  PBPB_SPELLINGS,
   SEARCHABLE_TYPE_PRIMARIES,
+  SPELLING_EXPANSIONS,
+  VOCABULARY_PARAMS,
   type VocabularyParam,
 } from '@/services/cern-opendata/vocabulary.js';
 import {
@@ -46,25 +52,13 @@ import { blankAsUnset, listInput, unrecognizedValues, vocabularyListInput } from
 
 const SORTS = ['bestmatch', 'mostrecent', 'title', 'title_desc'] as const;
 
-const VOCABULARY_PARAMS = [
-  'type',
-  'experiment',
-  'collision_energy',
-  'collision_type',
-  'file_type',
-  'availability',
-] as const satisfies readonly VocabularyParam[];
-
-const FACET_KEYS = [
-  'experiment',
-  'type',
-  'collision_energy',
-  'collision_type',
-  'file_type',
-  'availability',
-  'year',
-  'number_events',
-] as const;
+/** The upstream spelling of each sort: the portal takes direction only from a `-` prefix. */
+const UPSTREAM_SORT: Record<(typeof SORTS)[number], SortKey> = {
+  bestmatch: 'bestmatch',
+  mostrecent: '-mostrecent',
+  title: 'title',
+  title_desc: '-title',
+};
 
 const stringList = (item: string, list: string) =>
   z.array(z.string().describe(item)).optional().describe(list);
@@ -114,8 +108,8 @@ const SearchHitSchema = z
 
 const BucketSchema = z
   .object({
-    value: z.string().describe('The value, spelled as its filter accepts it.'),
-    count: z.number().describe('Records with this value.'),
+    value: z.string().describe('As its filter takes it.'),
+    count: z.number().describe('Records.'),
   })
   .describe('One facet value.');
 
@@ -134,13 +128,26 @@ const TypeBucketSchema = BucketSchema.extend({
     .describe('Secondary types of this primary type.'),
 }).describe('One primary type.');
 
+/** Only the category facet's buckets carry subcategories, so only its schema declares them. */
+const CategoryBucketSchema = BucketSchema.extend({
+  subcategories: z
+    .array(
+      z
+        .object({
+          value: z.string().describe('Secondary category.'),
+          count: z.number().describe('Records with it.'),
+        })
+        .describe('One secondary category.'),
+    )
+    .optional()
+    .describe('Secondary categories of this primary category.'),
+}).describe('One primary category.');
+
 const facetSchema = <B extends z.ZodType>(what: string, bucket: B) =>
   z
     .object({
       buckets: z.array(bucket).describe('Values with counts.'),
-      other_count: z
-        .number()
-        .describe('Records under values past the bucket cap; 0 for year and number_events.'),
+      other_count: z.number().describe('Records past the bucket cap.'),
     })
     .describe(what);
 
@@ -167,10 +174,17 @@ const AppliedFiltersSchema = z
       .describe('Event-count range sent: min--max, min-- or --max (inclusive).'),
     availability: stringList('One availability state.', 'Availability states sent (OR).'),
     collection: stringList('One collection.', 'Collections sent (OR).'),
+    category: stringList('One category.', 'Categories requested (OR).'),
+    keywords: stringList('One keyword.', 'Keywords sent (OR).'),
+    magnet_polarity: stringList('One polarity.', 'Magnet polarities sent (OR).'),
+    stripping_stream: stringList('One stream.', 'Stripping streams sent (OR).'),
+    stripping_version: stringList('One version.', 'Stripping versions sent (OR).'),
     sort: z.enum(SORTS).describe('The sort that ran.'),
     sort_defaulted: z
       .boolean()
-      .describe('True when sort was omitted and the portal default was sent explicitly.'),
+      .describe(
+        'True when sort was omitted, so the server chose it: bestmatch with a query, mostrecent (newest first) without.',
+      ),
     include_ondemand: z
       .literal(true)
       .describe('Tape-resident (ondemand) records are always included.'),
@@ -206,8 +220,22 @@ const AppliedFiltersSchema = z
 
 type AppliedFilters = z.infer<typeof AppliedFiltersSchema>;
 type HitOut = z.infer<typeof SearchHitSchema>;
-type FacetOut = z.infer<ReturnType<typeof facetSchema<typeof TypeBucketSchema>>>;
-type RecordTypeOut = z.infer<typeof RecordTypeSchema>;
+
+interface NestedOut {
+  count: number;
+  value: string;
+}
+
+/** Any facet's shape; only type buckets carry subtypes and only category buckets subcategories. */
+interface FacetOut {
+  buckets: {
+    count: number;
+    subcategories?: NestedOut[] | undefined;
+    subtypes?: NestedOut[] | undefined;
+    value: string;
+  }[];
+  other_count: number;
+}
 
 /** `a--b`, `a--` or `--b`; `undefined` when neither bound is set (Decision 19). */
 function composeRange(from: number | undefined, to: number | undefined): string | undefined {
@@ -215,11 +243,26 @@ function composeRange(from: number | undefined, to: number | undefined): string 
   return `${from ?? ''}--${to ?? ''}`;
 }
 
-function typeLabel(type: RecordTypeOut): string {
-  const primary = type.primary === '' ? NOT_AVAILABLE : inline(type.primary);
-  return type.secondary.length > 0
-    ? `${primary} (${type.secondary.map(inline).join(', ')})`
-    : primary;
+/**
+ * The upstream values sent for a filter: each value with several stored
+ * spellings expands to all of them (Decision 8), deduped in order.
+ */
+function sentSpellings(param: VocabularyParam, values: string[] | undefined): string[] | undefined {
+  const spellings = SPELLING_EXPANSIONS[param];
+  if (values === undefined || spellings === undefined) return values;
+  return [...new Set(values.flatMap((value) => spellings.get(value) ?? [value]))];
+}
+
+/** The `invalid_query` message for a query the delimiter scan refused. */
+function delimiterProblem({ character, position, problem }: DelimiterProblem): string {
+  switch (problem) {
+    case 'unclosed':
+      return `its ${character} at character ${position} is never closed`;
+    case 'unopened':
+      return `its ${character} at character ${position} closes nothing opened before it`;
+    case 'dangling_escape':
+      return `it ends with a ${character} that escapes nothing`;
+  }
 }
 
 function joined(values: readonly string[]): string {
@@ -231,7 +274,7 @@ function renderHit(hit: HitOut): string[] {
     `**id:** ${inline(hit.id)}`,
     hit.recid !== undefined && hit.recid !== hit.id ? `**recid:** ${inline(hit.recid)}` : '',
     hit.slug !== undefined && hit.slug !== hit.id ? `**slug:** ${inline(hit.slug)}` : '',
-    `**type:** ${typeLabel(hit.type)}`,
+    `**type:** ${renderRecordType(hit.type)}`,
     hit.experiment ? `**experiment:** ${joined(hit.experiment)}` : '',
     hit.collision_energy ? `**energy:** ${inline(hit.collision_energy)}` : '',
     hit.collision_type ? `**collision:** ${inline(hit.collision_type)}` : '',
@@ -254,12 +297,14 @@ function renderHit(hit: HitOut): string[] {
   return lines;
 }
 
+/** Facet values render through `inlineSpelling`, so ` Heavy-Ion Physics` stays apart from `Heavy-Ion Physics`. */
 function renderFacet(name: string, facet: FacetOut): string {
   const buckets = facet.buckets.map((bucket) => {
-    const subtypes = bucket.subtypes?.length
-      ? `: ${bucket.subtypes.map((sub) => `${inline(sub.value)} ${sub.count}`).join(', ')}`
+    const nested = bucket.subtypes ?? bucket.subcategories;
+    const level = nested?.length
+      ? `: ${nested.map((sub) => `${inlineSpelling(sub.value)} ${sub.count}`).join(', ')}`
       : '';
-    return `${inline(bucket.value)} (${bucket.count}${subtypes})`;
+    return `${inlineSpelling(bucket.value)} (${bucket.count}${level})`;
   });
   const other = facet.other_count > 0 ? ` · other values: ${facet.other_count}` : '';
   return `- **${name}:** ${buckets.length > 0 ? buckets.join(', ') : 'none'}${other}`;
@@ -279,12 +324,17 @@ function renderAppliedFilters(filters: AppliedFilters): string {
     ['number_events', filters.number_events],
     ['availability', list(filters.availability)],
     ['collection', list(filters.collection)],
+    ['category', list(filters.category)],
+    ['keywords', list(filters.keywords)],
+    ['magnet_polarity', list(filters.magnet_polarity)],
+    ['stripping_stream', list(filters.stripping_stream)],
+    ['stripping_version', list(filters.stripping_version)],
     ['sort', `${filters.sort}${filters.sort_defaulted ? ' (defaulted)' : ''}`],
     ['include_ondemand', String(filters.include_ondemand)],
     [
       'expanded',
       filters.expanded
-        ?.map((e) => `${e.param} ${inline(e.value)} → ${e.sent.map(inline).join(', ')}`)
+        ?.map((e) => `${e.param} ${inline(e.value)} → ${e.sent.map(inlineSpelling).join(', ')}`)
         .join('; '),
     ],
     [
@@ -301,7 +351,7 @@ function renderAppliedFilters(filters: AppliedFilters): string {
 export const searchRecords = tool('cern_opendata_search_records', {
   title: 'Search CERN Open Data Records',
   description:
-    "Search the CERN Open Data Portal's datasets, software, environments, documentation and supplementary records with exact-vocabulary filters and an optional full-text query. The filters are experiment, record type, collision energy and type, file format, data-taking year, event count, availability and collection. Returns compact hits with recids plus live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Filter values are exact upstream; common spellings are normalized, and cern_opendata_list_reference lists the vocabulary. Paging reaches the first 10,000 matches.",
+    "Search the CERN Open Data Portal's datasets, software, environments, documentation and supplementary records with exact-vocabulary filters and an optional full-text query. The filters are experiment, record type, physics category, keyword, collision energy and type, file format, data-taking year, event count, availability, collection, and LHCb magnet polarity, stripping stream and stripping version. Returns compact hits with recids plus live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Filter values are exact upstream; common spellings are normalized, and cern_opendata_list_reference lists the vocabulary. Paging reaches the first 10,000 matches.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: blankAsUnset(z.string().max(500).optional()).describe(
@@ -343,8 +393,26 @@ export const searchRecords = tool('cern_opendata_search_records', {
     ).describe(
       "Portal collections (OR), exact and case-sensitive, such as CMS-Validated-Runs; copy spellings from a record's collections field. Array or comma-separated string, up to 10.",
     ),
+    category: vocabularyListInput('category', 20).describe(
+      'Physics categories of simulated datasets (OR): a primary such as Exotica, Higgs Physics, Standard Model Physics or Supersymmetry, or Primary::Secondary such as Higgs Physics::Standard Model. Array or comma-separated string, up to 20; case and the separator are normalized, and a known value holding a comma is kept whole. Heavy-Ion Physics also matches its leading-space spelling. cern_opendata_list_reference topic categories lists every value.',
+    ),
+    keywords: listInput(
+      10,
+      z.string().max(100).describe('One keyword, exact and case-sensitive.'),
+    ).describe(
+      'Record keywords (OR), exact and case-sensitive (Education and education differ), sent as given. Array or comma-separated string, up to 10; pass a keyword holding a comma in an array.',
+    ),
+    magnet_polarity: vocabularyListInput('magnet_polarity', 2).describe(
+      'LHCb magnet polarities (OR): MagDown or MagUp, set on LHCb collision datasets. Array or comma-separated string, up to 2; case is normalized.',
+    ),
+    stripping_stream: vocabularyListInput('stripping_stream', 11).describe(
+      'LHCb stripping streams (OR), such as BHADRON, CHARM, DIMUON, EW or LEPTONIC; they also match LHCb stripping documentation. Array or comma-separated string, up to 11; case is normalized. cern_opendata_list_reference topic lhcb lists them.',
+    ),
+    stripping_version: vocabularyListInput('stripping_version', 12).describe(
+      'LHCb stripping versions (OR), such as stripping21 or stripping21r1p2. Array or comma-separated string, up to 12; case is normalized.',
+    ),
     sort: blankAsUnset(z.enum(SORTS).optional()).describe(
-      'bestmatch (relevance), mostrecent (newest first), title (A-Z) or title_desc (Z-A). Omit for the portal default: bestmatch with a query, mostrecent without.',
+      'bestmatch (relevance), mostrecent (by date_published, newest first), title (A-Z) or title_desc (Z-A). Omitted: bestmatch with a query, mostrecent (newest first) without.',
     ),
     limit: blankAsUnset(z.number().int().min(1).max(50).default(10)).describe(
       'Hits per page, 1-50.',
@@ -374,9 +442,17 @@ export const searchRecords = tool('cern_opendata_search_records', {
         availability: facetSchema('Matches by record availability.', BucketSchema),
         year: facetSchema('Matches by data-taking year.', BucketSchema),
         number_events: facetSchema('Matches by event-count range.', BucketSchema),
+        category: facetSchema(
+          'Matches by physics category, each with its secondary categories.',
+          CategoryBucketSchema,
+        ),
+        keywords: facetSchema('Matches by keyword.', BucketSchema),
+        magnet_polarity: facetSchema('Matches by LHCb magnet polarity.', BucketSchema),
+        stripping_stream: facetSchema('Matches by LHCb stripping stream.', BucketSchema),
+        stripping_version: facetSchema('Matches by LHCb stripping version.', BucketSchema),
       })
       .describe(
-        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100).',
+        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100). other_count is 0 for year and number_events.',
       ),
   }),
   enrichment: {
@@ -390,10 +466,17 @@ export const searchRecords = tool('cern_opendata_search_records', {
     {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The portal rejected the query string (invalid query syntax), or answered another 400 the server did not anticipate; the upstream message is carried.',
+      when: 'query leaves a parenthesis, range bracket or double quote unbalanced, or ends in an escaping backslash (refused before any request); or the portal rejected the query string (invalid query syntax), or answered another 400 the server did not anticipate, whose upstream message is carried.',
       recovery:
-        'Quote phrases, balance parentheses and brackets, or drop special characters, then call cern_opendata_search_records again; cern_opendata_list_reference with topic query_syntax lists the field forms.',
+        'Quote phrases, balance parentheses, brackets and double quotes, or escape or drop special characters, then call cern_opendata_search_records again; cern_opendata_list_reference with topic query_syntax lists the field forms.',
       severity: 'notice',
+    },
+    {
+      reason: 'query_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Every attempt of a search with query set answered HTTP 500, as the portal does for some malformed queries in place of its 400 syntax rejection.',
+      recovery:
+        'Check query for an operator or field name with nothing after it (AND, OR, NOT, title:), a stray colon or an unescaped special character, and fix it; only if the query is well formed, call cern_opendata_search_records again in a minute.',
     },
     {
       reason: 'page_window_exceeded',
@@ -436,17 +519,14 @@ export const searchRecords = tool('cern_opendata_search_records', {
     const sort = input.sort ?? (input.query === undefined ? 'mostrecent' : 'bestmatch');
     const year = composeRange(input.year_from, input.year_to);
     const numberEvents = composeRange(input.min_events, input.max_events);
-    const expandsPbPb = input.collision_type?.includes('PbPb') ?? false;
-    const sentCollisionType = input.collision_type
-      ? [
-          ...new Set(
-            input.collision_type.flatMap((value) =>
-              value === 'PbPb' ? [...PBPB_SPELLINGS] : [value],
-            ),
-          ),
-        ]
-      : undefined;
-    const sentType = input.type ?? [...SEARCHABLE_TYPE_PRIMARIES];
+    const sent = (param: VocabularyParam) => sentSpellings(param, input[param]);
+    const expanded = VOCABULARY_PARAMS.flatMap((param) =>
+      (input[param] ?? []).flatMap((value) => {
+        const spellings = SPELLING_EXPANSIONS[param]?.get(value);
+        return spellings ? [{ param, value, sent: [...spellings] }] : [];
+      }),
+    );
+    const sentType = sent('type') ?? [...SEARCHABLE_TYPE_PRIMARIES];
     const unrecognized = VOCABULARY_PARAMS.flatMap((param) =>
       unrecognizedValues(param, input[param]),
     );
@@ -465,12 +545,15 @@ export const searchRecords = tool('cern_opendata_search_records', {
         number_events: numberEvents,
         availability: input.availability,
         collection: input.collection,
+        category: input.category,
+        keywords: input.keywords,
+        magnet_polarity: input.magnet_polarity,
+        stripping_stream: input.stripping_stream,
+        stripping_version: input.stripping_version,
         sort,
         sort_defaulted: sortDefaulted,
         include_ondemand: true,
-        expanded: expandsPbPb
-          ? [{ param: 'collision_type', value: 'PbPb', sent: [...PBPB_SPELLINGS] }]
-          : undefined,
+        expanded: expanded.length > 0 ? expanded : undefined,
         unrecognized_values: unrecognized.length > 0 ? unrecognized : undefined,
       }),
     });
@@ -504,21 +587,33 @@ export const searchRecords = tool('cern_opendata_search_records', {
         { page: input.page, limit: input.limit, window: PAGE_WINDOW },
       );
     }
+    const delimiter = input.query === undefined ? undefined : findUnbalancedDelimiter(input.query);
+    if (delimiter) {
+      throw ctx.fail('invalid_query', `The query was not sent: ${delimiterProblem(delimiter)}.`, {
+        query: input.query,
+        ...delimiter,
+      });
+    }
 
     const service = getCernOpenDataService();
     const outcome = await service.search(
       definedOnly<SearchParams>({
         q: input.query,
         type: sentType,
-        experiment: input.experiment,
-        collision_energy: input.collision_energy,
-        collision_type: sentCollisionType,
-        file_type: input.file_type,
-        availability: input.availability,
+        experiment: sent('experiment'),
+        collision_energy: sent('collision_energy'),
+        collision_type: sent('collision_type'),
+        file_type: sent('file_type'),
+        availability: sent('availability'),
         collections: input.collection,
+        category: sent('category'),
+        keywords: input.keywords,
+        magnet_polarity: sent('magnet_polarity'),
+        stripping_stream: sent('stripping_stream'),
+        stripping_version: sent('stripping_version'),
         year,
         number_events: numberEvents,
-        sort,
+        sort: UPSTREAM_SORT[sort],
         size: input.limit,
         page: input.page,
         skipFiles: true,
@@ -527,6 +622,16 @@ export const searchRecords = tool('cern_opendata_search_records', {
       ctx,
     );
 
+    if (outcome.kind === 'server_error') {
+      const { error } = outcome;
+      if (input.query === undefined) throw error;
+      throw ctx.fail(
+        'query_server_error',
+        `CERN Open Data answered HTTP 500 to all ${error.data?.retryAttempts} attempts at this search, as it does for some malformed queries.`,
+        { ...error.data },
+        { cause: error },
+      );
+    }
     if (outcome.kind === 'rejected') {
       const { rejection } = outcome;
       if (isPageWindowRejection(rejection)) {
@@ -564,6 +669,11 @@ export const searchRecords = tool('cern_opendata_search_records', {
         numberEvents,
         input.availability,
         input.collection,
+        input.category,
+        input.keywords,
+        input.magnet_polarity,
+        input.stripping_stream,
+        input.stripping_version,
       ].some((value) => value !== undefined);
 
     const fragments: string[] = [];
@@ -586,6 +696,11 @@ export const searchRecords = tool('cern_opendata_search_records', {
       if (input.collection) {
         fragments.push(
           'Collection names are exact and case-sensitive; call cern_opendata_get_records on a related record and copy the spelling from its collections field.',
+        );
+      }
+      if (input.keywords) {
+        fragments.push(
+          'Keywords are exact and case-sensitive (Education and education are different keywords); the keywords facet in this response lists the first ones the other filters match, alphabetically.',
         );
       }
       const glossary = typeDefaulted ? glossaryFacetCount(page.aggregations) : 0;

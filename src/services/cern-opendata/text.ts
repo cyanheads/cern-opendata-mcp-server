@@ -143,9 +143,21 @@ export function splitTags(text: string, opener: RegExp): string[] {
   return parts;
 }
 
-/** `text` with every `<…>` tag dropped; a `<` with no `>` after it stays. */
+/**
+ * Opens a tag, comment or processing instruction, as in the HTML tokenizer: a
+ * `<` followed by an ASCII letter, `/`, `!` or `?`. Any other `<` is text.
+ */
+const TAG_OPEN = /<(?=[A-Za-z/!?])/g;
+
+/** A `<` that {@link TAG_OPEN} does not open a tag at. */
+const BARE_LT = /<(?![A-Za-z/!?])/g;
+
+/**
+ * `text` with every tag dropped, from a {@link TAG_OPEN} `<` to the next `>`.
+ * A bare `<` (`|eta| < 2.4`) is text, and a tag with no `>` after it stays.
+ */
 export function stripTags(text: string): string {
-  return splitTags(text, /</g).join('');
+  return splitTags(text, TAG_OPEN).join('');
 }
 
 /** Opens a block element; {@link splitTags} runs the tag to its `>`. */
@@ -256,11 +268,15 @@ function replaceAnchors(text: string): string {
 /**
  * Convert portal HTML to plain text: tags dropped; `<p>`, `<br>`, `<li>`,
  * headings and `<blockquote>` become line breaks; `<a href>` becomes
- * `text <url>`; entities decoded; blank-line runs collapsed. Each step is a
- * single pass, so the time is linear in the length of the HTML.
+ * `text <url>`; entities decoded; blank-line runs collapsed. A bare `<` is
+ * encoded as `&lt;` before the first pass: removing a comment, a script or
+ * style element, an anchor's tags, or a tag inside an anchor label after a
+ * bare `<` can leave it before a letter, where the tag strip would open a tag.
+ * Each step is a single pass, so the time is linear in the length of the HTML.
  */
 export function htmlToText(html: string): string {
-  const anchored = replaceAnchors(dropScripts(dropComments(html)).replace(/\s+/g, ' '));
+  const encoded = html.replace(BARE_LT, '&lt;');
+  const anchored = replaceAnchors(dropScripts(dropComments(encoded)).replace(/\s+/g, ' '));
   const text = stripTags(splitTags(anchored.replace(/<br\s*\/?>/gi, '\n'), BLOCK_TAG).join('\n'));
   return decodeEntities(text)
     .split('\n')
@@ -318,13 +334,8 @@ const INLINE_ESCAPES = new Map([
   ['>', '&gt;'],
 ]);
 
-/**
- * Neutralize text for an inline markdown slot (heading, bold label, list item,
- * table cell): line breaks and tabs flatten to a space; C0/C1 controls and bidi
- * controls are stripped; `\` is escaped before `[ ] |`, and `< >` become
- * entities.
- */
-export function inline(text: string): string {
+/** {@link inline} before its trim. */
+function neutralize(text: string): string {
   let out = '';
   for (const char of text) {
     const codePoint = char.codePointAt(0) ?? 0;
@@ -332,7 +343,30 @@ export function inline(text: string): string {
     else if (isControl(codePoint) || isBidiControl(codePoint)) continue;
     else out += INLINE_ESCAPES.get(char) ?? char;
   }
-  return out.trim();
+  return out;
+}
+
+/**
+ * Neutralize text for an inline markdown slot (heading, bold label, list item,
+ * table cell): line breaks and tabs flatten to a space; C0/C1 controls and bidi
+ * controls are stripped; `\` is escaped before `[ ] |`, and `< >` become
+ * entities.
+ */
+export function inline(text: string): string {
+  return neutralize(text).trim();
+}
+
+/**
+ * {@link inline} for a value whose exact spelling a filter must repeat, such as
+ * a facet value: one with leading or trailing whitespace renders inside double
+ * quotes with that whitespace kept, so ` Heavy-Ion Physics` stays distinct from
+ * `Heavy-Ion Physics`, and one holding a comma renders quoted, so
+ * `"13TeV, 13.6TeV"` reads as one value in a comma-joined list.
+ */
+export function inlineSpelling(text: string): string {
+  const neutral = neutralize(text);
+  const trimmed = neutral.trim();
+  return trimmed === neutral && !neutral.includes(',') ? trimmed : `"${neutral}"`;
 }
 
 /**
@@ -391,9 +425,36 @@ export interface CappedText {
 
 /** Cut `text` at `maxChars` characters, flagging the cut and keeping the original length. */
 export function capText(text: string, maxChars: number): CappedText {
-  if (text.length <= maxChars) return { text, length: text.length, truncated: false };
-  let end = maxChars;
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return { text: text.slice(0, end), length: text.length, truncated: true };
+  const slice = sliceText(text, 0, maxChars);
+  return { text: slice.text, length: text.length, truncated: slice.end < text.length };
+}
+
+/** A run of at most `maxUnits` UTF-16 units of a string, with the offsets it spans. */
+export interface TextSlice {
+  /** Offset after the slice's last unit: where the next slice starts. */
+  end: number;
+  /** Offset of the slice's first unit. */
+  start: number;
+  text: string;
+}
+
+const isHighSurrogate = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number) => unit >= 0xdc00 && unit <= 0xdfff;
+
+/**
+ * At most `maxUnits` UTF-16 units of `text` from `offset`, never splitting a
+ * surrogate pair: an offset on a pair's second half starts at its first half,
+ * and a slice that would end between the halves ends before the pair.
+ * Following `end` until it reaches `text.length` rebuilds `text` exactly.
+ */
+export function sliceText(text: string, offset: number, maxUnits: number): TextSlice {
+  const start =
+    offset > 0 &&
+    isLowSurrogate(text.charCodeAt(offset)) &&
+    isHighSurrogate(text.charCodeAt(offset - 1))
+      ? offset - 1
+      : offset;
+  let end = Math.min(start + maxUnits, text.length);
+  if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
+  return { text: text.slice(start, end), start, end };
 }

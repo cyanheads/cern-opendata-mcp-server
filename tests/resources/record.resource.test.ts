@@ -24,10 +24,17 @@ import {
   jsonResponse,
   licensedDatasetHit,
   portalRoute,
+  prefixedCmsHit,
   SYNTAX_ERROR_BODY,
   searchBody,
   sparseHit,
 } from '../fixtures/cern-opendata-upstream.js';
+import {
+  lhcbHit28004,
+  pileupHit67817,
+  unitsHit84000,
+  variablesHit12220,
+} from '../fixtures/record-metadata-upstream.js';
 
 const searchRoute = (respond: Parameters<typeof portalRoute>[1]) =>
   portalRoute('/api/records/', respond);
@@ -98,21 +105,47 @@ describe('cern-opendata://record/{recid} registration', () => {
 });
 
 describe('cern-opendata://record/{recid} params', () => {
-  it.each([['6004'], ['1'], ['0123'], ['123456789012'], ['0123456789012']])(
-    'accepts the digits %j',
-    (recid) => {
-      expect(paramsFor(recid)).toEqual({ recid });
-    },
-  );
+  it.each([
+    ['6004', '6004'],
+    ['1', '1'],
+    ['0123', '123'],
+    ['123456789012', '123456789012'],
+    ['0123456789012', '123456789012'],
+    [' 6004 ', '6004'],
+    ['recid:6004', '6004'],
+    ['atlas-160006', 'atlas-160006'],
+    ['ATLAS-160006', 'atlas-160006'],
+    ['recid:atlas-160006', 'atlas-160006'],
+    ['https://opendata.cern.ch/record/atlas-160006', 'atlas-160006'],
+    ['http://opendata.cern.ch/api/records/atlas-160006/files', 'atlas-160006'],
+    ['atlas-0160006', 'atlas-160006'],
+    ['cms-93956', 'cms-93956'],
+  ])('reduces %j to %j, as the tools do', (raw, recid) => {
+    expect(paramsFor(raw)).toEqual({ recid });
+  });
 
-  it.each([[''], ['abc'], ['60o4'], [' 6004'], ['6004 '], ['-1'], ['12.5'], ['recid:6004']])(
-    'rejects %j',
-    (recid) => {
-      expect(recordResource.params?.safeParse({ recid }).success).toBe(false);
-    },
-  );
+  it.each([
+    [''],
+    ['0'],
+    ['abc'],
+    ['60o4'],
+    ['-1'],
+    ['12.5'],
+    ['recid:'],
+    ['atlas-'],
+    ['atlas-0'],
+    ['atlas_160006'],
+    ['atlas-160006x'],
+    ['abcdefghijklmnopq-160006'],
+  ])('rejects %j with the recid grammar', (recid) => {
+    const result = recordResource.params?.safeParse({ recid });
+    expect(result?.success).toBe(false);
+    expect(result?.error?.issues[0]?.message).toBe(
+      'A recid is 1-12 digits (6004), optionally after an experiment prefix (atlas-160006).',
+    );
+  });
 
-  it.each([['1234567890123'], ['7'.repeat(1_000_000)]])(
+  it.each([['1234567890123'], ['7'.repeat(1_000_000)], ['atlas-1234567890123']])(
     'rejects a recid of 13 digits or more without echoing it (%#)',
     (recid) => {
       const result = recordResource.params?.safeParse({ recid });
@@ -152,14 +185,51 @@ describe('cern-opendata://record/{recid} read', () => {
     expect(new URL(http.calls[0]?.request.url ?? '').searchParams.get('q')).toBe('recid:(6004)');
   });
 
+  it('reads a prefixed recid, lowercased, from one lookup search', async () => {
+    const { http } = servePool([prefixedCmsHit]);
+    const record = await read('CMS-93956');
+    expect(record).toEqual(expect.schemaMatching(recordResource.output as never));
+    expect(record).toMatchObject({
+      id: 'cms-93956',
+      recid: 'cms-93956',
+      matched_inputs: ['cms-93956'],
+      portal_url: 'https://opendata.cern.ch/record/cms-93956',
+    });
+    expect(http.calls).toHaveLength(1);
+    expect(new URL(http.calls[0]?.request.url ?? '').searchParams.get('q')).toBe(
+      'recid:(cms-93956)',
+    );
+  });
+
   it('returns exactly what cern_opendata_get_records returns for the same recid', async () => {
-    servePool([collisionDatasetHit, licensedDatasetHit, sparseHit]);
-    for (const recid of ['6004', '30517', '1120']) {
+    servePool([collisionDatasetHit, licensedDatasetHit, sparseHit, prefixedCmsHit]);
+    for (const recid of ['6004', '30517', '1120', 'cms-93956']) {
       const fromResource = await read(recid);
       const viaTool = await runToolContract(getRecords, { ids: [recid] });
       const [fromTool] = (viaTool.structuredContent as { records: unknown[] }).records;
       expect(fromResource, recid).toEqual(fromTool);
     }
+  });
+
+  it('returns the variables, category, pile-up, keywords and LHCb fields the tool returns', async () => {
+    servePool([variablesHit12220, unitsHit84000, pileupHit67817, lhcbHit28004]);
+    const expected = {
+      '12220': ['variables', 'keywords'],
+      '84000': ['variables', 'keywords'],
+      '67817': ['category', 'pileup_html'],
+      '28004': ['magnet_polarity', 'stripping'],
+    };
+    for (const [recid, keys] of Object.entries(expected)) {
+      const fromResource = await read(recid);
+      const viaTool = await runToolContract(getRecords, { ids: [recid] });
+      const [fromTool] = (viaTool.structuredContent as { records: unknown[] }).records;
+      expect(fromResource, recid).toEqual(fromTool);
+      for (const key of keys) expect(fromResource, `${recid} ${key}`).toHaveProperty(key);
+    }
+    expect((await read('67817')).links).toContainEqual(
+      expect.objectContaining({ source: 'pileup', recid: '30595' }),
+    );
+    expect(recordResource.output?.parse(await read('12220'))).toBeDefined();
   });
 
   it('keeps a sparse record sparse', async () => {

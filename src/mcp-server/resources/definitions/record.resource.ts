@@ -8,23 +8,20 @@
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { RecordSchema } from '@/mcp-server/record-schema.js';
+import { recidInput } from '@/mcp-server/tools/inputs.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
-import { reduceRecidSpelling } from '@/services/cern-opendata/identifiers.js';
 import { toRecord } from '@/services/cern-opendata/normalize.js';
 
 export const recordResource = resource('cern-opendata://record/{recid}', {
   name: 'cern-opendata-record',
   title: 'CERN Open Data record',
   description:
-    "One CERN Open Data Portal record's metadata by recid: description, run periods, collision and distribution details, related records, software-environment summary, license and citation. File lists are not included. Tool coverage: cern_opendata_get_records.",
+    "One CERN Open Data Portal record's metadata by recid: description, run periods, collision and distribution details, related records, software-environment summary, license and citation, plus any variable dictionary, physics category, pile-up, keywords, and LHCb magnet polarity and stripping. File lists are not included. Tool coverage: cern_opendata_get_records.",
   mimeType: 'application/json',
   params: z.object({
-    recid: z
-      .string()
-      .regex(/^0*[1-9]\d{0,11}$/, 'A recid is 1-12 digits, such as 6004.')
-      .describe(
-        'Record id: up to 12 digits, such as 6004; leading zeros are ignored. cern_opendata_search_records and cern_opendata_get_records return it.',
-      ),
+    recid: recidInput().describe(
+      'Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); leading zeros are ignored and the prefix is read in any case. cern_opendata_search_records and cern_opendata_get_records return it.',
+    ),
   }),
   output: RecordSchema,
   cacheHint: { ttlMs: 900_000, cacheScope: 'public' },
@@ -56,10 +53,10 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   ],
 
   async handler(params, ctx) {
-    const recid = reduceRecidSpelling(params.recid);
+    const { recid } = params;
     const service = getCernOpenDataService();
     const { matches } = await service.lookup(
-      [{ input: params.recid, kind: 'recid', value: recid }],
+      [{ input: recid, kind: 'recid', value: recid }],
       service.startBudget(),
       ctx,
     );

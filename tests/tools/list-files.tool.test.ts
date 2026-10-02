@@ -1,16 +1,17 @@
 /**
  * @fileoverview Tests for cern_opendata_list_files: recid and index input
- * handling (the `.txt` to `.json` key rewrite), record and index scope, paging
- * with opaque cursors over the cached manifest, umbrella-only `children`,
- * every declared error on the wire, required enrichment on zero-result,
- * under-cap and truncated pages, the manifest cache, and the text twin of
- * structuredContent.
+ * handling (the `.txt` to `.json` key rewrite), record and index scope, index
+ * reads beside the record search and their cache, keyless index members,
+ * paging with opaque cursors, umbrella-only `children`, every declared error on
+ * the wire, required enrichment on zero-result, under-cap and truncated pages,
+ * the manifest cache, and the text twin of structuredContent.
  * @module tests/tools/list-files.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listFiles } from '@/mcp-server/tools/definitions/list-files.tool.js';
 import {
@@ -24,13 +25,19 @@ import {
 } from '../fixtures/cern-opendata-harness.js';
 import {
   fileIndex,
+  fileIndexRoute,
   filesRecordBody,
   indexedRecordBody,
+  indexFile,
+  jetSet2RecordBody,
   jsonResponse,
   NOT_FOUND_BODY,
   nanoaodRecordBody,
   portalRoute,
+  prefixedRecordBody,
+  type RecordBody,
   recordBody,
+  recordSearchRoute,
   regularFiles,
   umbrellaRecordBody,
 } from '../fixtures/cern-opendata-upstream.js';
@@ -45,25 +52,41 @@ type Result = Output & {
 };
 
 /** `/api/records/{recid}` answers from `bodies`, 404 for any other recid. */
-function recordRoute(bodies: Record<string, unknown>) {
-  return portalRoute(/^\/api\/records\/\d+$/, (request) => {
+function recordRoute(bodies: Readonly<Record<string, RecordBody>>) {
+  return portalRoute(/^\/api\/records\/[^/]+$/, (request) => {
     const recid = new URL(request.url).pathname.split('/').pop() ?? '';
     const body = bodies[recid];
     return body === undefined ? jsonResponse(NOT_FOUND_BODY, { status: 404 }) : jsonResponse(body);
   });
 }
 
-const BODIES = {
+const BODIES: Readonly<Record<string, RecordBody>> = {
   '6004': filesRecordBody,
   '24464': indexedRecordBody,
   '80020': umbrellaRecordBody,
   '30518': nanoaodRecordBody,
+  'atlas-160006': prefixedRecordBody,
 };
 
+/**
+ * The portal serving `bodies` on every read the tool makes: the record GET
+ * (record scope), and the per-index route with the record's `q=recid:` search
+ * (index scope without a cached manifest).
+ */
 const serve = (
-  bodies: Record<string, unknown> = BODIES,
+  bodies: Readonly<Record<string, RecordBody>> = BODIES,
   options?: Parameters<typeof installService>[1],
-) => installService([recordRoute(bodies)], options);
+) =>
+  installService([recordRoute(bodies), fileIndexRoute(bodies), recordSearchRoute(bodies)], options);
+
+/** Each request as path plus query, sorted (the index read and the search run in parallel). */
+const requestPaths = (http: ReturnType<typeof serve>['http']) =>
+  http.calls
+    .map((call) => {
+      const url = new URL(call.request.url);
+      return `${url.pathname}${url.search}`;
+    })
+    .sort();
 
 const run = (input: Parameters<typeof runToolContract<typeof listFiles>>[1]) =>
   runToolContract(listFiles, input);
@@ -119,6 +142,18 @@ describe('cern_opendata_list_files registration', () => {
       );
     }
   });
+
+  it('describes every case in which a file has no https_url, the empty segment included', () => {
+    const files = z.toJSONSchema(listFiles.output, { unrepresentable: 'any' }).properties?.files;
+    const file = typeof files === 'object' ? files.items : undefined;
+    const httpsUrl =
+      file && typeof file === 'object' && !Array.isArray(file)
+        ? file.properties?.https_url
+        : undefined;
+    expect(typeof httpsUrl === 'object' ? httpsUrl.description : undefined).toBe(
+      "HTTPS download URL on the portal: the record's files route for a keyed file, the /eos/opendata/ route for a keyless one. Absent when a keyless file's XRootD URI is not a file path under eospublic.cern.ch/eos/opendata/, or when the key or path holds a lone surrogate or an empty, . or .. segment.",
+    );
+  });
 });
 
 describe('cern_opendata_list_files input', () => {
@@ -141,6 +176,50 @@ describe('cern_opendata_list_files input', () => {
   });
 
   it.each([
+    ['atlas-160006'],
+    ['ATLAS-160006'],
+    ['recid:atlas-160006'],
+    ['https://opendata.cern.ch/record/atlas-160006'],
+    ['http://opendata.cern.ch/api/records/atlas-0160006/files'],
+  ])('reads the prefixed spelling %j as atlas-160006 and lists its indexes', async (recid) => {
+    const { http } = serve();
+    const result = await run({ recid });
+    const data = success(result);
+    expect(new URL(http.calls[0]?.request.url ?? '').pathname).toBe('/api/records/atlas-160006');
+    expect(data.recid).toBe('atlas-160006');
+    expect(data.indexes.map((index) => [index.key, index.uri_list_url])).toEqual([
+      [
+        'training_files.json',
+        'https://opendata.cern.ch/record/atlas-160006/file_index/training_files.txt',
+      ],
+      [
+        'test_VHbb_files.json',
+        'https://opendata.cern.ch/record/atlas-160006/file_index/test_VHbb_files.txt',
+      ],
+    ]);
+    expect(textOf(result)).toContain('atlas-160006');
+  });
+
+  it('pages a prefixed record index with a cursor bound to that recid', async () => {
+    serve();
+    const first = success(
+      await run({ recid: 'atlas-160006', index: 'training_files.json', limit: 1 }),
+    );
+    expect(first.files.map((file) => file.https_url)).toEqual([
+      'https://opendata.cern.ch/record/atlas-160006/files/training_files.json_0',
+    ]);
+    const second = success(
+      await run({
+        recid: 'atlas-160006',
+        index: 'training_files.json',
+        limit: 1,
+        cursor: first.next_cursor,
+      }),
+    );
+    expect(second.files.map((file) => file.key)).toEqual(['training_files.json_1']);
+  });
+
+  it.each([
     [''],
     ['   '],
     ['abc'],
@@ -152,6 +231,11 @@ describe('cern_opendata_list_files input', () => {
     ['recid:'],
     ['0'],
     ['000'],
+    ['atlas-'],
+    ['atlas-0'],
+    ['atlas_160006'],
+    ['atlas-160006x'],
+    ['abcdefghijklmnopq-160006'],
   ])('rejects the recid %j as invalid arguments before any request', async (recid) => {
     const { http } = serve();
     const result = await run({ recid });
@@ -312,13 +396,14 @@ describe('cern_opendata_list_files record scope', () => {
     ]);
   });
 
-  it('derives index counts and size from the members when the portal states none', async () => {
+  it('derives index counts and size from the members when the portal states none, availability {}', async () => {
     serve({
       '700': recordBody({
         recid: '700',
         _file_indices: [
           {
             key: 'bare_file_index.json',
+            availability: {},
             files: [
               { key: 'bare_file_index.json_0', size: 10, uri: 'root://x/0' },
               { key: 'bare_file_index.json_1', size: 32, uri: 'root://x/1' },
@@ -327,8 +412,21 @@ describe('cern_opendata_list_files record scope', () => {
         ],
       }),
     });
-    const [index] = success(await run({ recid: '700' })).indexes;
-    expect(index).toMatchObject({ number_files: 2, size_in_bytes: 42, availability: {} });
+    const result = await run({ recid: '700' });
+    expect(success(result).indexes).toEqual([
+      {
+        key: 'bare_file_index.json',
+        number_files: 2,
+        size_in_bytes: 42,
+        availability: {},
+        uri_list_url: 'https://opendata.cern.ch/record/700/file_index/bare_file_index.txt',
+        json_url: 'https://opendata.cern.ch/record/700/file_index/bare_file_index.json',
+      },
+    ]);
+    expect(textOf(result)).toContain(
+      '- **bare_file_index.json**: 2 files, 42 bytes, online Not available, on demand Not available',
+    );
+    expect(success(result).notice).toContain('Files are grouped into 1 file index (2 files)');
   });
 
   it('keeps regular files and indexes together when a record holds both', async () => {
@@ -357,6 +455,22 @@ describe('cern_opendata_list_files record scope', () => {
     );
     expect(index?.json_url).toBe(
       'https://opendata.cern.ch/record/702/file_index/t_file_index.json',
+    );
+  });
+
+  it('encodes an index key as one path segment, so a dot segment cannot retarget its URLs', async () => {
+    serve({
+      '703': recordBody({
+        recid: '703',
+        _file_indices: [fileIndex('../../api/records/1_file_index.json', 1)],
+      }),
+    });
+    const [index] = success(await run({ recid: '703' })).indexes;
+    expect(index?.uri_list_url).toBe(
+      'https://opendata.cern.ch/record/703/file_index/..%2F..%2Fapi%2Frecords%2F1_file_index.txt',
+    );
+    expect(new URL(index?.json_url ?? '').pathname).toBe(
+      '/record/703/file_index/..%2F..%2Fapi%2Frecords%2F1_file_index.json',
     );
   });
 
@@ -440,8 +554,489 @@ describe('cern_opendata_list_files index scope', () => {
     });
     const result = success(await run({ recid: '704', index: 'empty_file_index.json' }));
     expect(result).toMatchObject({ files: [], shown: 0, totalCount: 0, truncated: false });
-    expect(result.indexes[0]).toMatchObject({ number_files: 0, size_in_bytes: 0 });
+    expect(result.indexes[0]).toMatchObject({
+      number_files: 0,
+      size_in_bytes: 0,
+      availability: {},
+    });
     expect(result.notice).toBeUndefined();
+  });
+});
+
+describe('cern_opendata_list_files index reads', () => {
+  it('reads only that index and the record search when the manifest is not cached', async () => {
+    const { http } = serve();
+    success(await run({ recid: '24464', index: 'ds_a_file_index.json' }));
+    expect(requestPaths(http)).toEqual([
+      '/api/records/?q=recid%3A24464&size=1&skip_files=1&ondemand=true',
+      '/record/24464/file_index/ds_a_file_index.json',
+    ]);
+  });
+
+  it('makes no request for an index of a cached manifest, hit or miss', async () => {
+    const { http } = serve();
+    await run({ recid: '24464' });
+    success(await run({ recid: '24464', index: 'ds_b_file_index.json' }));
+    errorOf(await run({ recid: '24464', index: 'nope_file_index.json' }));
+    expect(requestPaths(http)).toEqual(['/api/records/24464']);
+  });
+
+  describe.each([
+    ['a keyed index with tape files', '24464', 'ds_a_file_index.json', BODIES],
+    [
+      'a JetSet2 index of keyless members',
+      'atlas-160006',
+      'training_files.json',
+      { 'atlas-160006': jetSet2RecordBody },
+    ],
+  ] as const)('%s', (_name, recid, index, bodies) => {
+    it('gives the whole output alike whichever path served it, page by page', async () => {
+      const walk = async () => {
+        const pages: ContractResult[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await run({ recid, index, limit: 1, ...(cursor ? { cursor } : {}) });
+          pages.push(page);
+          cursor = success(page).next_cursor;
+        } while (cursor);
+        return pages;
+      };
+
+      const viaIndexRoute = serve(bodies);
+      const routed = await walk();
+      expect(requestPaths(viaIndexRoute.http)).not.toContain(`/api/records/${recid}`);
+      disposeInstalledService();
+
+      const viaManifest = serve(bodies);
+      await run({ recid });
+      const fromManifest = await walk();
+      expect(requestPaths(viaManifest.http)).toEqual([`/api/records/${recid}`]);
+
+      expect(routed.length).toBeGreaterThan(1);
+      expect(fromManifest).toEqual(routed);
+    });
+  });
+
+  it('index_not_found: a key the uncached record lacks names the record and the key', async () => {
+    const { http } = serve();
+    const result = await run({ recid: '24464', index: 'nope_file_index.json' });
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'index_not_found',
+      recid: '24464',
+      index: 'nope_file_index.json',
+    });
+    expect(error.data).not.toHaveProperty('indexCount');
+    expect(error.message).toBe('Record 24464 has no file index with key "nope_file_index.json".');
+    expect(textOf(result)).toContain(
+      'Recovery: Call cern_opendata_list_files with this recid and no index',
+    );
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it('record_not_found: an index of an unknown record, once its search finds nothing', async () => {
+    serve();
+    const result = await run({ recid: '999999', index: 'x_file_index.json' });
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({ reason: 'record_not_found', recid: '999999' });
+    expect(error.message).toBe('No record has recid 999999.');
+    expect(textOf(result)).toContain('Recovery: Call cern_opendata_search_records');
+  });
+
+  it.each([['.'], ['..'], ['a\ud800.json']])(
+    'index_not_found: the dot segment or ill-formed key %j, without a request',
+    async (index) => {
+      const { http } = serve();
+      const error = errorOf(await run({ recid: '24464', index }));
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data).toMatchObject({ reason: 'index_not_found', recid: '24464', index });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it('reads a prefixed recid with its index key from the index route', async () => {
+    const { http } = serve({ 'atlas-160006': jetSet2RecordBody });
+    const result = success(await run({ recid: 'ATLAS-0160006', index: 'test_VHbb_files.json' }));
+    expect(result).toMatchObject({ recid: 'atlas-160006', scope: 'index', totalCount: 1 });
+    expect(requestPaths(http)).toEqual([
+      '/api/records/?q=recid%3Aatlas-160006&size=1&skip_files=1&ondemand=true',
+      '/record/atlas-160006/file_index/test_VHbb_files.json',
+    ]);
+  });
+
+  describe('cache', () => {
+    it('pages an uncached index from one read: later pages make no request', async () => {
+      const { http } = serve({
+        '6001': recordBody({
+          recid: '6001',
+          _file_indices: [fileIndex('big_file_index.json', 130)],
+        }),
+      });
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = success(
+          await run({
+            recid: '6001',
+            index: 'big_file_index.json',
+            limit: 50,
+            ...(cursor ? { cursor } : {}),
+          }),
+        );
+        cursor = page.next_cursor;
+        pages += 1;
+      } while (cursor);
+      expect(pages).toBe(3);
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it('reads another index of the same record with one request', async () => {
+      const { http } = serve();
+      await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      const other = success(await run({ recid: '24464', index: 'ds_b_file_index.json' }));
+      expect(other.title).toBe('ATLAS DAOD_PHYSLITE sample');
+      expect(requestPaths(http)).toEqual([
+        '/api/records/?q=recid%3A24464&size=1&skip_files=1&ondemand=true',
+        '/record/24464/file_index/ds_a_file_index.json',
+        '/record/24464/file_index/ds_b_file_index.json',
+      ]);
+    });
+
+    it('never serves an index read older than a manifest cached since, once that manifest is evicted', async () => {
+      const at = (state: 'online' | 'on demand', keys: readonly string[]) =>
+        recordBody({
+          recid: '7001',
+          title: state,
+          availability: state === 'online' ? 'online' : 'ondemand',
+          _file_indices: keys.map((key, n) =>
+            fileIndex(key, 1, { files: [indexFile(n, { availability: state })] }),
+          ),
+        });
+      const bodies: Record<string, RecordBody> = {
+        '7001': at('on demand', ['a_file_index.json', 'b_file_index.json', 'c_file_index.json']),
+      };
+      for (let n = 1; n <= 8; n++) bodies[String(n)] = recordBody({ recid: String(n), _files: [] });
+      serve(bodies);
+      const view = async (index: string) => {
+        const data = success(await run({ recid: '7001', index }));
+        return `${data.title}/${data.files[0]?.availability}`;
+      };
+      expect(await view('a_file_index.json')).toBe('on demand/on demand');
+      expect(await view('c_file_index.json')).toBe('on demand/on demand');
+
+      // The record changes upstream, dropping index c, and record scope caches it.
+      bodies['7001'] = at('online', ['a_file_index.json', 'b_file_index.json']);
+      await run({ recid: '7001' });
+      expect(await view('a_file_index.json')).toBe('online/online');
+
+      // Eight other records evict that manifest from its LRU of 8.
+      for (let n = 1; n <= 8; n++) await run({ recid: String(n) });
+      expect(await view('a_file_index.json')).toBe('online/online');
+      expect(await view('b_file_index.json')).toBe('online/online');
+      expect(errorOf(await run({ recid: '7001', index: 'c_file_index.json' })).data).toMatchObject({
+        reason: 'index_not_found',
+        recid: '7001',
+        index: 'c_file_index.json',
+      });
+    });
+
+    it('does not cache an index read whose record search found nothing', async () => {
+      const { http } = installService([fileIndexRoute(BODIES), recordSearchRoute({})]);
+      const first = success(await run({ recid: '24464', index: 'ds_a_file_index.json' }));
+      expect(first).not.toHaveProperty('title');
+      expect(first.files.length).toBeGreaterThan(0);
+      await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      expect(http.calls).toHaveLength(4);
+    });
+
+    it('reads the index and the record search again after 15 minutes', async () => {
+      const clock = fakeClock();
+      const { http } = serve(BODIES, { now: clock.now });
+      await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      clock.advance(15 * 60_000 - 1);
+      await run({ recid: '24464', index: 'ds_a_file_index.json', limit: 1 });
+      expect(http.calls).toHaveLength(2);
+      clock.advance(1);
+      await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      expect(http.calls).toHaveLength(4);
+    });
+  });
+
+  describe('a failure of either read fails the call with its declared reason', () => {
+    it('rate_limited: the index route answered 429', async () => {
+      installService([
+        portalRoute(
+          /\/file_index\//,
+          new Response('', { status: 429, headers: { 'retry-after': '20' } }),
+        ),
+        recordSearchRoute(BODIES),
+      ]);
+      const result = await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'rate_limited', retryAfter: 20 },
+      });
+      expect(textOf(result)).toContain('Recovery: Wait the retryAfter seconds');
+    });
+
+    it('upstream_unreadable: the record search answered 404', async () => {
+      installService([
+        fileIndexRoute(BODIES),
+        portalRoute('/api/records/', jsonResponse(NOT_FOUND_BODY, { status: 404 })),
+      ]);
+      const result = await run({ recid: '24464', index: 'ds_a_file_index.json' });
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_unreadable' },
+      });
+      expect(textOf(result)).toContain('Recovery: Call cern_opendata_list_files again in a minute');
+    });
+
+    it('a cancellation while the search is in flight settles as cancelled, never as a listing', async () => {
+      const controller = new AbortController();
+      installService([
+        fileIndexRoute(BODIES),
+        portalRoute(
+          '/api/records/',
+          (request) =>
+            new Promise<Response>((_resolve, reject) => {
+              controller.abort(new Error('caller left'));
+              request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                once: true,
+              });
+              if (request.signal.aborted) reject(request.signal.reason);
+            }),
+        ),
+      ]);
+      const result = await runToolContract(
+        listFiles,
+        { recid: '24464', index: 'ds_a_file_index.json' },
+        { context: { signal: controller.signal } },
+      );
+      expect(result.isError).toBe(true);
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    });
+  });
+});
+
+describe('cern_opendata_list_files deadline', () => {
+  it('names the portal, the record, its page and the 50 s budget when a record GET runs out of time', async () => {
+    vi.useFakeTimers();
+    try {
+      installService([
+        portalRoute(
+          /^\/api\/records\/\d+$/,
+          (request) =>
+            new Promise<Response>((_resolve, reject) => {
+              request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                once: true,
+              });
+            }),
+        ),
+      ]);
+      const pending = run({ recid: '24464' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+      expect(error.message).toBe(
+        "CERN Open Data did not finish sending record 24464 within this call's 50 s budget; call again in a minute, or browse its files at https://opendata.cern.ch/record/24464.",
+      );
+      expect(textOf(result)).not.toMatch(/CernOpenData|\d\s?ms\b/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('cern_opendata_list_files keyless members (JetSet2, atlas-160006)', () => {
+  const JETSET2 = { 'atlas-160006': jetSet2RecordBody };
+  const EOS = 'https://opendata.cern.ch/eos/opendata/atlas/datascience/ATL-SOFT-PUB-2026-002';
+
+  it('lists the 8 indexes at record scope, counts derived from the members and availability {}', async () => {
+    serve(JETSET2);
+    const result = await run({ recid: 'atlas-160006' });
+    const data = success(result);
+    expect(data).toMatchObject({
+      scope: 'record',
+      files: [],
+      children: [],
+      availability: 'online',
+    });
+    expect(data).not.toHaveProperty('availability_details');
+    expect(data.indexes).toHaveLength(8);
+    expect(data.indexes[0]).toEqual({
+      key: 'training_files.json',
+      description: 'training_files.json',
+      number_files: 3,
+      size_in_bytes: 14_190_227_850_197,
+      availability: {},
+      uri_list_url: 'https://opendata.cern.ch/record/atlas-160006/file_index/training_files.txt',
+      json_url: 'https://opendata.cern.ch/record/atlas-160006/file_index/training_files.json',
+    });
+    expect(data.indexes.map((index) => index.number_files)).toEqual([3, 1, 1, 1, 1, 1, 1, 1]);
+    for (const index of data.indexes) expect(index.availability).toEqual({});
+    expect(data.notice).toBe(
+      "Files are grouped into 8 file indexes (10 files); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once.",
+    );
+    expect(textOf(result)).toContain(
+      '- **training_files.json**: 3 files, 14190227850197 bytes, online Not available, on demand Not available',
+    );
+  });
+
+  it('pages training_files.json: filename, size, checksum, XRootD URI and the EOS HTTPS URL, no key', async () => {
+    serve(JETSET2);
+    const result = await run({ recid: 'atlas-160006', index: 'training_files.json' });
+    const data = success(result);
+    expect(data.totalCount).toBe(3);
+    expect(data.files[0]).toEqual({
+      filename: 'jetset2-release_v1.pp_output_train-full_0.h5',
+      size_in_bytes: 72_161_839_049,
+      checksum: 'adler32:47ef28c2',
+      xrootd_uri:
+        'root://eospublic.cern.ch:1094//eos/opendata/atlas/datascience/ATL-SOFT-PUB-2026-002/train/jetset2-release_v1.pp_output_train-full_0.h5',
+      https_url: `${EOS}/train/jetset2-release_v1.pp_output_train-full_0.h5`,
+      availability: 'online',
+    });
+    for (const file of data.files) expect(file).not.toHaveProperty('key');
+    expect(textOf(result)).toContain(
+      `| Not available | jetset2-release_v1.pp_output_train-full_0.h5 | 72161839049 | adler32:47ef28c2 | online | root://eospublic.cern.ch:1094//eos/opendata/atlas/datascience/ATL-SOFT-PUB-2026-002/train/jetset2-release_v1.pp_output_train-full_0.h5 | ${EOS}/train/jetset2-release_v1.pp_output_train-full_0.h5 |`,
+    );
+  });
+
+  /** The JetSet2 record with every index's `size` dropped, so the size must come from the members. */
+  const jetSet2Unsized: RecordBody = {
+    ...jetSet2RecordBody,
+    metadata: {
+      ...jetSet2RecordBody.metadata,
+      _file_indices: (jetSet2RecordBody.metadata._file_indices ?? []).map(
+        ({ size: _size, ...index }) => index,
+      ),
+    },
+  };
+
+  it.each([
+    ['its size as stated', jetSet2RecordBody, 14_190_227_850_197],
+    ['its size summed from the members when unstated', jetSet2Unsized, 216_492_364_119],
+  ])(
+    'reports training_files.json with its member count and %s, alike on the index route and a cached manifest',
+    async (_name, body, size) => {
+      const bodies = { 'atlas-160006': body };
+      const read = () => run({ recid: 'atlas-160006', index: 'training_files.json' });
+
+      const viaIndexRoute = serve(bodies);
+      const routed = await read();
+      expect(requestPaths(viaIndexRoute.http)).toEqual([
+        '/api/records/?q=recid%3Aatlas-160006&size=1&skip_files=1&ondemand=true',
+        '/record/atlas-160006/file_index/training_files.json',
+      ]);
+      disposeInstalledService();
+
+      const viaManifest = serve(bodies);
+      await run({ recid: 'atlas-160006' });
+      const fromManifest = await read();
+      expect(requestPaths(viaManifest.http)).toEqual(['/api/records/atlas-160006']);
+
+      for (const result of [routed, fromManifest]) {
+        expect(success(result).indexes).toEqual([
+          expect.objectContaining({ number_files: 3, size_in_bytes: size, availability: {} }),
+        ]);
+        expect(textOf(result)).toContain(
+          `- **training_files.json**: 3 files, ${size} bytes, online Not available, on demand Not available`,
+        );
+      }
+      expect(success(fromManifest).indexes).toEqual(success(routed).indexes);
+    },
+  );
+
+  it.each([
+    [
+      'no port',
+      'root://eospublic.cern.ch//eos/opendata/cms/a b#1.root',
+      'https://opendata.cern.ch/eos/opendata/cms/a%20b%231.root',
+    ],
+    [
+      'a port and one leading slash',
+      'root://eospublic.cern.ch:1094/eos/opendata/x.h5',
+      'https://opendata.cern.ch/eos/opendata/x.h5',
+    ],
+    ['another host', 'root://eosuser.cern.ch//eos/opendata/x.h5', undefined],
+    ['a path outside /eos/opendata/', 'root://eospublic.cern.ch//eos/user/x.h5', undefined],
+    ['a dot segment', 'root://eospublic.cern.ch//eos/opendata/../../api/records/1', undefined],
+    ['the bare /eos/opendata/ directory', 'root://eospublic.cern.ch//eos/opendata/', undefined],
+    ['an empty segment', 'root://eospublic.cern.ch//eos/opendata//x.h5', undefined],
+    ['a trailing slash', 'root://eospublic.cern.ch//eos/opendata/atlas/', undefined],
+    ['/eos/opendata/ followed by a slash', 'root://eospublic.cern.ch//eos/opendata//', undefined],
+    ['a lone surrogate', 'root://eospublic.cern.ch//eos/opendata/\ud800.h5', undefined],
+    ['another scheme', 'https://eospublic.cern.ch//eos/opendata/x.h5', undefined],
+  ])('builds the HTTPS URL of a keyless member with %s', async (_name, uri, httpsUrl) => {
+    serve({ '720': recordBody({ recid: '720', _files: [{ filename: 'x', size: 1, uri }] }) });
+    const result = await run({ recid: '720' });
+    const [file] = success(result).files;
+    if (httpsUrl === undefined) {
+      expect(file).not.toHaveProperty('https_url');
+      expect(textOf(result)).toMatch(/\| Not available \|\n/);
+    } else {
+      expect(file?.https_url).toBe(httpsUrl);
+    }
+  });
+
+  it('keeps the record files URL for a keyed member, wherever its URI points', async () => {
+    serve({
+      '721': recordBody({
+        recid: '721',
+        _files: [{ key: 'k.h5', size: 1, uri: 'root://eospublic.cern.ch//eos/opendata/x.h5' }],
+      }),
+    });
+    expect(success(await run({ recid: '721' })).files[0]?.https_url).toBe(
+      'https://opendata.cern.ch/record/721/files/k.h5',
+    );
+  });
+
+  it.each([
+    ['a nested key', 'dir/k #1.h5', 'https://opendata.cern.ch/record/723/files/dir/k%20%231.h5'],
+    ['a .. segment', '../../api/records/1', undefined],
+    ['a . segment', 'dir/./k.h5', undefined],
+    ['an empty segment', 'dir//k.h5', undefined],
+    ['a trailing slash', 'dir/', undefined],
+    ['a lone slash', '/', undefined],
+    ['a lone surrogate', 'k\ud800.h5', undefined],
+  ])('builds the record files URL of a keyed file with %s', async (_name, key, httpsUrl) => {
+    serve({
+      '723': recordBody({
+        recid: '723',
+        _files: [{ key, size: 1, uri: 'root://eospublic.cern.ch//eos/opendata/x.h5' }],
+      }),
+    });
+    const [file] = success(await run({ recid: '723' })).files;
+    expect(file?.key).toBe(key);
+    if (httpsUrl === undefined) expect(file).not.toHaveProperty('https_url');
+    else expect(file?.https_url).toBe(httpsUrl);
+  });
+
+  it.each([
+    ['a regular file', undefined],
+    ['an index member read from the index route', 'k_file_index.json'],
+  ])('lists %s whose key is not well-formed Unicode without an https_url', async (_name, index) => {
+    const file = {
+      key: 'k\ud800.h5',
+      size: 1,
+      uri: 'root://eospublic.cern.ch//eos/opendata/x.h5',
+    };
+    serve({
+      '722': recordBody(
+        index
+          ? { recid: '722', _file_indices: [fileIndex(index, 1, { files: [file] })] }
+          : { recid: '722', _files: [file] },
+      ),
+    });
+    const result = await run({ recid: '722', ...(index ? { index } : {}) });
+    const [listed] = success(result).files;
+    expect(listed).toMatchObject({ key: 'k\ud800.h5', xrootd_uri: file.uri });
+    expect(listed).not.toHaveProperty('https_url');
+    expect(textOf(result)).toMatch(/\| Not available \|\n/);
   });
 });
 
@@ -770,7 +1365,7 @@ describe('cern_opendata_list_files paging', () => {
     let cursor: string | undefined;
     do {
       const page = success(await run({ recid: '5000', limit: 50, ...(cursor ? { cursor } : {}) }));
-      keys.push(...page.files.map((file) => file.key));
+      keys.push(...page.files.map((file) => String(file.key)));
       sizes.push(page.shown);
       cursor = page.next_cursor;
       expect(page.has_more).toBe(cursor !== undefined);
@@ -852,7 +1447,7 @@ describe('cern_opendata_list_files paging', () => {
     let pages = 0;
     do {
       const page = success(await run({ recid: '5002', limit: 500, ...(cursor ? { cursor } : {}) }));
-      for (const file of page.files) seen.add(file.key);
+      for (const file of page.files) seen.add(String(file.key));
       pages += 1;
       cursor = page.next_cursor;
       expect(page.totalCount).toBe(6_500);
@@ -897,45 +1492,37 @@ describe('cern_opendata_list_files errors', () => {
     expect(http.calls).toHaveLength(2);
   });
 
-  it('index_not_found: an unknown key names the record and how many indexes it has', async () => {
-    serve();
-    const result = await run({ recid: '24464', index: 'nope_file_index.json' });
-    const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data).toMatchObject({
-      reason: 'index_not_found',
-      recid: '24464',
-      index: 'nope_file_index.json',
-      indexCount: 2,
-    });
-    expect(error.message).toBe(
-      'Record 24464 has no file index with key "nope_file_index.json"; it has 2 file indexes.',
-    );
-    expect(textOf(result)).toContain(
-      'Recovery: Call cern_opendata_list_files with this recid and no index',
-    );
-  });
+  it.each([
+    ['two indexes', '24464', 'nope_file_index.json'],
+    ['one index', '705', 'nope_file_index.json'],
+    ['no indexes', '6004', 'nope_file_index.json'],
+    ['a regular file key', '6004', 'file_a.root'],
+  ])(
+    'index_not_found reads the same fresh and after record scope: %s',
+    async (_name, recid, index) => {
+      const { http } = serve({
+        ...BODIES,
+        '705': recordBody({ recid: '705', _file_indices: [fileIndex('x_file_index.json', 1)] }),
+      });
+      const fresh = await run({ recid, index });
+      expect(http.calls).toHaveLength(2);
+      await run({ recid });
+      const cached = await run({ recid, index });
+      expect(http.calls).toHaveLength(3);
 
-  it('index_not_found: a record with one index says so in the singular', async () => {
-    serve({
-      '705': recordBody({ recid: '705', _file_indices: [fileIndex('x_file_index.json', 1)] }),
-    });
-    expect(errorOf(await run({ recid: '705', index: 'y_file_index.json' })).message).toBe(
-      'Record 705 has no file index with key "y_file_index.json"; it has 1 file index.',
-    );
-  });
-
-  it('index_not_found: a record with no indexes reports zero of them', async () => {
-    serve();
-    const error = errorOf(await run({ recid: '6004', index: 'x_file_index.json' }));
-    expect(error.data).toMatchObject({ reason: 'index_not_found', indexCount: 0 });
-  });
-
-  it('index_not_found: a regular file key is not an index key', async () => {
-    serve();
-    const error = errorOf(await run({ recid: '6004', index: 'file_a.root' }));
-    expect(error.data).toMatchObject({ reason: 'index_not_found' });
-  });
+      expect(errorOf(fresh)).toEqual({
+        code: JsonRpcErrorCode.NotFound,
+        message: `Record ${recid} has no file index with key "${index}".`,
+        data: expect.objectContaining({ reason: 'index_not_found', recid, index }),
+      });
+      expect(errorOf(fresh).data).not.toHaveProperty('indexCount');
+      expect(errorOf(cached)).toEqual(errorOf(fresh));
+      expect(textOf(cached)).toBe(textOf(fresh));
+      expect(textOf(fresh)).toContain(
+        'Recovery: Call cern_opendata_list_files with this recid and no index',
+      );
+    },
+  );
 
   describe('invalid_cursor', () => {
     const base = { recid: '6004' } as const;
@@ -1072,7 +1659,7 @@ describe('cern_opendata_list_files errors', () => {
     });
   });
 
-  it('upstream_unreadable: a file entry without a key, URI or size makes the manifest unreadable, uncached', async () => {
+  it('upstream_unreadable: a file entry without a URI or size makes the manifest unreadable, uncached', async () => {
     const { http } = serve({
       '713': recordBody({ recid: '713', _files: [{ key: 'only-a-key.root' }] }),
     });
@@ -1080,7 +1667,9 @@ describe('cern_opendata_list_files errors', () => {
     const error = errorOf(first);
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
-    expect(error.message).toContain('without a key, XRootD URI or size');
+    expect(error.message).toBe(
+      'CERN Open Data returned a file entry for record 713 without an XRootD URI or size.',
+    );
     expect(textOf(first)).toContain('Recovery: Call cern_opendata_list_files again in a minute');
     await run({ recid: '713' });
     expect(http.calls).toHaveLength(2);
@@ -1091,6 +1680,22 @@ describe('cern_opendata_list_files errors', () => {
     expect(errorOf(await run({ recid: '714' })).data).toMatchObject({
       reason: 'upstream_unreadable',
     });
+  });
+
+  it('upstream_unreadable: a file index whose key is not well-formed Unicode, uncached', async () => {
+    const { http } = serve({
+      '716': recordBody({ recid: '716', _file_indices: [fileIndex('a\ud800_file_index.json', 1)] }),
+    });
+    const result = await run({ recid: '716' });
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ reason: 'upstream_unreadable' });
+    expect(error.message).toBe(
+      'CERN Open Data returned a file index for record 716 whose key is not well-formed Unicode.',
+    );
+    expect(textOf(result)).toContain('Recovery: Call cern_opendata_list_files again in a minute');
+    await run({ recid: '716' });
+    expect(http.calls).toHaveLength(2);
   });
 
   it('upstream_unreadable: a member file without its URI', async () => {

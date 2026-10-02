@@ -21,9 +21,13 @@ import {
 import {
   docHit,
   emptySearchBody,
+  fileIndex,
   filesRecordBody,
+  filesSkippedHit,
+  indexedRecordBody,
   jsonResponse,
   NOT_FOUND_BODY,
+  PAGE_NOT_FOUND_HTML,
   PORTAL,
   portalRoute,
   RANGE_ERROR_BODY,
@@ -45,6 +49,17 @@ const recordRoute = (respond: Parameters<typeof portalRoute>[1], once = false) =
   portalRoute(/^\/api\/records\/\d+$/, respond, { once });
 const fileRoute = (respond: Parameters<typeof portalRoute>[1], once = false) =>
   portalRoute(/^\/record\/\d+\/files\/.+/, respond, { once });
+const indexRoute = (respond: Parameters<typeof portalRoute>[1], once = false) =>
+  portalRoute(/^\/record\/[^/]+\/file_index\/.+/, respond, { once });
+/** The record search an index read sends beside the index route, finding record 24464. */
+const recordFound = () =>
+  searchRoute(jsonResponse(searchBody([filesSkippedHit(indexedRecordBody)])));
+const indexCalls = (http: ReturnType<typeof makeService>['http']) =>
+  http.calls.filter((call) => new URL(call.request.url).pathname.includes('/file_index/'));
+
+/** The message every route but the record GET gives when the call's budget runs out. */
+const DEADLINE_MESSAGE =
+  "CERN Open Data did not answer within this call's 50 s budget; call again in a minute.";
 
 /** A body of exactly `bytes` bytes that is a valid doc envelope. */
 function docBodyOfSize(bytes: number): Uint8Array {
@@ -209,6 +224,76 @@ describe('per-route accept-list', () => {
         expect(http.calls).toHaveLength(1);
       },
     );
+
+    describe('a 500 on every attempt is reported apart from other failures', () => {
+      /** Each search request answers with the next status in `statuses`, then the last one. */
+      const answering = (...statuses: number[]) => {
+        let calls = 0;
+        return makeService([
+          searchRoute(() => {
+            const status = statuses[Math.min(calls++, statuses.length - 1)] ?? 200;
+            if (status === 200) return jsonResponse(emptySearchBody);
+            if (status === 400) return jsonResponse(SYNTAX_ERROR_BODY, { status });
+            return new Response('down', { status });
+          }),
+        ]);
+      };
+
+      it('resolves search as server_error, carrying the exhausted 500, after three attempts', async () => {
+        const { service, http, ctx } = answering(500);
+        const settled = await settle(() =>
+          service.search({ q: 'x', size: 1 }, service.startBudget(), ctx),
+        );
+        expect(settled.ok).toBe(true);
+        if (!settled.ok) return;
+        expect(settled.value.kind).toBe('server_error');
+        if (settled.value.kind !== 'server_error') return;
+        expect(settled.value.error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(settled.value.error.data).toMatchObject({ status: 500, retryAttempts: 3 });
+        expect(http.calls).toHaveLength(3);
+      });
+
+      it.each([
+        ['ends on another 5xx', [500, 500, 503], 503],
+        ['starts with another 5xx', [503, 500, 500], 500],
+        ['meets a network failure', [500, 0, 500], 500],
+      ])('throws as before when the run %s', async (_case, statuses, lastStatus) => {
+        let calls = 0;
+        const fetchFake = vi.fn(() => {
+          const status = statuses[calls++] ?? 500;
+          return status === 0
+            ? Promise.reject(new TypeError('fetch failed'))
+            : Promise.resolve(new Response('down', { status }));
+        });
+        const { service, ctx } = makeService([], { fetch: fetchFake as unknown as typeof fetch });
+        const failure = failureOf(
+          await settle(() => service.search({ q: 'x', size: 1 }, service.startBudget(), ctx)),
+        );
+        expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(failure.data).toMatchObject({ status: lastStatus, retryAttempts: 3 });
+        expect(fetchFake).toHaveBeenCalledTimes(3);
+      });
+
+      it('returns the 400 rejection when a later attempt answers it', async () => {
+        const { service, ctx } = answering(500, 400);
+        const settled = await settle(() =>
+          service.search({ q: 'x', size: 1 }, service.startBudget(), ctx),
+        );
+        expect(settled.ok && settled.value.kind).toBe('rejected');
+      });
+
+      it('makes searchBuilt throw the exhausted 500, so lookups fail as before', async () => {
+        const { service, ctx } = answering(500);
+        const failure = failureOf(
+          await settle(() =>
+            service.searchBuilt({ q: 'recid:1', size: 1 }, service.startBudget(), ctx),
+          ),
+        );
+        expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(failure.message).toBe('CERN Open Data returned HTTP 500. (failed after 3 attempts)');
+        expect(failure.data).toMatchObject({ status: 500, retryAttempts: 3 });
+      });
+    });
   });
 
   describe.each([
@@ -252,6 +337,53 @@ describe('per-route accept-list', () => {
       await expect(
         service.getRunList('1002', 'k.txt', service.startBudget(), ctx),
       ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    });
+  });
+
+  describe('index accepts 200, 404 and 429', () => {
+    const read = (service: CernOpenDataService, ctx: ReturnType<typeof createMockContext>) =>
+      service.getIndex('24464', 'ds_a_file_index.json', service.startBudget(), ctx);
+
+    it('returns the index entry for 200', async () => {
+      const { service, ctx } = makeService([
+        indexRoute(jsonResponse(fileIndex('ds_a_file_index.json', 2))),
+        recordFound(),
+      ]);
+      const lookup = await read(service, ctx);
+      expect(lookup.kind === 'found' && lookup.listing.index.files).toHaveLength(2);
+    });
+
+    it('reads a 404 as a miss, not an error, without retry', async () => {
+      const { service, http, ctx } = makeService([
+        indexRoute(new Response(PAGE_NOT_FOUND_HTML, { status: 404 })),
+        recordFound(),
+      ]);
+      expect(await read(service, ctx)).toEqual({ kind: 'index_not_found' });
+      expect(indexCalls(http)).toHaveLength(1);
+    });
+
+    it('treats a 400 as an error, not a result', async () => {
+      const { service, http, ctx } = makeService([
+        indexRoute(jsonResponse({ status: 400, message: 'bad' }, { status: 400 })),
+        recordFound(),
+      ]);
+      await expect(read(service, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { status: 400 },
+      });
+      expect(indexCalls(http)).toHaveLength(1);
+    });
+
+    it('maps a 429 to rate_limited with its retry-after, without retry', async () => {
+      const { service, http, ctx } = makeService([
+        indexRoute(new Response('', { status: 429, headers: { 'retry-after': '30' } })),
+        recordFound(),
+      ]);
+      await expect(read(service, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'rate_limited', retryAfter: 30 },
+      });
+      expect(indexCalls(http)).toHaveLength(1);
     });
   });
 
@@ -456,6 +588,32 @@ describe('bounded reads and envelope checks', () => {
       expect(doc?.metadata).toBeDefined();
     });
 
+    it('index: a declared content-length over 8 MiB is unreadable and not retried', async () => {
+      const { service, http, ctx } = makeService([
+        indexRoute(
+          () => new Response('{}', { headers: { 'content-length': String(8 * MiB + 1) } }),
+        ),
+        recordFound(),
+      ]);
+      const failure = failureOf(
+        await settle(() => service.getIndex('24464', 'k.json', service.startBudget(), ctx)),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(failure.data).toMatchObject({
+        reason: 'upstream_unreadable',
+        retryable: false,
+        limitBytes: 8 * MiB,
+      });
+      expect(indexCalls(http)).toHaveLength(1);
+    });
+
+    it("index: a 3 MiB entry, past the file route's 2 MiB, is read", async () => {
+      const entry = { ...fileIndex('k.json', 1), description: 'd'.repeat(3 * MiB) };
+      const { service, ctx } = makeService([indexRoute(jsonResponse(entry)), recordFound()]);
+      const lookup = await service.getIndex('24464', 'k.json', service.startBudget(), ctx);
+      expect(lookup.kind === 'found' && lookup.listing.index.description?.length).toBe(3 * MiB);
+    });
+
     it('search: 8 MiB + 1 byte is unreadable', async () => {
       const { service, ctx } = makeService([
         searchRoute(() => new Response(new Uint8Array(8 * MiB + 1).fill(97))),
@@ -599,6 +757,24 @@ describe('bounded reads and envelope checks', () => {
       expect(failure.data).toMatchObject({ reason: 'upstream_unreadable' });
       expect(failure.message).toContain('search envelope');
       expect(http.calls).toHaveLength(3);
+    });
+
+    it.each([
+      ['another key', { key: 'other_file_index.json', files: [] }],
+      ['no key', { files: [] }],
+      ['no files', { key: 'k.json' }],
+      ['files as an object', { key: 'k.json', files: {} }],
+      ['an array', []],
+      ['null', null],
+    ])('rejects an index body with %s, after three attempts', async (_name, body) => {
+      const { service, http, ctx } = makeService([indexRoute(jsonResponse(body)), recordFound()]);
+      const failure = failureOf(
+        await settle(() => service.getIndex('24464', 'k.json', service.startBudget(), ctx)),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(failure.data).toMatchObject({ reason: 'upstream_unreadable' });
+      expect(failure.message).toContain('index envelope');
+      expect(indexCalls(http)).toHaveLength(3);
     });
   });
 });
@@ -1069,6 +1245,34 @@ describe('per-call budget', () => {
       expect(fetchFake).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps a deadline that ends a run of 500s a Timeout, not a search server_error', async () => {
+      const slow500 = vi.fn(
+        (_url: unknown, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => resolve(new Response('down', { status: 500 })), 2_000);
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                reject(init.signal?.reason);
+              },
+              { once: true },
+            );
+          }),
+      );
+      const service = new CernOpenDataService({ fetch: slow500 as unknown as typeof fetch });
+      const budget: Budget = { deadlineAt: Date.now() + 6_000 };
+      const failure = failureOf(
+        await settle(
+          () => service.search({ q: 'x', size: 1 }, budget, createMockContext()),
+          10_000,
+        ),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(failure.data).toMatchObject({ reason: 'retry_deadline_exceeded', retryAttempts: 2 });
+      expect(slow500).toHaveBeenCalledTimes(2);
+    });
+
     it('cuts a stalled attempt at 30 s, retries, and ends inside the 50 s call budget', async () => {
       const fetchFake = hangingFetch();
       const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
@@ -1082,6 +1286,194 @@ describe('per-call budget', () => {
       expect(fetchFake.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(fetchFake.mock.calls.length).toBeLessThanOrEqual(3);
       expect(Date.now() - startedAt).toBe(120_000);
+    });
+
+    /**
+     * A fetch whose headers arrive at once and whose body arrives after
+     * `delayMs`; aborting the request signal errors the body, as a real
+     * transfer does.
+     */
+    const slowBodyFetch = (body: unknown, delayMs: number) =>
+      vi.fn((_url: unknown, init?: RequestInit) => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const timer = setTimeout(() => {
+              controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));
+              controller.close();
+            }, delayMs);
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                controller.error(init.signal?.reason);
+              },
+              { once: true },
+            );
+          },
+        });
+        return Promise.resolve(new Response(stream));
+      });
+
+    it('lets a record GET whose body takes 40 s finish, in one attempt', async () => {
+      const fetchFake = slowBodyFetch(filesRecordBody, 40_000);
+      const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
+      const ctx = createMockContext();
+      const settled = await settle(() => service.getManifest('6004', service.startBudget(), ctx));
+      expect(settled.ok && settled.value?.files).toHaveLength(2);
+      expect(fetchFake).toHaveBeenCalledTimes(1);
+    });
+
+    it('cuts a hanging record GET only at the call deadline, in one attempt, naming the record and its page', async () => {
+      const fetchFake = hangingFetch();
+      const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
+      const ctx = createMockContext();
+      const startedAt = Date.now();
+      let endedAt = 0;
+      const failure = failureOf(
+        await settle(() =>
+          service.getManifest('24464', service.startBudget(), ctx).finally(() => {
+            endedAt = Date.now();
+          }),
+        ),
+      );
+      expect(failure.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(failure.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+      expect(failure.message).toBe(
+        "CERN Open Data did not finish sending record 24464 within this call's 50 s budget; call again in a minute, or browse its files at https://opendata.cern.ch/record/24464.",
+      );
+      expect(fetchFake).toHaveBeenCalledTimes(1);
+      expect(endedAt - startedAt).toBe(50_000);
+    });
+
+    it('still cuts a stalled index read at 30 s and retries it', async () => {
+      let indexReads = 0;
+      const fetchFake = vi.fn((url: unknown, init?: RequestInit) => {
+        if (!String(url).includes('/file_index/')) {
+          return Promise.resolve(jsonResponse(searchBody([filesSkippedHit(indexedRecordBody)])));
+        }
+        indexReads += 1;
+        if (indexReads > 1) return Promise.resolve(jsonResponse(fileIndex('k.json', 1)));
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+      const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
+      const ctx = createMockContext();
+      const startedAt = Date.now();
+      let endedAt = 0;
+      const settled = await settle(() =>
+        service.getIndex('24464', 'k.json', service.startBudget(), ctx).finally(() => {
+          endedAt = Date.now();
+        }),
+      );
+      expect(settled.ok).toBe(true);
+      expect(indexReads).toBe(2);
+      expect(endedAt - startedAt).toBeGreaterThanOrEqual(30_000);
+      expect(endedAt - startedAt).toBeLessThan(35_000);
+    });
+
+    type Read = (
+      service: CernOpenDataService,
+      budget: Budget,
+      ctx: ReturnType<typeof createMockContext>,
+    ) => Promise<unknown>;
+    it.each<[string, Read]>([
+      ['search', (s, b, c) => s.search({ size: 1 }, b, c)],
+      ['doc', (s, b, c) => s.getDoc('x', b, c)],
+      ['file', (s, b, c) => s.getRunList('1002', 'k.txt', b, c)],
+      ['index', (s, b, c) => s.getIndex('24464', 'k.json', b, c)],
+    ])(
+      'words a %s deadline by the portal and the 50 s budget, with no operation name or millisecond figure',
+      async (_route, run) => {
+        const service = new CernOpenDataService({
+          fetch: hangingFetch() as unknown as typeof fetch,
+        });
+        const failure = failureOf(
+          await settle(() => run(service, service.startBudget(), createMockContext())),
+        );
+        expect(failure.code).toBe(JsonRpcErrorCode.Timeout);
+        expect(failure.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+        expect(failure.message).toBe(DEADLINE_MESSAGE);
+        expect(failure.message).not.toMatch(/CernOpenData|\d\s?ms\b/);
+      },
+    );
+
+    it.each<[string, Read]>([
+      ['search', (s, b, c) => s.search({ size: 1 }, b, c)],
+      ['doc', (s, b, c) => s.getDoc('x', b, c)],
+      ['file', (s, b, c) => s.getRunList('1002', 'k.txt', b, c)],
+      ['index', (s, b, c) => s.getIndex('24464', 'k.json', b, c)],
+    ])(
+      'words a %s deadline the same way when it lands on the third attempt and the clock lags',
+      async (route, run) => {
+        let attempts = 0;
+        let lag = 0;
+        const service = new CernOpenDataService({
+          // Each read lands 3 ms later, as a runtime's cached loop time can trail the timers.
+          now: () => {
+            lag += 3;
+            return Date.now() + lag;
+          },
+          fetch: vi.fn((url: unknown, init?: RequestInit) => {
+            if (route === 'index' && !String(url).includes('/file_index/')) {
+              return Promise.resolve(
+                jsonResponse(searchBody([filesSkippedHit(indexedRecordBody)])),
+              );
+            }
+            attempts += 1;
+            if (attempts <= 2) return Promise.resolve(new Response('busy', { status: 503 }));
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                once: true,
+              });
+            });
+          }) as unknown as typeof fetch,
+        });
+        const budget: Budget = { deadlineAt: Date.now() + 10_000 };
+        const failure = failureOf(
+          await settle(() => run(service, budget, createMockContext()), 60_000),
+        );
+        expect(attempts).toBe(3);
+        expect(failure.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+        expect(failure.message).toBe(DEADLINE_MESSAGE);
+      },
+    );
+
+    it('cuts a third search attempt at a flat 30 s after two 500s: a Timeout naming 30 s, never server_error', async () => {
+      let attempts = 0;
+      const fetchFake = vi.fn((_url: unknown, init?: RequestInit) => {
+        attempts += 1;
+        if (attempts <= 2) return Promise.resolve(new Response('down', { status: 500 }));
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+      const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
+      const startedAt = Date.now();
+      let endedAt = 0;
+      const failure = failureOf(
+        await settle(
+          () =>
+            service
+              .search({ q: 'x', size: 1 }, service.startBudget(), createMockContext())
+              .finally(() => {
+                endedAt = Date.now();
+              }),
+          60_000,
+        ),
+      );
+      expect(attempts).toBe(3);
+      expect(failure.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(failure.data).toMatchObject({ timeoutMs: 30_000, retryAttempts: 3 });
+      expect(failure.data).not.toHaveProperty('reason');
+      expect(failure.message).toBe(
+        'CERN Open Data did not answer within 30 s. (failed after 3 attempts)',
+      );
+      expect(endedAt - startedAt).toBeLessThan(50_000);
     });
 
     it('reports a per-attempt stall as Timeout naming the attempt limit when the deadline is far off', async () => {
@@ -1163,6 +1555,42 @@ describe('cancellation and disposal', () => {
       controller.abort(new Error('caller left'));
       const settled = await pending;
       expect(settled.ok).toBe(false);
+      expect(fetchFake).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abandons a record GET mid-transfer the moment the caller cancels, past the old 30 s cut', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const fetchFake = vi.fn(
+        (_url: unknown, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+      const service = new CernOpenDataService({ fetch: fetchFake as unknown as typeof fetch });
+      const ctx = createMockContext({ signal: controller.signal });
+      let settledAt = 0;
+      const pending = service.getManifest('24464', service.startBudget(), ctx).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => {
+          settledAt = Date.now();
+          return { ok: false as const, error };
+        },
+      );
+      await vi.advanceTimersByTimeAsync(35_000);
+      const cancelledAt = Date.now();
+      controller.abort(new Error('caller left'));
+      await vi.advanceTimersByTimeAsync(0);
+      const settled = await pending;
+      expect(settled.ok).toBe(false);
+      expect(!settled.ok && settled.error).toMatchObject({ message: 'caller left' });
+      expect(settledAt).toBe(cancelledAt);
       expect(fetchFake).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();

@@ -43,6 +43,7 @@ import {
   filesRecordBody,
   hit,
   indexedRecordBody,
+  jetSet2RecordBody,
   LIST_SPECS,
   licensedDatasetHit,
   nanoaodRecordBody,
@@ -52,6 +53,19 @@ import {
   umbrellaRecordBody,
   validatedListHit,
 } from '../../fixtures/cern-opendata-upstream.js';
+import {
+  anchorVariablesHit12102,
+  categoryOnlyPrimaryHit88449,
+  entityVariablesHit15009,
+  largeVariablesHit12320,
+  lhcbHit28004,
+  pileupHit67817,
+  pileupNoLinksHit30595,
+  strippingDocHit,
+  typelessVariablesHit4803,
+  unitsHit84000,
+  variablesHit12220,
+} from '../../fixtures/record-metadata-upstream.js';
 
 function expectUnreadable(run: () => unknown) {
   try {
@@ -228,17 +242,85 @@ describe('toSearchHit', () => {
 describe('toFacets', () => {
   const facets = toFacets(aggregationsBody);
 
-  it('returns the eight facets', () => {
+  it('returns the thirteen facets, and none the portal sends beyond them', () => {
     expect(Object.keys(facets).sort()).toEqual([
       'availability',
+      'category',
       'collision_energy',
       'collision_type',
       'experiment',
       'file_type',
+      'keywords',
+      'magnet_polarity',
       'number_events',
+      'stripping_stream',
+      'stripping_version',
       'type',
       'year',
     ]);
+    expect(facets).not.toHaveProperty('signature');
+  });
+
+  it('nests subcategories under category buckets and relays a leading-space value as received', () => {
+    expect(facets.category).toEqual({
+      buckets: [
+        { value: ' Heavy-Ion Physics', count: 219, subcategories: [] },
+        {
+          value: 'Exotica',
+          count: 14_584,
+          subcategories: [
+            { value: 'Dark Matter', count: 2138 },
+            { value: 'Heavy Fermions, Heavy Righ-Handed Neutrinos', count: 2301 },
+          ],
+        },
+        { value: 'Heavy-Ion Physics', count: 3, subcategories: [] },
+        {
+          value: 'Higgs Physics',
+          count: 11_232,
+          subcategories: [
+            { value: 'Beyond Standard Model', count: 6815 },
+            { value: 'Standard Model', count: 4417 },
+          ],
+        },
+      ],
+      other_count: 25_724,
+    });
+  });
+
+  it('maps the keyword and LHCb facets as terms facets with their hidden counts', () => {
+    expect(facets.keywords).toEqual({
+      buckets: [
+        { value: 'Education', count: 1 },
+        { value: 'Roman Pot', count: 2 },
+      ],
+      other_count: 474,
+    });
+    expect(facets.magnet_polarity.buckets.map((bucket) => bucket.value)).toEqual([
+      'MagDown',
+      'MagUp',
+    ]);
+    expect(facets.stripping_stream.other_count).toBe(390);
+    expect(facets.stripping_version.other_count).toBe(4);
+  });
+
+  it('reads each nested level only on its own facet', () => {
+    const crossed = toFacets({
+      type: {
+        buckets: [{ key: 'Dataset', doc_count: 2, subcategory: { buckets: [{ key: 'x' }] } }],
+      },
+      category: {
+        buckets: [{ key: 'Exotica', doc_count: 2, subtype: { buckets: [{ key: 'y' }] } }],
+      },
+      experiment: { buckets: [{ key: 'CMS', doc_count: 2, subtype: { buckets: [{ key: 'z' }] } }] },
+    });
+    expect(crossed.type.buckets).toEqual([{ value: 'Dataset', count: 2 }]);
+    expect(crossed.category.buckets).toEqual([{ value: 'Exotica', count: 2 }]);
+    expect(crossed.experiment.buckets).toEqual([{ value: 'CMS', count: 2 }]);
+  });
+
+  it('keeps the Glossary bucket on every facet but type', () => {
+    const glossary = toFacets({ keywords: { buckets: [{ key: 'Glossary', doc_count: 1 }] } });
+    expect(glossary.keywords.buckets).toEqual([{ value: 'Glossary', count: 1 }]);
   });
 
   it('maps terms buckets with the count hidden past the cap', () => {
@@ -589,9 +671,68 @@ describe('toRecord', () => {
 
     it('leaves body fields out when the doc has no body', () => {
       const record = toRecord(hit('x', { slug: 'x' }), []);
-      for (const key of ['body', 'body_format', 'body_length', 'body_truncated']) {
+      for (const key of [
+        'body',
+        'body_format',
+        'body_length',
+        'body_truncated',
+        'body_offset',
+        'body_next_offset',
+      ]) {
         expect(key in record).toBe(false);
       }
+    });
+
+    it('starts a whole body at offset 0 and names no next offset', () => {
+      const record = toRecord(docOf('short body'), []);
+      expect(record).toMatchObject({ body: 'short body', body_offset: 0, body_truncated: false });
+      expect('body_next_offset' in record).toBe(false);
+    });
+
+    it('names the next offset when more body follows the slice', () => {
+      const record = toRecord(docOf('a'.repeat(DOC_BODY_MAX_CHARS + 5)), []);
+      expect(record).toMatchObject({
+        body_offset: 0,
+        body_next_offset: DOC_BODY_MAX_CHARS,
+        body_truncated: true,
+      });
+    });
+
+    it('returns the slice from a body offset, at most 30,000 units long', () => {
+      const body = `${'a'.repeat(DOC_BODY_MAX_CHARS)}${'b'.repeat(DOC_BODY_MAX_CHARS)}${'c'.repeat(10)}`;
+      const second = toRecord(docOf(body), [], DOC_BODY_MAX_CHARS);
+      expect(second.body).toBe('b'.repeat(DOC_BODY_MAX_CHARS));
+      expect(second).toMatchObject({
+        body_offset: DOC_BODY_MAX_CHARS,
+        body_next_offset: 2 * DOC_BODY_MAX_CHARS,
+        body_length: body.length,
+        body_truncated: true,
+      });
+      const last = toRecord(docOf(body), [], 2 * DOC_BODY_MAX_CHARS + 4);
+      expect(last).toMatchObject({ body: 'cccccc', body_offset: 60_004, body_truncated: false });
+      expect('body_next_offset' in last).toBe(false);
+    });
+
+    it('echoes an offset on the second half of a surrogate pair as the pair start', () => {
+      const body = `ab\u{1F600}${'x'.repeat(10)}`;
+      const record = toRecord(docOf(body), [], 3);
+      expect(record).toMatchObject({ body: `\u{1F600}${'x'.repeat(10)}`, body_offset: 2 });
+    });
+
+    it('rebuilds a body exactly from its slices when surrogate pairs sit on the boundaries', () => {
+      const pair = '\u{1F600}';
+      const body = `${'a'.repeat(DOC_BODY_MAX_CHARS - 1)}${pair}${'b'.repeat(DOC_BODY_MAX_CHARS - 2)}${pair}${pair}tail`;
+      const slices: string[] = [];
+      let offset: number | undefined = 0;
+      while (offset !== undefined) {
+        const record = toRecord(docOf(body), [], offset);
+        expect(record.body_offset).toBe(offset);
+        slices.push(record.body ?? '');
+        offset = record.body_next_offset;
+      }
+      expect(slices.join('')).toBe(body);
+      expect(slices).toHaveLength(3);
+      expect(slices[0]).toHaveLength(DOC_BODY_MAX_CHARS - 1);
     });
   });
 
@@ -648,6 +789,194 @@ describe('toRecord', () => {
     expect(
       toRecord(hit(1, { recid: '1', dataset_semantics_files: {} }), []).dataset_semantics,
     ).toBeUndefined();
+  });
+
+  describe('variables, category, pile-up, keywords, magnet polarity and stripping', () => {
+    const NEW_KEYS = [
+      'variables',
+      'category',
+      'pileup_html',
+      'keywords',
+      'magnet_polarity',
+      'stripping',
+    ] as const;
+
+    it('returns the variable dictionary as received, first entry and count included', () => {
+      const record = toRecord(variablesHit12220, ['12220']);
+      expect(record.variables).toHaveLength(87);
+      expect(record.variables?.[0]).toEqual({
+        variable: 'hit_global_x',
+        type: 'std::vector<float>',
+        description_html: 'global x position of the RecHit',
+      });
+      expect(record.keywords).toEqual(['datascience']);
+    });
+
+    it('keeps the unit of every TOTEM variable', () => {
+      const variables = toRecord(unitsHit84000, []).variables ?? [];
+      expect(variables).toHaveLength(21);
+      expect(variables.every((variable) => typeof variable.unit === 'string')).toBe(true);
+      expect(variables[1]).toEqual({
+        variable: 'track_rp_*_x',
+        type: 'double',
+        unit: 'Milimeters',
+        description_html:
+          'x coordinate of the hit in the Roman Pot number *, equals 0 if valid flag is flase',
+      });
+    });
+
+    it('returns all 622 variables of 12320, never cut', () => {
+      const variables = toRecord(largeVariablesHit12320, []).variables ?? [];
+      expect(variables).toHaveLength(622);
+      expect(variables[0]).toEqual({
+        variable: 'run',
+        type: 'float',
+        description_html: 'Event Run Number',
+      });
+    });
+
+    it('leaves type and unit out of an entry that states neither', () => {
+      const variables = toRecord(typelessVariablesHit4803, []).variables ?? [];
+      expect(variables).toHaveLength(21);
+      for (const variable of variables) {
+        expect(Object.keys(variable).sort()).toEqual(['description_html', 'variable']);
+      }
+    });
+
+    it('keeps description HTML and entities as received', () => {
+      const anchored = toRecord(anchorVariablesHit12102, []).variables ?? [];
+      expect(
+        anchored.find((variable) => variable.variable === 'fj_doubleb')?.description_html,
+      ).toBe(
+        'Double-b tagging discriminant based on a boosted decision tree calculated for the AK8 jet (see <a href="http://cms-results.web.cern.ch/cms-results/public-results/publications/BTV-16-002/">CMS-BTV-16-002</a>)',
+      );
+      const entity = toRecord(entityVariablesHit15009, []).variables ?? [];
+      expect(entity.find((variable) => variable.variable === 'hwid')?.description_html).toContain(
+        'Pixel&lt;5e17&lt;SCT',
+      );
+    });
+
+    it('drops an entry without a variable name and omits blank fields', () => {
+      const record = toRecord(
+        hit(1, {
+          recid: '1',
+          dataset_semantics: [
+            { description: 'no name', type: 'int' },
+            { variable: '  ', description: 'blank name' },
+            { variable: 'pt', type: ' ', unit: '', description: '\n' },
+            { variable: ' eta ', type: 'float' },
+          ],
+        }),
+        [],
+      );
+      expect(record.variables).toEqual([{ variable: 'pt' }, { variable: ' eta ', type: 'float' }]);
+    });
+
+    it('leaves variables out when no entry survives or the field is not a list', () => {
+      for (const dataset_semantics of [[], [{ type: 'int' }], null, 'pt'] as never[]) {
+        expect('variables' in toRecord(hit(1, { recid: '1', dataset_semantics }), [])).toBe(false);
+      }
+    });
+
+    it('returns the physics category with its secondary list and source', () => {
+      expect(toRecord(pileupHit67817, []).category).toEqual({
+        primary: 'Standard Model Physics',
+        secondary: ['Top physics'],
+        source: 'CMS Collaboration',
+      });
+      expect(toRecord(pileupNoLinksHit30595, []).category).toEqual({
+        primary: 'Pileup',
+        secondary: [],
+        source: 'CMS Collaboration',
+      });
+      expect(toRecord(categoryOnlyPrimaryHit88449, []).category).toEqual({
+        primary: 'Higgs',
+        secondary: [],
+      });
+    });
+
+    it('keeps category strings as received and drops a category without a primary', () => {
+      const leading = toRecord(
+        hit(1, {
+          recid: '1',
+          categories: { primary: ' Heavy-Ion Physics', secondary: ['', 'Flow '], source: ' ' },
+        }),
+        [],
+      );
+      expect(leading.category).toEqual({ primary: ' Heavy-Ion Physics', secondary: ['Flow '] });
+      for (const categories of [{ source: 'ATLAS Collaboration' }, { primary: ' ' }, null]) {
+        expect('category' in toRecord(hit(1, { recid: '1', categories }), [])).toBe(false);
+      }
+    });
+
+    it('returns pile-up HTML and adds each pile-up link to links with source pileup', () => {
+      const record = toRecord(pileupHit67817, []);
+      expect(record.pileup_html).toBe(
+        '<p>To make these simulated data comparable with the collision data, <a href="/docs/cms-guide-pileup-simulation">pile-up events</a> are added to the simulated event in the DIGI2RAW step.</p>',
+      );
+      expect(record.links.filter((link) => link.source === 'pileup')).toEqual([
+        {
+          source: 'pileup',
+          recid: '30595',
+          description:
+            '/Neutrino_E-10_gun/RunIISummer20ULPrePremix-UL16_106X_mcRun2_asymptotic_v13-v1/PREMIX',
+        },
+      ]);
+    });
+
+    it('adds no pile-up link when the pile-up states none, and skips an empty link', () => {
+      const noLinks = toRecord(pileupNoLinksHit30595, []);
+      expect(noLinks.pileup_html).toContain('/MinBias_TuneCP5_13TeV-pythia8/');
+      expect(noLinks.links.some((link) => link.source === 'pileup')).toBe(false);
+
+      const record = toRecord(
+        hit(1, {
+          recid: '1',
+          use_with: { links: [{ recid: '4' }] },
+          pileup: { description: ' ', links: [{}, { title: ' ' }, { recid: '7' }] },
+        }),
+        [],
+      );
+      expect('pileup_html' in record).toBe(false);
+      expect(record.links).toEqual([
+        { source: 'use_with', recid: '4' },
+        { source: 'pileup', recid: '7' },
+      ]);
+    });
+
+    it('returns the LHCb magnet polarity and stripping of a dataset and a stripping page', () => {
+      const dataset = toRecord(lhcbHit28004, []);
+      expect(dataset.magnet_polarity).toBe('MagDown');
+      expect(dataset.stripping).toEqual({ stream: 'DIMUON', version: 'stripping21r1' });
+      const page = toRecord(strippingDocHit, []);
+      expect(page.kind).toBe('doc');
+      expect(page.stripping).toEqual({ stream: 'BHADRON', version: 'stripping21' });
+    });
+
+    it('omits blank keywords, polarity and stripping parts, never defaulting them', () => {
+      const record = toRecord(
+        hit(1, {
+          recid: '1',
+          keywords: ['', 'Roman Pot', ' '],
+          magnet_polarity: ' ',
+          stripping: { stream: '', version: 'stripping20' },
+        }),
+        [],
+      );
+      expect(record.keywords).toEqual(['Roman Pot']);
+      expect('magnet_polarity' in record).toBe(false);
+      expect(record.stripping).toEqual({ version: 'stripping20' });
+      const empty = toRecord(hit(1, { recid: '1', keywords: [' '], stripping: {} }), []);
+      expect('keywords' in empty).toBe(false);
+      expect('stripping' in empty).toBe(false);
+    });
+
+    it('adds none of these fields to a record that carries none of their keys', () => {
+      for (const source of [collisionDatasetHit, docHit, sparseHit, softwareHit]) {
+        const record = toRecord(source, []);
+        for (const key of NEW_KEYS) expect(key in record).toBe(false);
+      }
+    });
   });
 
   it('gives an empty distribution format list when the portal lists none', () => {
@@ -707,18 +1036,98 @@ describe('toManifest', () => {
   });
 
   it('derives index counts and size from member files when the portal omits them', () => {
+    const files = [
+      { key: 'k0', uri: 'root://a/0', size: 10 },
+      { key: 'k1', uri: 'root://a/1', size: 15, availability: 'on demand' },
+    ];
     const manifest = toManifest('1', {
       _file_indices: [
+        { key: 'x_file_index.json', files },
         {
-          key: 'x_file_index.json',
-          files: [
-            { key: 'k0', uri: 'root://a/0', size: 10 },
-            { key: 'k1', uri: 'root://a/1', size: 15 },
-          ],
+          key: 'y_file_index.json',
+          number_files: null,
+          size: null,
+          availability: {},
+          files,
         },
       ],
     });
-    expect(manifest.indexes[0]).toMatchObject({ number_files: 2, size: 25, availability: {} });
+    for (const index of manifest.indexes) {
+      expect(index).toMatchObject({ number_files: 2, size: 25, availability: {} });
+      expect(index.files).toHaveLength(2);
+    }
+  });
+
+  it('keeps a stated count and size over the members listed', () => {
+    const manifest = toManifest('1', {
+      _file_indices: [
+        {
+          key: 's_file_index.json',
+          number_files: 5,
+          size: 999,
+          files: [{ key: 'k0', uri: 'root://a/0', size: 10 }],
+        },
+      ],
+    });
+    expect(manifest.indexes[0]).toMatchObject({ number_files: 5, size: 999, availability: {} });
+  });
+
+  it('keeps a stated zero count and size', () => {
+    const manifest = toManifest('1', {
+      _file_indices: [
+        {
+          key: 'e_file_index.json',
+          number_files: 0,
+          size: 0,
+          availability: { online: 0 },
+          files: [],
+        },
+      ],
+    });
+    expect(manifest.indexes[0]).toEqual({
+      key: 'e_file_index.json',
+      number_files: 0,
+      size: 0,
+      availability: { online: 0 },
+      files: [],
+    });
+  });
+
+  it('reads the JetSet2 indexes, whose members carry no key, as the portal sends them', () => {
+    const manifest = toManifest('atlas-160006', jetSet2RecordBody.metadata);
+    expect(manifest).toMatchObject({
+      recid: 'atlas-160006',
+      availability: 'online',
+      files: [],
+      children: [],
+    });
+    expect(manifest).not.toHaveProperty('availability_details');
+    expect(manifest.indexes.map((index) => index.key)).toEqual([
+      'training_files.json',
+      'test_Gammatautau_files.json',
+      'test_VHbb_files.json',
+      'test_VHcc_files.json',
+      'test_VHtautau_files.json',
+      'test_Zprime_files.json',
+      'test_qcd_files.json',
+      'test_ttbar_files.json',
+    ]);
+    expect(manifest.indexes[0]).toEqual({
+      key: 'training_files.json',
+      description: 'training_files.json',
+      number_files: 3,
+      size: 14_190_227_850_197,
+      availability: {},
+      files: expect.any(Array),
+    });
+    expect(manifest.indexes.map((index) => index.number_files)).toEqual([3, 1, 1, 1, 1, 1, 1, 1]);
+    expect(manifest.indexes[0]?.files[0]).toEqual({
+      filename: 'jetset2-release_v1.pp_output_train-full_0.h5',
+      size: 72_161_839_049,
+      checksum: 'adler32:47ef28c2',
+      uri: 'root://eospublic.cern.ch:1094//eos/opendata/atlas/datascience/ATL-SOFT-PUB-2026-002/train/jetset2-release_v1.pp_output_train-full_0.h5',
+      availability: 'online',
+    });
   });
 
   it('reads files from `files` when `_files` is absent', () => {
@@ -765,22 +1174,54 @@ describe('toManifest', () => {
 
   describe('files the portal lists without an address (Decision 24)', () => {
     it.each([
-      ['key', { uri: 'root://a/k', size: 1 }],
       ['uri', { key: 'k', size: 1 }],
       ['size', { key: 'k', uri: 'root://a/k' }],
-      ['blank key', { key: ' ', uri: 'root://a/k', size: 1 }],
+      ['blank uri', { key: 'k', uri: ' ', size: 1 }],
       ['non-numeric size', { key: 'k', uri: 'root://a/k', size: '1' as unknown as number }],
+      ['uri, even with a filename and no key', { filename: 'f.root', size: 1 }],
     ])('rejects a file with no usable %s as upstream_unreadable', (_name, file) => {
       expectUnreadable(() => toManifest('1', { _files: [file] }));
     });
 
-    it('rejects an index member without an address and an index without a key', () => {
+    it('names the missing URI or size, not the key, in the message', () => {
+      try {
+        toManifest('atlas-160006', { _files: [{ filename: 'f.root', size: 1 }] });
+      } catch (error) {
+        expect((error as McpError).message).toBe(
+          'CERN Open Data returned a file entry for record atlas-160006 without an XRootD URI or size.',
+        );
+        return;
+      }
+      throw new Error('Expected upstream_unreadable.');
+    });
+
+    it.each([
+      ['no key', {}],
+      ['a blank key', { key: ' ' }],
+    ])(
+      'lists a file with %s, its key absent and never filled from the filename',
+      (_name, extra) => {
+        const file = { filename: 'f.h5', size: 5, uri: 'root://a/f.h5', ...extra };
+        const manifest = toManifest('1', {
+          _files: [file],
+          _file_indices: [{ key: 'i.json', files: [file] }],
+        });
+        for (const listed of [manifest.files[0], manifest.indexes[0]?.files[0]]) {
+          expect(listed).toEqual({ filename: 'f.h5', size: 5, uri: 'root://a/f.h5' });
+        }
+      },
+    );
+
+    it('rejects an index member without an address and an index without a well-formed key', () => {
       expectUnreadable(() =>
         toManifest('1', {
           _file_indices: [{ key: 'i_file_index.json', files: [{ key: 'k', size: 1 }] }],
         }),
       );
       expectUnreadable(() => toManifest('1', { _file_indices: [{ files: [] }] }));
+      expectUnreadable(() =>
+        toManifest('1', { _file_indices: [{ key: 'i\udc00.json', files: [] }] }),
+      );
     });
 
     it('accepts a zero-byte file', () => {

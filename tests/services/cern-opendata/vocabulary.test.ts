@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalize,
+  HEAVY_ION_SPELLINGS,
   isGlossaryType,
   isKnownValue,
   PARAM_TOPIC,
@@ -14,8 +15,12 @@ import {
   REFERENCE_TABLES,
   REFERENCE_TOPICS,
   SEARCHABLE_TYPE_PRIMARIES,
+  SPELLING_EXPANSIONS,
   type VocabularyParam,
 } from '@/services/cern-opendata/vocabulary.js';
+import { expectLinearTime } from '../../fixtures/cpu-time.js';
+
+const MEGABYTE_SIZES = [62_500, 250_000, 1_000_000] as const;
 
 const tableOf = (topic: (typeof REFERENCE_TOPICS)[number]) => {
   const table = REFERENCE_TABLES.find((candidate) => candidate.topic === topic);
@@ -55,6 +60,27 @@ describe('canonicalize', () => {
     ['type', 'supplementaries/configuration hlt', 'Supplementaries::Configuration HLT'],
     ['type', 'supplementaries:computing note', 'Supplementaries::Computing Note'],
     ['type', 'news', 'News'],
+    ['category', 'higgs physics/standard model', 'Higgs Physics::Standard Model'],
+    ['category', 'HIGGS PHYSICS : standard model', 'Higgs Physics::Standard Model'],
+    ['category', 'exotica:dark matter', 'Exotica::Dark Matter'],
+    ['category', ' heavy-ion physics', 'Heavy-Ion Physics'],
+    ['category', 'heavy-ionphysics', 'Heavy-Ion Physics'],
+    [
+      'category',
+      'exotica/heavy fermions,heavy righ-handed neutrinos',
+      'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos',
+    ],
+    ['category', 'susy', 'Susy'],
+    ['category', 'SUPERSYMMETRY', 'Supersymmetry'],
+    ['category', 'higgs', 'Higgs'],
+    ['category', 'standard model physics::top physics', 'Standard Model Physics::Top physics'],
+    ['category', 'standard model/top physics', 'Standard Model::Top physics'],
+    ['magnet_polarity', 'magdown', 'MagDown'],
+    ['magnet_polarity', 'MAG UP', 'MagUp'],
+    ['stripping_stream', 'dimuon', 'DIMUON'],
+    ['stripping_stream', 'Charm.Mdst', 'CHARM.MDST'],
+    ['stripping_version', 'Stripping21r1', 'stripping21r1'],
+    ['stripping_version', 'STRIPPING29R2P3', 'stripping29r2p3'],
   ] as [VocabularyParam, string, string][])('%s: %j becomes %j', (param, raw, expected) => {
     expect(canonicalize(param, raw)).toBe(expected);
   });
@@ -67,24 +93,49 @@ describe('canonicalize', () => {
   });
 
   it('normalizes a type separator in linear time, however much whitespace surrounds it', () => {
-    const spaces = ' '.repeat(1_000_000);
-    const started = performance.now();
-    expect(canonicalize('type', `a${spaces}b`)).toBe(`a${spaces}b`);
-    expect(canonicalize('type', `dataset${spaces}/ collision`)).toBe('Dataset::Collision');
-    expect(performance.now() - started).toBeLessThan(250);
+    const make = (n: number) => {
+      const spaces = ' '.repeat(n);
+      return [`a${spaces}b`, `dataset${spaces}/ collision`] as const;
+    };
+    const [plain, paired] = make(1_000_000);
+    expect(canonicalize('type', plain)).toBe(plain);
+    expect(canonicalize('type', paired)).toBe('Dataset::Collision');
+    expectLinearTime(make, (values) => values.map((value) => canonicalize('type', value)), {
+      sizes: MEGABYTE_SIZES,
+      maxMs: 250,
+    });
   });
 
-  it('is idempotent over every canonical value of every table', () => {
+  it('normalizes a category separator in linear time, however much whitespace surrounds it', () => {
+    const make = (n: number) => {
+      const spaces = ' '.repeat(n);
+      return `higgs physics${spaces}/${spaces}standard model`;
+    };
+    expect(canonicalize('category', make(1_000_000))).toBe('Higgs Physics::Standard Model');
+    expectLinearTime(make, (value) => canonicalize('category', value), {
+      sizes: MEGABYTE_SIZES,
+      maxMs: 250,
+    });
+  });
+
+  it('normalizes the separator only for paired parameters', () => {
+    expect(canonicalize('stripping_stream', 'dimuon/ew')).toBe('dimuon/ew');
+    expect(canonicalize('experiment', 'cms:atlas')).toBe('cms:atlas');
+  });
+
+  it('is idempotent over every canonical value of every table, under the parameter it belongs to', () => {
+    const params = Object.keys(PARAM_TOPIC) as VocabularyParam[];
     for (const table of REFERENCE_TABLES) {
-      const param = (Object.keys(PARAM_TOPIC) as VocabularyParam[]).find(
-        (key) => PARAM_TOPIC[key] === table.topic,
-      );
-      if (!param) continue;
+      const owners = params.filter((key) => PARAM_TOPIC[key] === table.topic);
+      if (owners.length === 0) continue;
       for (const { value } of table.entries) {
-        if (param === 'type' && value === 'Glossary') continue;
-        if (param === 'availability' && value === 'on demand') continue;
-        expect(canonicalize(param, value), `${param}: ${value}`).toBe(value);
-        expect(isKnownValue(param, value), `${param}: ${value}`).toBe(true);
+        if (table.topic === 'record_types' && value === 'Glossary') continue;
+        if (table.topic === 'availability' && value === 'on demand') continue;
+        const known = owners.filter((param) => isKnownValue(param, value));
+        expect(known, `${table.topic}: ${value}`).toHaveLength(1);
+        for (const param of known) {
+          expect(canonicalize(param, value), `${param}: ${value}`).toBe(value);
+        }
       }
     }
   });
@@ -140,12 +191,35 @@ describe('vocabulary constants', () => {
     expect([...PBPB_SPELLINGS]).toEqual(['PbPb', 'Pb-Pb']);
   });
 
+  it('expands Heavy-Ion Physics to its spelling with a leading space too', () => {
+    expect([...HEAVY_ION_SPELLINGS]).toEqual(['Heavy-Ion Physics', ' Heavy-Ion Physics']);
+  });
+
+  it('keys every spelling expansion by a canonical value of its parameter, and nothing else', () => {
+    expect(Object.keys(SPELLING_EXPANSIONS)).toEqual(['collision_type', 'category']);
+    expect(SPELLING_EXPANSIONS.collision_type?.get('PbPb')).toBe(PBPB_SPELLINGS);
+    expect(SPELLING_EXPANSIONS.category?.get('Heavy-Ion Physics')).toBe(HEAVY_ION_SPELLINGS);
+    for (const [param, table] of Object.entries(SPELLING_EXPANSIONS)) {
+      for (const [value, spellings] of table) {
+        expect(isKnownValue(param as VocabularyParam, value), value).toBe(true);
+        expect(spellings[0], value).toBe(value);
+      }
+      for (const member of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+        expect(table.get(member), `${param}: ${member}`).toBeUndefined();
+      }
+    }
+  });
+
   it('routes every filter parameter to a reference topic that exists', () => {
     for (const topic of Object.values(PARAM_TOPIC)) {
       expect(REFERENCE_TOPICS).toContain(topic);
     }
     expect(PARAM_TOPIC.type).toBe('record_types');
     expect(PARAM_TOPIC.collision_energy).toBe('collision_energies');
+    expect(PARAM_TOPIC.category).toBe('categories');
+    expect(PARAM_TOPIC.magnet_polarity).toBe('lhcb');
+    expect(PARAM_TOPIC.stripping_stream).toBe('lhcb');
+    expect(PARAM_TOPIC.stripping_version).toBe('lhcb');
   });
 });
 
@@ -177,6 +251,58 @@ describe('REFERENCE_TABLES', () => {
     expect(tableOf('collision_energies').entries).toHaveLength(15);
     expect(tableOf('collision_types').entries).toHaveLength(5);
     expect(tableOf('file_types').entries).toHaveLength(65);
+    expect(tableOf('categories').entries).toHaveLength(39);
+    expect(tableOf('lhcb').entries).toHaveLength(25);
+  });
+
+  it('lists 18 category primaries and 21 pairs, each with the experiments that use it', () => {
+    const entries = tableOf('categories').entries;
+    const pairs = entries.filter((entry) => entry.value.includes('::'));
+    expect(entries.length - pairs.length).toBe(18);
+    expect(pairs).toHaveLength(21);
+    for (const { value, meaning } of entries) {
+      expect(meaning, value).toMatch(/^Experiments: (CMS|ATLAS|DELPHI)(, (CMS|ATLAS|DELPHI))*\./);
+      expect(value, value).toBe(value.trim());
+    }
+    const byValue = new Map(entries.map((entry) => [entry.value, entry.meaning]));
+    expect(byValue.get('Higgs Physics::Standard Model')).toBe('Experiments: CMS, ATLAS.');
+    expect(byValue.get('Supersymmetry')).toBe('Experiments: CMS. A different value from Susy.');
+    expect(byValue.get('Susy')).toBe('Experiments: DELPHI. A different value from Supersymmetry.');
+    expect(byValue.get('Heavy-Ion Physics')).toContain('leading space');
+    expect(byValue.get('Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos')).toContain(
+      'the comma belongs to it',
+    );
+    expect(byValue.has(' Heavy-Ion Physics')).toBe(false);
+  });
+
+  it('dates the categories snapshot and names what the 10-value cap hides', () => {
+    const { summary } = tableOf('categories');
+    expect(summary).toContain('2026-10-01');
+    expect(summary).toContain('cern_opendata_search_records');
+    expect(summary).toContain('hides Supersymmetry and Standard Model Physics');
+    expect(summary).toMatch(
+      /Higgs and Higgs Physics, Susy and Supersymmetry, and Standard Model and Standard Model Physics are distinct/,
+    );
+  });
+
+  it('lists the LHCb polarities, then the 11 streams, then the 12 versions, each under its own filter', () => {
+    const entries = tableOf('lhcb').entries;
+    const of = (param: VocabularyParam) =>
+      entries.filter((entry) => isKnownValue(param, entry.value)).map((entry) => entry.value);
+    expect(of('magnet_polarity')).toEqual(['MagDown', 'MagUp']);
+    expect(of('stripping_stream')).toHaveLength(11);
+    expect(of('stripping_stream')).toContain('COMMONPARTICLES');
+    expect(of('stripping_version')).toHaveLength(12);
+    expect(of('stripping_version')).toEqual(
+      expect.arrayContaining(['stripping21r1', 'stripping29r2p3']),
+    );
+    for (const { value, meaning } of entries) {
+      const param = (['magnet_polarity', 'stripping_stream', 'stripping_version'] as const).find(
+        (candidate) => isKnownValue(candidate, value),
+      );
+      expect(meaning, value).toMatch(new RegExp(`^${param}: `));
+    }
+    expect(tableOf('lhcb').summary).toContain('2026-10-01');
   });
 
   it('keeps 13TeV, 13.6TeV as one value', () => {
@@ -212,6 +338,10 @@ describe('REFERENCE_TABLES', () => {
     expect(table.summary).toContain('cern_opendata_get_validated_runs');
   });
 
+  it('states trigger coverage as 2011-2016, the years that hold path records', () => {
+    expect(tableOf('run_periods').summary).toMatch(/CMS trigger path records cover 2011-2016\.$/);
+  });
+
   it('lists muons-only lists where they exist and says so where they do not', () => {
     const entries = new Map(
       tableOf('run_periods').entries.map((entry) => [entry.value, entry.meaning]),
@@ -240,5 +370,19 @@ describe('REFERENCE_TABLES', () => {
     for (const entry of entries) {
       expect(entry.meaning, entry.value).toMatch(/cern_opendata_[a-z_]+/);
     }
+  });
+
+  it('describes a file-index key as matched exactly, not only the _file_index.json form', () => {
+    const key = tableOf('identifiers').entries.find((entry) => entry.value === 'file-index key');
+    expect(key?.meaning).toBe(
+      'An indexes[].key from cern_opendata_list_files, matched exactly: usually ending _file_index.json, or a name such as training_files.json; the .txt spelling is accepted. Taken by cern_opendata_list_files as index.',
+    );
+  });
+
+  it('explains why a title: wildcard on a path matches nothing, without calling field wildcards broken', () => {
+    const wildcard = tableOf('query_syntax').entries.find((entry) => entry.value === 'HLT_IsoMu*');
+    expect(wildcard?.meaning).toBe(
+      'Trailing wildcard on a bare term. title is stored as one whole-title term, so title:HLT_IsoMu* matches nothing (trigger titles begin "High-Level Trigger path information").',
+    );
   });
 });

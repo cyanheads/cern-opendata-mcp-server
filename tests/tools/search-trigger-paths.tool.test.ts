@@ -1,14 +1,18 @@
 /**
  * @fileoverview Tests for cern_opendata_search_trigger_paths: path
- * normalization (HLT_ prefix, case, wildcard, version suffix), blank-as-unset
- * year, limit and page, the request sent on the wire, parsed records for the
- * three HLT_IsoMu24 abstracts, required enrichment on the zero-result,
+ * normalization (HLT_ prefix, case, wildcard, version suffix), the query for
+ * paths outside the HLT_ family (anchored on the record title, checked against
+ * the released query), the advertised input schemas (no lookaround),
+ * blank-as-unset year, limit and page, the request sent on the wire, parsed
+ * records for the three HLT_IsoMu24 abstracts and titles naming several
+ * datasets, required enrichment on the zero-result,
  * under-cap, truncated and past-the-end pages, the notices the design
  * specifies, every declared error on the wire, upstream failure classes, and
  * the text twin of structuredContent. Upstream I/O is a strict fetch fake.
  * @module tests/tools/search-trigger-paths.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -68,6 +72,19 @@ const paramsOf = (http: ReturnType<typeof installService>['http'], call = 0) =>
 const hintOf = (error: ReturnType<typeof errorOf>): string =>
   String((error.data?.recovery as { hint?: string } | undefined)?.hint);
 
+/** The record-title prefix as a `title` keyword term, its spaces escaped. */
+const TITLE = 'High-Level\\ Trigger\\ path\\ information\\ ';
+
+/**
+ * The query sent for a path outside the HLT_ family: its record titles (the
+ * title alone or with a dataset suffix; a prefix for a trailing `*`), or the
+ * path with HLT_ prepended.
+ */
+const anchored = (path: string) =>
+  path.endsWith('*')
+    ? `title:${TITLE}${path} OR HLT_${path}`
+    : `title:"High-Level Trigger path information ${path}" OR title:${TITLE}${path}\\ \\(* OR HLT_${path}`;
+
 /** `count` trigger path hits, recids from 7000. */
 const triggerHits = (count: number) =>
   Array.from({ length: count }, (_, i) =>
@@ -119,6 +136,35 @@ describe('cern_opendata_search_trigger_paths registration', () => {
     }
   });
 
+  it('states trigger coverage as 2011-2016, the years that hold path records', () => {
+    const input = z.toJSONSchema(searchTriggerPaths.input, { io: 'input', unrepresentable: 'any' });
+    const year = input.properties?.year;
+    expect(searchTriggerPaths.description).toContain('Covers CMS open data from 2011-2016.');
+    expect(typeof year === 'object' ? year.description : undefined).toBe(
+      'Data-taking year, such as 2012. Trigger records cover 2011-2016.',
+    );
+    expect(JSON.stringify({ input, description: searchTriggerPaths.description })).not.toMatch(
+      /2010/,
+    );
+  });
+
+  it('describes each datasets item and the effectiveQuery echo as built', () => {
+    const output = z.toJSONSchema(searchTriggerPaths.output, { unrepresentable: 'any' });
+    const triggers = output.properties?.triggers;
+    const trigger = typeof triggers === 'object' ? triggers.items : undefined;
+    const datasets =
+      trigger && typeof trigger === 'object' && !Array.isArray(trigger)
+        ? trigger.properties?.datasets
+        : undefined;
+    const item = typeof datasets === 'object' ? datasets.items : undefined;
+    expect(item && typeof item === 'object' && !Array.isArray(item) ? item.description : '').toBe(
+      'One primary dataset name.',
+    );
+    expect(searchTriggerPaths.enrichment?.effectiveQuery?.description).toBe(
+      'The query sent, after normalization (version suffix dropped): an HLT_ path as given; any other path as title clauses matching it as a record path name, OR HLT_ plus the path.',
+    );
+  });
+
   it('declares the required list enrichment and the required effectiveQuery echo', () => {
     expect(Object.keys(searchTriggerPaths.enrichment ?? {}).sort()).toEqual([
       'cap',
@@ -137,23 +183,31 @@ describe('cern_opendata_search_trigger_paths path input', () => {
     ['  HLT_IsoMu24  ', 'HLT_IsoMu24'],
     ['hlt_IsoMu24', 'HLT_IsoMu24'],
     ['Hlt_IsoMu24', 'HLT_IsoMu24'],
-    ['IsoMu24', 'HLT_IsoMu24'],
-    ['  IsoMu24', 'HLT_IsoMu24'],
+    ['IsoMu24', 'IsoMu24'],
+    ['  IsoMu24', 'IsoMu24'],
     ['HLT_IsoMu*', 'HLT_IsoMu*'],
-    ['IsoMu*', 'HLT_IsoMu*'],
+    ['IsoMu*', 'IsoMu*'],
     ['hlt_isomu*', 'HLT_isomu*'],
     ['HLT_IsoMu24_v3', 'HLT_IsoMu24_v3'],
     ['HLT_IsoMu24_v*', 'HLT_IsoMu24_v*'],
     ['HLT_HLT_IsoMu24', 'HLT_HLT_IsoMu24'],
     ['HLT_Mu_7_8', 'HLT_Mu_7_8'],
     ['HLT_9', 'HLT_9'],
+    ['AlCa_EcalPi0', 'AlCa_EcalPi0'],
+    ['HLTriggerFinalPath', 'HLTriggerFinalPath'],
+    ['hlt', 'hlt'],
+    ['300Tower0p5', '300Tower0p5'],
+    [' 60Jet10 ', '60Jet10'],
+    ['70Jet*', '70Jet*'],
+    ['3*', '3*'],
+    ['9', '9'],
   ])('reads the path %j as %j', (raw, expected) => {
     expect(searchTriggerPaths.input.parse({ path: raw }).path).toBe(expected);
   });
 
   it('keeps the case of everything past the prefix: names are not lowercased or uppercased', () => {
     expect(searchTriggerPaths.input.parse({ path: 'hlt_ISOMU24' }).path).toBe('HLT_ISOMU24');
-    expect(searchTriggerPaths.input.parse({ path: 'isomu24' }).path).toBe('HLT_isomu24');
+    expect(searchTriggerPaths.input.parse({ path: 'isomu24' }).path).toBe('isomu24');
   });
 
   it.each([
@@ -259,7 +313,7 @@ describe('cern_opendata_search_trigger_paths on the wire', () => {
     const { http } = serve(emptySearchBody);
     await run({ path: ' isomu*', year: 2012, limit: 25, page: 3 });
     const params = paramsOf(http);
-    expect(params.get('q')).toBe('HLT_isomu*');
+    expect(params.get('q')).toBe(anchored('isomu*'));
     expect(params.get('year')).toBe('2012--2012');
     expect(params.get('size')).toBe('25');
     expect(params.get('page')).toBe('3');
@@ -270,7 +324,7 @@ describe('cern_opendata_search_trigger_paths on the wire', () => {
     ['HLT_IsoMu24_V3', 'HLT_IsoMu24'],
     ['HLT_IsoMu24_v12', 'HLT_IsoMu24'],
     ['HLT_IsoMu24_v*', 'HLT_IsoMu24'],
-    ['isomu24_v1', 'HLT_isomu24'],
+    ['isomu24_v1', anchored('isomu24')],
   ])('strips the version suffix of %j and searches %j', async (path, searched) => {
     const { http } = serve(emptySearchBody);
     const result = success(await run({ path }));
@@ -290,15 +344,312 @@ describe('cern_opendata_search_trigger_paths on the wire', () => {
     expect(paramsOf(http).get('q')).toBe(searched);
   });
 
-  it('echoes the normalized path as effectiveQuery', async () => {
+  it('echoes the normalized query as effectiveQuery', async () => {
     serve(emptySearchBody);
-    expect(success(await run({ path: ' isomu24 ' })).effectiveQuery).toBe('HLT_isomu24');
+    expect(success(await run({ path: ' isomu24 ' })).effectiveQuery).toBe(anchored('isomu24'));
     expect(success(await run({ path: 'HLT_IsoMu*' })).effectiveQuery).toBe('HLT_IsoMu*');
   });
 
   it('echoes the path in the text trailer', async () => {
     serve(emptySearchBody);
     expect(textOf(await run({ path: 'IsoMu24' }), 1)).toContain('HLT_IsoMu24');
+  });
+});
+
+describe('cern_opendata_search_trigger_paths paths outside the HLT_ family', () => {
+  it.each([
+    ['AlCa_EcalPi0', anchored('AlCa_EcalPi0')],
+    ['AlCa_*', anchored('AlCa_*')],
+    ['DST_Physics', anchored('DST_Physics')],
+    ['HLTriggerFinalPath', anchored('HLTriggerFinalPath')],
+    ['ALCAP0Output', anchored('ALCAP0Output')],
+    ['IsoMu24', anchored('IsoMu24')],
+    ['  isomu*', anchored('isomu*')],
+    ['A', anchored('A')],
+    ['A*', anchored('A*')],
+    ['HLT_IsoMu24', 'HLT_IsoMu24'],
+    ['hlt_isomu24', 'HLT_isomu24'],
+    ['HLT_IsoMu*', 'HLT_IsoMu*'],
+  ])(
+    'searches %j by its record titles and with HLT_ prepended, in one request: %j',
+    async (path, query) => {
+      const { http } = serve(emptySearchBody);
+      const result = success(await run({ path }));
+      expect(http.calls).toHaveLength(1);
+      expect(paramsOf(http).get('q')).toBe(query);
+      expect(result.effectiveQuery).toBe(query);
+    },
+  );
+
+  it.each([
+    ['AND', 'AND', '"AND" OR HLT_AND'],
+    ['OR', 'OR', '"OR" OR HLT_OR'],
+    ['NOT', 'NOT', '"NOT" OR HLT_NOT'],
+    ['TO', 'TO', '"TO" OR HLT_TO'],
+    ['and', 'and', '"and" OR HLT_and'],
+    ['Or', 'Or', '"Or" OR HLT_Or'],
+    ['not', 'not', '"not" OR HLT_not'],
+    ['to', 'to', '"to" OR HLT_to'],
+    ['OR_v2', 'OR', '"OR" OR HLT_OR'],
+    ['OR*', 'OR*', 'OR* OR HLT_OR*'],
+    ['ORANGE', 'ORANGE', 'ORANGE OR HLT_ORANGE'],
+  ])(
+    'sends a path spelled as a query operator, %j, only inside title terms, and quotes it in the search_records suggestion',
+    async (path, stripped, suggestion) => {
+      const { http } = serve(emptySearchBody);
+      const result = success(await run({ path }));
+      expect(result.effectiveQuery).toBe(anchored(stripped));
+      expect(paramsOf(http).get('q')).toBe(anchored(stripped));
+      expect(result.notice).toContain(
+        `cern_opendata_search_records with query ${suggestion} to search other record types.`,
+      );
+    },
+  );
+
+  it('sends HLT_OR as given, and suggests it as given', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run({ path: 'HLT_OR' }));
+    expect(paramsOf(http).get('q')).toBe('HLT_OR');
+    expect(result.notice).toContain('cern_opendata_search_records with query HLT_OR to search');
+  });
+
+  it.each([
+    ['AlCa_EcalPi0_v3', 'AlCa_EcalPi0', '3'],
+    ['DST_Physics_v*', 'DST_Physics', '*'],
+    ['HLTriggerFinalPath_V2', 'HLTriggerFinalPath', '2'],
+  ])(
+    'strips the version suffix of %j and searches both forms of %j',
+    async (path, stripped, version) => {
+      const { http } = serve(emptySearchBody);
+      const result = success(await run({ path }));
+      expect(paramsOf(http).get('q')).toBe(anchored(stripped));
+      expect(result.notice).toContain(
+        version === '*'
+          ? `${path} names every version of ${stripped}.`
+          : `${path} is version ${version} of ${stripped}.`,
+      );
+    },
+  );
+
+  it('names both forms searched in the zero-hit notice', async () => {
+    serve(emptySearchBody);
+    const result = success(await run({ path: 'AlCa_Nope_v2', year: 2012 }));
+    expect(result.notice).toBe(
+      'Path versions are listed per record as V<n>; AlCa_Nope_v2 is version 2 of AlCa_Nope. No CMS HLT path record matches "AlCa_Nope" or "HLT_AlCa_Nope" in 2012; path records cover CMS open data from 2011-2016. Try a prefix pattern such as HLT_IsoMu*, drop year, or call cern_opendata_search_records with query AlCa_Nope OR HLT_AlCa_Nope to search other record types.',
+    );
+  });
+
+  it('renders a record whose path has no HLT_ prefix', async () => {
+    serve(
+      searchBody([triggerHit('2007', 'AlCa_EcalPi0', ISOMU24_2011_ABSTRACT, { year: '2011' })], {
+        total: 1,
+      }),
+    );
+    const result = await run({ path: 'AlCa_EcalPi0' });
+    expect(success(result).triggers[0]).toMatchObject({ recid: '2007', path: 'AlCa_EcalPi0' });
+    expect(textOf(result)).toContain('### AlCa_EcalPi0, 2011');
+  });
+
+  it.each([
+    ['an underscore first', '_IsoMu24'],
+    ['a lone underscore', '_'],
+    ['an underscore-led prefix', '_*'],
+  ])('rejects a path with %s, which names no record family', async (_name, path) => {
+    const { http } = serve(emptySearchBody);
+    const result = await run({ path });
+    expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorOf(result).message).toContain(
+      'A path is a letter or digit followed by letters, digits and underscores',
+    );
+    expect(http.calls).toHaveLength(0);
+  });
+
+  /** 2011 path records named HLT_ and a digit: 2027–2030, 2031–2036, 2037–2039. */
+  it.each(['300Tower0p5', '600Tower1p0', '60Jet10', '70Jet13', '70Jet*', '3*', '9'])(
+    'searches the digit-led path %j by its record titles and as HLT_ plus the path, as 0.1.1 did',
+    async (path) => {
+      const { http } = serve(emptySearchBody);
+      const result = success(await run({ path }));
+      expect(http.calls).toHaveLength(1);
+      expect(paramsOf(http).get('q')).toBe(anchored(path));
+      expect(result.effectiveQuery).toBe(anchored(path));
+      expect((paramsOf(http).get('q') ?? '').split(' OR ')).toContain(`HLT_${path}`);
+    },
+  );
+
+  it('strips the version suffix of a digit-led path and searches both forms of the rest', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run({ path: '60Jet10_v2' }));
+    expect(paramsOf(http).get('q')).toBe(anchored('60Jet10'));
+    expect(result.notice).toContain('60Jet10_v2 is version 2 of 60Jet10.');
+  });
+});
+
+describe('cern_opendata_search_trigger_paths anchors names outside the HLT_ family on the record title', () => {
+  it.each([
+    ['AlCa_*', `title:${TITLE}AlCa_* OR HLT_AlCa_*`],
+    ['Jet*', `title:${TITLE}Jet* OR HLT_Jet*`],
+    [
+      'AlCa_EcalPi0',
+      `title:"High-Level Trigger path information AlCa_EcalPi0" OR title:${TITLE}AlCa_EcalPi0\\ \\(* OR HLT_AlCa_EcalPi0`,
+    ],
+    [
+      'IsoMu24_v3',
+      `title:"High-Level Trigger path information IsoMu24" OR title:${TITLE}IsoMu24\\ \\(* OR HLT_IsoMu24`,
+    ],
+    ['OR', `title:"High-Level Trigger path information OR" OR title:${TITLE}OR\\ \\(* OR HLT_OR`],
+    ['HLT_IsoMu*', 'HLT_IsoMu*'],
+    ['hlt_isomu24', 'HLT_isomu24'],
+  ])('sends and echoes %j as %s', async (path, query) => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run({ path }));
+    expect(paramsOf(http).get('q')).toBe(query);
+    expect(result.effectiveQuery).toBe(query);
+  });
+
+  it('never sends a bare term: every clause is a title term or an HLT_ name', async () => {
+    for (const path of [
+      'Jet*',
+      'OR',
+      'AlCa_EcalPi0',
+      'A',
+      'and*',
+      'HLTriggerFinalPath',
+      '300Tower0p5',
+      '3*',
+    ]) {
+      const { http } = serve(emptySearchBody);
+      await run({ path });
+      const clauses = (paramsOf(http).get('q') ?? '').split(' OR ');
+      expect(clauses.filter((clause) => !/^(?:title:|HLT_)/.test(clause))).toEqual([]);
+      disposeInstalledService();
+    }
+  });
+
+  it('suggests the plain forms, not the anchored query, to cern_opendata_search_records', async () => {
+    serve(emptySearchBody);
+    const result = await run({ path: 'AlCa_Nope' });
+    const suggestion =
+      'or call cern_opendata_search_records with query AlCa_Nope OR HLT_AlCa_Nope to search other record types.';
+    expect(success(result).notice).toBe(
+      `No CMS HLT path record matches "AlCa_Nope" or "HLT_AlCa_Nope"; path records cover CMS open data from 2011-2016. Try a prefix pattern such as HLT_IsoMu*, ${suggestion}`,
+    );
+    expect(success(result).effectiveQuery).toBe(anchored('AlCa_Nope'));
+    expect(textOf(result, 1)).toContain(suggestion);
+  });
+});
+
+describe('cern_opendata_search_trigger_paths advertised input schemas', () => {
+  /** The path pattern spelled with a lookahead: what the lookahead-free one must equal. */
+  const LOOKAHEAD_PATTERN = /^(?:HLT_[A-Za-z0-9_]+|(?!HLT_)[A-Za-z0-9][A-Za-z0-9_]*)\*?$/;
+  /** The released (0.1.1) path handling, frozen: HLT_ prepended when missing, its case fixed. */
+  const RELEASED_PATTERN = /^HLT_[A-Za-z0-9_]+\*?$/;
+  const releasedAccepts = (text: string) =>
+    RELEASED_PATTERN.test(/^hlt_/i.test(text) ? `HLT_${text.slice(4)}` : `HLT_${text}`);
+  /** The current preprocess (the HLT_ prefix case fixed), then the advertised pattern. */
+  const accepts = (pattern: RegExp, text: string) =>
+    pattern.test(/^hlt_/i.test(text) ? `HLT_${text.slice(4)}` : text);
+  /** Every string of 1 to 5 characters over the boundary characters, digit-led ones included. */
+  const boundaryStrings = () => {
+    const alphabet = ['G', 'H', 'I', 'K', 'L', 'M', 'S', 'T', 'U', 'l', 't', '_', '0', '*'];
+    let all: string[] = [];
+    let strings = [''];
+    for (let length = 1; length <= 5; length++) {
+      strings = strings.flatMap((prefix) => alphabet.map((char) => prefix + char));
+      all = all.concat(strings);
+    }
+    expect(strings).toHaveLength(alphabet.length ** 5);
+    return all;
+  };
+  const inputSchemaOf = (tool: (typeof allToolDefinitions)[number]) =>
+    z.toJSONSchema(tool.input, { io: 'input', unrepresentable: 'any' });
+  const advertisedPathPattern = () => {
+    const path = inputSchemaOf(searchTriggerPaths).properties?.path;
+    const pattern = typeof path === 'object' ? path.pattern : undefined;
+    expect(pattern).toBeDefined();
+    return new RegExp(String(pattern));
+  };
+
+  it('advertises a path pattern', () => {
+    expect(advertisedPathPattern().source).toMatch(/^\^\(\?:HLT_/);
+  });
+
+  it.each(allToolDefinitions.map((tool) => [tool.name, tool] as const))(
+    '%s advertises no lookahead or lookbehind in its input schema',
+    (_name, tool) => {
+      expect(JSON.stringify(inputSchemaOf(tool))).not.toMatch(/\(\?<?[=!]/);
+    },
+  );
+
+  it('advertises a path pattern that agrees with the lookahead one on every string up to 5 characters over the boundary characters', () => {
+    const pattern = advertisedPathPattern();
+    const disagreements = boundaryStrings().filter(
+      (text) => pattern.test(text) !== LOOKAHEAD_PATTERN.test(text),
+    );
+    expect(disagreements).toEqual([]);
+  });
+
+  it('accepts a digit-led path exactly when 0.1.1 did, and refuses only underscore-led paths 0.1.1 took', () => {
+    const pattern = advertisedPathPattern();
+    const strings = boundaryStrings();
+    const digitLed = strings.filter((text) => /^\d/.test(text));
+    expect(digitLed.filter((text) => accepts(pattern, text)).length).toBeGreaterThan(0);
+    expect(digitLed.filter((text) => accepts(pattern, text) !== releasedAccepts(text))).toEqual([]);
+    const lost = strings.filter((text) => releasedAccepts(text) && !accepts(pattern, text));
+    expect(lost.length).toBeGreaterThan(0);
+    expect(lost.filter((text) => !text.startsWith('_'))).toEqual([]);
+  });
+});
+
+describe('cern_opendata_search_trigger_paths keeps every match the released path handling found', () => {
+  /**
+   * The released path handling, frozen: trim, prepend HLT_ when missing or fix
+   * its case, check the pattern, strip one version suffix. Returns the `q` it
+   * sent, or undefined for a path it refused.
+   */
+  function releasedQuery(raw: string): string | undefined {
+    const pattern = /^HLT_[A-Za-z0-9_]+\*?$/;
+    const trimmed = raw.trim();
+    const path = /^hlt_/i.test(trimmed) ? `HLT_${trimmed.slice(4)}` : `HLT_${trimmed}`;
+    if (path.length > 200 || !pattern.test(path)) return;
+    const match = /_v(\d+|\*)$/i.exec(path);
+    if (!match?.[1]) return path;
+    const stripped = path.slice(0, match.index);
+    return pattern.test(stripped) ? stripped : path;
+  }
+
+  it.each([
+    'IsoMu24',
+    'HLT_IsoMu24',
+    'hlt_isomu24',
+    'HLT_IsoMu*',
+    'HLT_IsoMu24_v2',
+    '  HLT_IsoMu24  ',
+    'Hlt_IsoMu24',
+    'IsoMu*',
+    'hlt_isomu*',
+    'isomu24_v1',
+    'HLT_IsoMu24_v*',
+    'HLT_IsoMu24_v3_v4',
+    'HLT_HLT_IsoMu24',
+    'HLT_Mu_7_8',
+    'HLT_9',
+    'HLT_v3',
+    'AlCa_EcalPi0',
+    'OR',
+    '300Tower0p5',
+    '60Jet10',
+    '70Jet*',
+    '3*',
+    `HLT_${'a'.repeat(196)}`,
+  ])('%j is still accepted, and its query still holds the released one', async (path) => {
+    const released = releasedQuery(path);
+    expect(released).toBeDefined();
+    const { http } = serve(emptySearchBody);
+    expect((await run({ path })).isError).toBeFalsy();
+    const query = paramsOf(http).get('q') ?? '';
+    const forms = query.split(' OR ');
+    expect(forms).toContain(released);
   });
 });
 
@@ -313,6 +664,7 @@ describe('cern_opendata_search_trigger_paths result: the three HLT_IsoMu24 recor
       portal_url: 'https://opendata.cern.ch/record/2561',
       path: 'HLT_IsoMu24',
       dataset: 'SingleMu',
+      datasets: ['SingleMu'],
       year: '2011',
       first_seen: {
         run: 160404,
@@ -354,11 +706,38 @@ describe('cern_opendata_search_trigger_paths result: the three HLT_IsoMu24 recor
     const trigger = success(await run({ path: 'HLT_IsoMu24' })).triggers[2];
     expect(trigger).toMatchObject({ recid: '29551', year: '2016', parsed: true });
     expect(trigger).not.toHaveProperty('dataset');
+    expect(trigger).not.toHaveProperty('datasets');
     expect(trigger?.versions).toEqual([
       { version: 1, run_first: 273158, run_last: 274443 },
       { version: 2, run_first: 274445, run_last: 284044 },
     ]);
   });
+
+  it('lists the one dataset of a singular title in datasets as well as dataset', async () => {
+    serve(body());
+    const [trigger] = success(await run({ path: 'HLT_IsoMu24' })).triggers;
+    expect(trigger).toMatchObject({ dataset: 'SingleMu', datasets: ['SingleMu'] });
+  });
+
+  it.each([[['DoubleMu', 'DoubleMuParked']], [['HT', 'HTMHT', 'HTMHTParked']]])(
+    'maps a title naming the datasets %j: the path alone, every name in order, no dataset',
+    async (datasets) => {
+      serve(
+        searchBody(
+          [triggerHit('6666', 'HLT_Mu17_Mu8', ISOMU24_2011_ABSTRACT, { datasets, year: '2012' })],
+          { total: 1 },
+        ),
+      );
+      const [trigger] = success(await run({ path: 'HLT_Mu17_Mu8' })).triggers;
+      expect(trigger).toMatchObject({
+        recid: '6666',
+        path: 'HLT_Mu17_Mu8',
+        datasets,
+        year: '2012',
+      });
+      expect(trigger).not.toHaveProperty('dataset');
+    },
+  );
 
   it('returns the page, has_more and the records in the portal order', async () => {
     serve(body());
@@ -448,14 +827,20 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
       has_more: false,
     });
     expect(result.notice).toMatch(
-      /^No CMS HLT path record matches "HLT_Nope"; path records cover CMS open data from 2010[-–]2016\. Try a prefix pattern such as HLT_IsoMu\*, drop year, or call cern_opendata_search_records with query HLT_Nope to search other record types\.$/,
+      /^No CMS HLT path record matches "HLT_Nope"; path records cover CMS open data from 2011-2016\. Try a prefix pattern such as HLT_IsoMu\*, or call cern_opendata_search_records with query HLT_Nope to search other record types\.$/,
     );
   });
 
-  it('zero-result page names the year when one was given', async () => {
+  it('zero-result page names the year when one was given, and offers dropping it', async () => {
     serve(emptySearchBody);
     const result = success(await run({ path: 'HLT_Nope', year: 2013 }));
     expect(result.notice).toContain('matches "HLT_Nope" in 2013; path records cover');
+    expect(result.notice).toContain('Try a prefix pattern such as HLT_IsoMu*, drop year, or call');
+  });
+
+  it('zero-result page without a year never offers dropping one', async () => {
+    serve(emptySearchBody);
+    expect(success(await run({ path: 'HLT_Nope' })).notice).not.toContain('year');
   });
 
   it('zero-result page puts the version note before the no-match note', async () => {
@@ -469,8 +854,8 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
   it('zero-result page names the stripped path, not the typed one', async () => {
     serve(emptySearchBody);
     const result = success(await run({ path: 'nope_v2' }));
-    expect(result.notice).toContain('matches "HLT_nope"');
-    expect(result.notice).toContain('query HLT_nope to search other record types');
+    expect(result.notice).toContain('matches "nope" or "HLT_nope";');
+    expect(result.notice).toContain('query nope OR HLT_nope to search other record types');
   });
 
   it('under-cap page: fewer records than the cap, not truncated, no notice, totals match', async () => {
@@ -507,6 +892,32 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
     expect(result.notice).toBe(
       'Showing 21–30 of 95; call cern_opendata_search_trigger_paths again with page 4, or add year.',
     );
+  });
+
+  it('truncated page with year set: guidance names the next page and stops there', async () => {
+    serve(searchBody(triggerHits(1), { total: 84, hasNext: true }));
+    const result = success(await run({ path: 'HLT_Mu*', year: 2012, limit: 1 }));
+    expect(result).toMatchObject({ truncated: true, has_more: true });
+    expect(result.notice).toBe(
+      'Showing 1–1 of 84; call cern_opendata_search_trigger_paths again with page 2.',
+    );
+  });
+
+  it('on the last page with year set, routes to a longer path prefix only', async () => {
+    serve(searchBody(triggerHits(50), { total: 35_747 }));
+    const result = success(await run({ path: 'HLT_Mu*', year: 2012, limit: 50, page: 200 }));
+    expect(result.notice).toBe(
+      'Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Use a longer path prefix to reach the rest.',
+    );
+  });
+
+  it('on the last page at a limit that does not divide 10,000, with year set, never says add year', async () => {
+    serve(searchBody(triggerHits(30), { total: 35_747 }));
+    const result = success(await run({ path: 'HLT_Mu*', year: 2012, limit: 30, page: 333 }));
+    expect(result.notice).toContain(
+      'call cern_opendata_search_trigger_paths again with limit 10 and page 1000. Use a longer path prefix to reach the matches past 10,000.',
+    );
+    expect(result.notice).not.toContain('Add year');
   });
 
   it('truncated page: the version note comes first, then the paging guidance', async () => {
@@ -680,6 +1091,23 @@ describe('cern_opendata_search_trigger_paths errors on the wire', () => {
     expect(textOf(result)).toContain('reason page_window_exceeded');
     expect(http.calls).toHaveLength(1);
   });
+
+  it.each([
+    ['refused before any request', { page: 201, limit: 50 }, emptySearchBody, 200],
+    ['refused by the portal', { page: 5, limit: 50 }, WINDOW_ERROR_BODY, 400],
+  ])(
+    'page_window_exceeded with year set: the recovery asks for a longer prefix only (%s)',
+    async (_how, paging, body, status) => {
+      serve(body, { status });
+      const result = await run({ path: 'HLT_Mu*', year: 2012, ...paging });
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'page_window_exceeded' });
+      expect(hintOf(error)).toBe(
+        'Use a longer path prefix to narrow the match, then call cern_opendata_search_trigger_paths again from page 1.',
+      );
+      expect(textOf(result)).not.toContain('Add year');
+    },
+  );
 
   it.each([
     [201, 50],
@@ -897,6 +1325,46 @@ describe('cern_opendata_search_trigger_paths format', () => {
     expect(text).toContain('| V1 | 160404 | 163261 | L1_SingleMu12 |');
     expect(text).toContain('| V2 | 163269 | 165970 | L1_SingleMu12 |');
     expect(text).toContain('| V6 | 166346 | 166346 | L1_SingleMu12 |');
+  });
+
+  it('renders every dataset a title names in the heading and the fact line', async () => {
+    const { text } = await rendered([
+      triggerHit('6666', 'HLT_Mu17_Mu8', ISOMU24_2011_ABSTRACT, {
+        datasets: ['DoubleMu', 'DoubleMuParked'],
+        year: '2012',
+      }),
+      triggerHit('6700', 'HLT_HT250_AlphaT0p55', ISOMU24_2011_ABSTRACT, {
+        datasets: ['HT', 'HTMHT', 'HTMHTParked'],
+        year: '2012',
+      }),
+    ]);
+    expect(text).toContain('### HLT_Mu17_Mu8 (DoubleMu, DoubleMuParked datasets), 2012');
+    expect(text).toContain(
+      '**Recid:** 6666 · **Year:** 2012 · **Datasets:** DoubleMu, DoubleMuParked · **Portal:**',
+    );
+    expect(text).toContain('### HLT_HT250_AlphaT0p55 (HT, HTMHT, HTMHTParked datasets), 2012');
+    expect(text).toContain('**Datasets:** HT, HTMHT, HTMHTParked · **Portal:**');
+  });
+
+  it('keeps empty dataset names out of both surfaces', async () => {
+    const { data, text } = await rendered([
+      triggerHit('6800', 'HLT_X', ISOMU24_2011_ABSTRACT, {
+        datasets: ['A', '', 'B'],
+        year: '2012',
+      }),
+      triggerHit('6801', 'HLT_Y', ISOMU24_2011_ABSTRACT, { datasets: ['', ''], year: '2012' }),
+    ]);
+    expect(data.triggers[0]).toMatchObject({ path: 'HLT_X', datasets: ['A', 'B'] });
+    expect(data.triggers[0]).not.toHaveProperty('dataset');
+    expect(data.triggers[1]?.path).toBe('HLT_Y');
+    expect(data.triggers[1]).not.toHaveProperty('dataset');
+    expect(data.triggers[1]).not.toHaveProperty('datasets');
+    expect(text).toContain('### HLT_X (A, B datasets), 2012');
+    expect(text).toContain('**Recid:** 6800 · **Year:** 2012 · **Datasets:** A, B · **Portal:**');
+    expect(text).toContain('### HLT_Y, 2012');
+    expect(text).toContain(
+      '**Recid:** 6801 · **Year:** 2012 · **Dataset:** Not available · **Portal:**',
+    );
   });
 
   it('renders the abstract as fenced text beside the parsed fields, on every record', async () => {

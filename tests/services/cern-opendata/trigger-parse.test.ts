@@ -19,6 +19,7 @@ import {
   isoMu24Hit2016,
   TRIGGER_ABSTRACT_HTML,
 } from '../../fixtures/cern-opendata-upstream.js';
+import { expectLinearTime } from '../../fixtures/cpu-time.js';
 
 const TITLE = 'High-Level Trigger path information HLT_IsoMu24 (SingleMu dataset)';
 
@@ -36,6 +37,7 @@ describe('parseTrigger: the three HLT_IsoMu24 abstracts', () => {
     expect(parseTrigger(isoMu24Hit2011.metadata)).toEqual({
       path: 'HLT_IsoMu24',
       dataset: 'SingleMu',
+      datasets: ['SingleMu'],
       first_seen: {
         run: 160404,
         menu: '/cdaq/physics/Run2011/5e32/v4.2/HLT/V2',
@@ -132,13 +134,89 @@ describe('parseTrigger: title', () => {
     ['High-Level Trigger path information (Mu dataset)', '(Mu dataset)', undefined],
     ['High-Level Trigger path information HLT_X (a)b dataset)', 'HLT_X (a)b dataset)', undefined],
     ['High-Level Trigger path information HLT_X (Mu\ndataset)', 'HLT_X', 'Mu'],
-    ['High-Level Trigger path information HLT_X ( \n dataset)', 'HLT_X', ''],
+    ['High-Level Trigger path information HLT_X ( \n dataset)', 'HLT_X', undefined],
     ['High-Level Trigger path information   (Mu\ndataset)', ' ', 'Mu'],
   ])('reads %j as path %s and dataset %s', (title, path, dataset) => {
     const parsed = parseTrigger({ title });
     expect(parsed.path).toBe(path);
-    if (dataset === undefined) expect(parsed).not.toHaveProperty('dataset');
-    else expect(parsed.dataset).toBe(dataset);
+    if (dataset === undefined) {
+      expect(parsed).not.toHaveProperty('dataset');
+      expect(parsed).not.toHaveProperty('datasets');
+    } else {
+      expect(parsed.dataset).toBe(dataset);
+      expect(parsed.datasets).toEqual([dataset]);
+    }
+  });
+
+  it.each([
+    [
+      'High-Level Trigger path information HLT_Mu17_Mu8 (DoubleMu, DoubleMuParked datasets)',
+      'HLT_Mu17_Mu8',
+      ['DoubleMu', 'DoubleMuParked'],
+    ],
+    [
+      'High-Level Trigger path information HLT_HT250_AlphaT0p55 (HT, HTMHT, HTMHTParked datasets)',
+      'HLT_HT250_AlphaT0p55',
+      ['HT', 'HTMHT', 'HTMHTParked'],
+    ],
+    [
+      'High-Level Trigger path information HLT_Jet30 (LP_Jets1, LP_Jets2 datasets)',
+      'HLT_Jet30',
+      ['LP_Jets1', 'LP_Jets2'],
+    ],
+    ['  High-Level Trigger path information   HLT_X  (A,B   datasets)  ', 'HLT_X', ['A', 'B']],
+    ['High-Level Trigger path information HLT_X (A,\nB\ndatasets)', 'HLT_X', ['A', 'B']],
+    ['high-level trigger path information HLT_X (A, B DATASETS)', 'HLT_X', ['A', 'B']],
+  ])(
+    'reads %j as path %s and every dataset it names, with no single dataset',
+    (title, path, datasets) => {
+      const parsed = parseTrigger({ title });
+      expect(parsed.path).toBe(path);
+      expect(parsed.datasets).toEqual(datasets);
+      expect(parsed).not.toHaveProperty('dataset');
+    },
+  );
+
+  it.each([
+    ['an empty name between two commas', 'HLT_X (A,, B datasets)', ['A', 'B']],
+    ['a trailing comma', 'HLT_X (A, B, datasets)', ['A', 'B']],
+    ['a leading comma', 'HLT_X (, A, B datasets)', ['A', 'B']],
+  ])('drops %s from datasets: %j', (_name, body, datasets) => {
+    const parsed = parseTrigger({ title: `High-Level Trigger path information ${body}` });
+    expect(parsed.path).toBe('HLT_X');
+    expect(parsed.datasets).toEqual(datasets);
+    expect(parsed).not.toHaveProperty('dataset');
+  });
+
+  it.each([
+    ['a plural suffix of commas only', 'HLT_X (, datasets)'],
+    ['a plural suffix of spaces only', 'HLT_X (  datasets)'],
+    ['a singular suffix of spaces only', 'HLT_X (  dataset)'],
+    ['a singular suffix of a line break only', 'HLT_X ( \n dataset)'],
+  ])('reads %s as the path with neither dataset field', (_name, body) => {
+    const parsed = parseTrigger({ title: `High-Level Trigger path information ${body}` });
+    expect(parsed.path).toBe('HLT_X');
+    expect(parsed).not.toHaveProperty('dataset');
+    expect(parsed).not.toHaveProperty('datasets');
+  });
+
+  it('reads a datasets suffix naming one dataset as that dataset', () => {
+    const parsed = parseTrigger({
+      title: 'High-Level Trigger path information HLT_X (Jet datasets)',
+    });
+    expect(parsed).toMatchObject({ path: 'HLT_X', dataset: 'Jet', datasets: ['Jet'] });
+  });
+
+  it.each([
+    ['no space before the parenthesis', 'HLT_X(A, B datasets)'],
+    ['no space before datasets', 'HLT_X (A, Bdatasets)'],
+    ['a parenthesis inside the names', 'HLT_X (A, (B) datasets)'],
+    ['nothing but the suffix', '(A, B datasets)'],
+  ])('keeps a datasets suffix with %s in the path', (_name, body) => {
+    const parsed = parseTrigger({ title: `High-Level Trigger path information ${body}` });
+    expect(parsed.path).toBe(body);
+    expect(parsed).not.toHaveProperty('dataset');
+    expect(parsed).not.toHaveProperty('datasets');
   });
 
   it.each([
@@ -147,6 +225,10 @@ describe('parseTrigger: title', () => {
     ['the prefix alone', 'High-Level Trigger path information'],
     ['a path holding a line break', 'High-Level Trigger path information HLT\n_X (Mu dataset)'],
     [
+      'a path holding a line break before a datasets suffix',
+      'High-Level Trigger path information HLT\n_X (A, B datasets)',
+    ],
+    [
       'a dataset suffix holding a line break two spaces after the prefix',
       'High-Level Trigger path information  (Mu\ndataset)',
     ],
@@ -154,6 +236,7 @@ describe('parseTrigger: title', () => {
     const parsed = parseTrigger({ title });
     expect(parsed).not.toHaveProperty('path');
     expect(parsed).not.toHaveProperty('dataset');
+    expect(parsed).not.toHaveProperty('datasets');
     expect(parsed.parsed).toBe(false);
   });
 });
@@ -270,6 +353,109 @@ describe('parseTrigger: seen lines', () => {
     );
     expect(parsed.first_seen?.menu_recid).toBe('1');
   });
+
+  it('takes a prefixed recid from a record link, relative or absolute', () => {
+    expect(
+      parseTrigger(
+        meta(
+          lines(
+            'first seen online on run 6 (<a href="/record/cms-93001">/m/V1</a>)',
+            'last seen online on run 7 (<a href="https://opendata.cern.ch/record/cms-93002?ln=en">/m/V2</a>)',
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      first_seen: { run: 6, menu: '/m/V1', menu_recid: 'cms-93001' },
+      last_seen: { run: 7, menu: '/m/V2', menu_recid: 'cms-93002' },
+    });
+  });
+
+  it('lowercases the experiment prefix of a record link, as the portal stores recids', () => {
+    expect(
+      parseTrigger(
+        meta(lines('first seen online on run 6 (<a href="/RECORD/CMS-93001">/m/V1</a>)')),
+      ).first_seen,
+    ).toEqual({ run: 6, menu: '/m/V1', menu_recid: 'cms-93001' });
+  });
+
+  it('drops leading zeros from a record link, as the recid input does', () => {
+    expect(
+      parseTrigger(
+        meta(
+          lines(
+            'first seen online on run 6 (<a href="/record/CMS-093001">/m/V1</a>)',
+            'last seen online on run 7 (<a href="https://opendata.cern.ch/record/006004">/m/V2</a>)',
+            'See also the full list of triggers: <a href="/record/0003000">list</a>',
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      first_seen: { run: 6, menu: '/m/V1', menu_recid: 'cms-93001' },
+      last_seen: { run: 7, menu: '/m/V2', menu_recid: '6004' },
+      trigger_list_recid: '3000',
+    });
+  });
+
+  it('takes no recid from a record link whose number is all zeros', () => {
+    for (const href of ['/record/0', '/record/cms-000']) {
+      const parsed = parseTrigger(
+        meta(lines(`first seen online on run 6 (<a href="${href}">/m/V1</a>)`)),
+      );
+      expect(parsed.first_seen, href).toEqual({ run: 6, menu: '/m/V1' });
+    }
+  });
+
+  it('takes no recid from a record link that only resembles a prefixed one', () => {
+    for (const href of ['/record/cms-', '/record/cms_93001', '/record/abcdefghijklmnopq-1']) {
+      const parsed = parseTrigger(
+        meta(lines(`first seen online on run 6 (<a href="${href}">/m/V1</a>)`)),
+      );
+      expect(parsed.first_seen, href).toEqual({ run: 6, menu: '/m/V1' });
+    }
+  });
+
+  it('takes a recid of up to 12 digits from a record link, leading zeros not counted', () => {
+    for (const [href, recid] of [
+      ['/record/123456789012', '123456789012'],
+      ['/record/cms-123456789012', 'cms-123456789012'],
+      ['/record/000123456789012', '123456789012'],
+    ]) {
+      const parsed = parseTrigger(
+        meta(lines(`first seen online on run 6 (<a href="${href}">/m/V1</a>)`)),
+      );
+      expect(parsed.first_seen, href).toEqual({ run: 6, menu: '/m/V1', menu_recid: recid });
+    }
+  });
+
+  it('takes no recid from a record link of 13 or more digits, which the recid input refuses', () => {
+    for (const href of [
+      '/record/1234567890123',
+      '/record/cms-1234567890123',
+      '/record/12345678901234567',
+    ]) {
+      const parsed = parseTrigger(
+        meta(
+          lines(
+            `first seen online on run 6 (<a href="${href}">/m/V1</a>)`,
+            `See also the full list of triggers: <a href="${href}">list</a>`,
+          ),
+        ),
+      );
+      expect(parsed.first_seen, href).toEqual({ run: 6, menu: '/m/V1' });
+      expect(parsed.trigger_list_recid, href).toBeUndefined();
+    }
+  });
+
+  it('skips a 13-digit record link for the next link in the same line', () => {
+    const parsed = parseTrigger(
+      meta(
+        lines(
+          'See also the full list of triggers: <a href="/record/1234567890123">x</a> <a href="/record/30300">list</a>',
+        ),
+      ),
+    );
+    expect(parsed.trigger_list_recid).toBe('30300');
+  });
 });
 
 describe('parseTrigger: version lines', () => {
@@ -323,6 +509,14 @@ describe('parseTrigger: trigger-list link', () => {
       ),
     );
     expect(parsed.trigger_list_recid).toBe('10');
+  });
+
+  it('takes a prefixed trigger-list recid', () => {
+    expect(
+      parseTrigger(
+        meta(lines('See also the full list of triggers: <a href="/record/cms-94000">list</a>')),
+      ).trigger_list_recid,
+    ).toBe('cms-94000');
   });
 
   it('is absent when the See also line links no record', () => {
@@ -382,41 +576,76 @@ describe('parseTrigger: malformed metadata never throws', () => {
 });
 
 describe('parseTrigger: long and unclosed text is read in linear time', () => {
-  /** `run`'s result and the milliseconds it took; the bound is loose so a busy machine does not flake. */
-  const timed = <T>(run: () => T) => {
-    const started = performance.now();
-    const value = run();
-    return { ms: performance.now() - started, value };
-  };
+  const PREFIX = 'High-Level Trigger path information';
+  const parseTitle = (title: string) => parseTrigger({ title });
+  const parseAbstract = (description: string) =>
+    parseTrigger({ title: TITLE, abstract: { description } });
+  const SPACE_SIZES = [2_500, 10_000, 40_000] as const;
 
   it('reads a title whose path holds 40,000 spaces', () => {
-    const path = `x${' '.repeat(40_000)}y`;
-    const { ms, value } = timed(() =>
-      parseTrigger({ title: `High-Level Trigger path information ${path}` }),
-    );
-    expect(ms).toBeLessThan(250);
-    expect(value.path).toBe(path);
+    const make = (n: number) => `${PREFIX} x${' '.repeat(n)}y`;
+    const value = parseTitle(make(40_000));
+    expect(value.path).toBe(`x${' '.repeat(40_000)}y`);
     expect(value).not.toHaveProperty('dataset');
+    expectLinearTime(make, parseTitle, { sizes: SPACE_SIZES, maxMs: 250 });
   });
 
   it('reads a dataset suffix padded with 40,000 spaces', () => {
-    const spaces = ' '.repeat(40_000);
-    const { ms, value } = timed(() =>
-      parseTrigger({
-        title: `High-Level Trigger path information HLT_X${spaces}(Mu${spaces}dataset)`,
-      }),
-    );
-    expect(ms).toBeLessThan(250);
-    expect(value).toMatchObject({ path: 'HLT_X', dataset: 'Mu' });
+    const make = (n: number) => {
+      const spaces = ' '.repeat(n);
+      return `${PREFIX} HLT_X${spaces}(Mu${spaces}dataset)`;
+    };
+    expect(parseTitle(make(40_000))).toMatchObject({ path: 'HLT_X', dataset: 'Mu' });
+    expectLinearTime(make, parseTitle, { sizes: SPACE_SIZES, maxMs: 250 });
   });
 
-  it.each([
-    ['20,000 block tags with no closing >', '<p'.repeat(20_000)],
-    ['20,000 anchors with no closing >', '<a '.repeat(20_000)],
-    ['20,000 tag openers with no closing >', '<'.repeat(20_000)],
-  ])('reads an abstract of %s', (_shape, description) => {
-    const { ms, value } = timed(() => parseTrigger({ title: TITLE, abstract: { description } }));
-    expect(ms).toBeLessThan(250);
-    expect(value).toMatchObject({ parsed: false, versions: [] });
+  it.each<[string, (count: number) => string]>([
+    ['20,000 block tags with no closing >', (n) => '<p'.repeat(n)],
+    ['20,000 anchors with no closing >', (n) => '<a '.repeat(n)],
+    ['20,000 tag openers with no closing >', (n) => '<'.repeat(n)],
+  ])('reads an abstract of %s', (_shape, make) => {
+    expect(parseAbstract(make(20_000))).toMatchObject({ parsed: false, versions: [] });
+    expectLinearTime(make, parseAbstract, { sizes: [1_250, 5_000, 20_000], maxMs: 250 });
+  });
+
+  it.each<[string, (length: number) => string, (length: number) => object]>([
+    [
+      'a datasets suffix of comma-separated names',
+      (n) => `${PREFIX} HLT_X (${'A, '.repeat(n / 3)}B datasets)`,
+      (n) => ({ path: 'HLT_X', datasets: [...Array<string>(n / 3).fill('A'), 'B'] }),
+    ],
+    [
+      'a datasets suffix padded with spaces',
+      (n) => {
+        const spaces = ' '.repeat(n / 3);
+        return `${PREFIX} HLT_X${spaces}(A,${spaces}B${spaces}datasets)`;
+      },
+      () => ({ path: 'HLT_X', datasets: ['A', 'B'] }),
+    ],
+    [
+      'a run of ( before the closing word',
+      (n) => `${PREFIX} HLT_X ${'('.repeat(n)} datasets)`,
+      (n) => ({ path: `HLT_X ${'('.repeat(n)} datasets)` }),
+    ],
+    [
+      'a long name closed by ) before the closing word',
+      (n) => `${PREFIX} HLT_X (${'a'.repeat(n)}) datasets)`,
+      (n) => ({ path: `HLT_X (${'a'.repeat(n)}) datasets)` }),
+    ],
+    [
+      'line breaks between the prefix and a datasets suffix',
+      (n) => `${PREFIX}${'\n'.repeat(n)}(A,\nB datasets)`,
+      () => ({}),
+    ],
+    [
+      'commas and no suffix',
+      (n) => `${PREFIX} HLT_X ${','.repeat(n)}`,
+      (n) => ({ path: `HLT_X ${','.repeat(n)}` }),
+    ],
+  ])('reads a title of %s in time linear in its length', (_shape, make, expected) => {
+    const parsed = parseTrigger({ title: make(20_001) });
+    const { parsed: _flag, versions: _versions, ...titleFields } = parsed;
+    expect(titleFields).toEqual(expected(20_001));
+    expectLinearTime(make, parseTitle, { sizes: [5_001, 20_001, 80_001], maxMs: 50 });
   });
 });

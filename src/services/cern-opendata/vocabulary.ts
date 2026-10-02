@@ -7,13 +7,20 @@
  */
 
 /** Filter parameters that carry a canonical vocabulary table. */
-export type VocabularyParam =
-  | 'type'
-  | 'experiment'
-  | 'collision_energy'
-  | 'collision_type'
-  | 'file_type'
-  | 'availability';
+export const VOCABULARY_PARAMS = [
+  'type',
+  'experiment',
+  'collision_energy',
+  'collision_type',
+  'file_type',
+  'availability',
+  'category',
+  'magnet_polarity',
+  'stripping_stream',
+  'stripping_version',
+] as const;
+
+export type VocabularyParam = (typeof VOCABULARY_PARAMS)[number];
 
 /** Topics served by `cern_opendata_list_reference`, in display order. */
 export const REFERENCE_TOPICS = [
@@ -23,6 +30,8 @@ export const REFERENCE_TOPICS = [
   'collision_types',
   'file_types',
   'availability',
+  'categories',
+  'lhcb',
   'identifiers',
   'query_syntax',
   'licensing',
@@ -52,6 +61,10 @@ export const PARAM_TOPIC: Record<VocabularyParam, ReferenceTopic> = {
   collision_type: 'collision_types',
   file_type: 'file_types',
   availability: 'availability',
+  category: 'categories',
+  magnet_polarity: 'lhcb',
+  stripping_stream: 'lhcb',
+  stripping_version: 'lhcb',
 };
 
 const FORMAT_LABEL = 'format label used by the portal';
@@ -220,6 +233,102 @@ const AVAILABILITY_MEANINGS: Record<string, string> = {
   requested: 'Record level: a transfer of the files from tape has been requested.',
 };
 
+/**
+ * Physics categories of datasets (`categories.primary`, and `Primary::Secondary`
+ * with `categories.secondary`), each with the experiments whose datasets use it,
+ * from the live `category` facet on the snapshot date.
+ */
+const CATEGORY_EXPERIMENTS: Record<string, readonly string[]> = {
+  '2 Fermion': ['DELPHI'],
+  '4 Fermion': ['DELPHI'],
+  'B physics and Quarkonia': ['CMS'],
+  'Beyond 2 Generations': ['CMS'],
+  EEGG: ['DELPHI'],
+  Exotica: ['CMS', 'ATLAS'],
+  'Exotica::Contact Interaction': ['CMS'],
+  'Exotica::Dark Matter': ['CMS', 'ATLAS'],
+  'Exotica::Excited Fermions': ['CMS'],
+  'Exotica::Extra Dimensions': ['CMS'],
+  'Exotica::Gravitons': ['CMS'],
+  'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos': ['CMS'],
+  'Exotica::Heavy Gauge Bosons': ['CMS'],
+  'Exotica::Leptoquarks': ['CMS'],
+  'Exotica::Miscellaneous': ['CMS', 'ATLAS'],
+  'Exotica::Resonances': ['CMS'],
+  'Heavy-Ion Physics': ['CMS', 'ATLAS'],
+  Higgs: ['DELPHI'],
+  'Higgs Physics': ['CMS', 'ATLAS'],
+  'Higgs Physics::Beyond Standard Model': ['CMS'],
+  'Higgs Physics::Standard Model': ['CMS', 'ATLAS'],
+  Miscellaneous: ['CMS'],
+  'Physics Modelling': ['CMS'],
+  Pileup: ['CMS'],
+  'Special Samples': ['DELPHI'],
+  'Standard Model': ['ATLAS'],
+  'Standard Model::Drell-Yan': ['ATLAS'],
+  'Standard Model::ElectroWeak': ['ATLAS'],
+  'Standard Model::Top physics': ['ATLAS'],
+  'Standard Model Physics': ['CMS', 'ATLAS'],
+  'Standard Model Physics::Drell-Yan': ['CMS', 'ATLAS'],
+  'Standard Model Physics::ElectroWeak': ['CMS', 'ATLAS'],
+  'Standard Model Physics::Forward and Small-x QCD Physics': ['CMS'],
+  'Standard Model Physics::Minimum Bias': ['CMS'],
+  'Standard Model Physics::QCD': ['CMS', 'ATLAS'],
+  'Standard Model Physics::Top physics': ['CMS', 'ATLAS'],
+  Supersymmetry: ['CMS'],
+  Susy: ['DELPHI'],
+  TechniColor: ['DELPHI'],
+};
+
+/** What a caller needs beyond the experiments for a few categories. */
+const CATEGORY_NOTES: Record<string, string> = {
+  'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos':
+    'One value: the comma belongs to it, and Righ-Handed is the portal spelling.',
+  'Heavy-Ion Physics':
+    'CMS datasets also carry it with a leading space; the filter sends both spellings.',
+  Higgs: 'A different value from Higgs Physics.',
+  'Higgs Physics': 'A different value from Higgs.',
+  'Standard Model': 'A different value from Standard Model Physics.',
+  'Standard Model Physics': 'A different value from Standard Model.',
+  Supersymmetry: 'A different value from Susy.',
+  Susy: 'A different value from Supersymmetry.',
+};
+
+const MAGNET_POLARITY_MEANINGS: Record<string, string> = {
+  MagDown: "magnet_polarity: data taken with the LHCb dipole magnet's field pointing down.",
+  MagUp: "magnet_polarity: data taken with the LHCb dipole magnet's field pointing up.",
+};
+
+const STRIPPING_STREAM = 'stripping_stream: an LHCb stripping (offline event selection) stream.';
+const STRIPPING_STREAM_MEANINGS: Record<string, string> = {
+  BHADRON: STRIPPING_STREAM,
+  BHADRONCOMPLETEEVENT: STRIPPING_STREAM,
+  CHARM: STRIPPING_STREAM,
+  'CHARM.MDST': STRIPPING_STREAM,
+  CHARMCOMPLETEEVENT: STRIPPING_STREAM,
+  COMMONPARTICLES: `${STRIPPING_STREAM} Only stripping documentation carries it, no dataset.`,
+  DIMUON: STRIPPING_STREAM,
+  EW: STRIPPING_STREAM,
+  LEPTONIC: STRIPPING_STREAM,
+  RADIATIVE: STRIPPING_STREAM,
+  SEMILEPTONIC: STRIPPING_STREAM,
+};
+
+const STRIPPING_VERSIONS = [
+  'stripping21',
+  'stripping21r0p1',
+  'stripping21r0p2',
+  'stripping21r1',
+  'stripping21r1p1',
+  'stripping21r1p2',
+  'stripping24r2',
+  'stripping28r2',
+  'stripping28r2p2',
+  'stripping29r2',
+  'stripping29r2p1',
+  'stripping29r2p3',
+];
+
 /** The six primaries search can serve; sent as the default `type` (Glossary excluded). */
 export const SEARCHABLE_TYPE_PRIMARIES = [
   'Dataset',
@@ -233,6 +342,21 @@ export const SEARCHABLE_TYPE_PRIMARIES = [
 /** Both upstream spellings the canonical `PbPb` collision type expands to. */
 export const PBPB_SPELLINGS = ['PbPb', 'Pb-Pb'] as const;
 
+/** Both upstream spellings the canonical `Heavy-Ion Physics` category expands to; CMS stores one with a leading space. */
+export const HEAVY_ION_SPELLINGS = ['Heavy-Ion Physics', ' Heavy-Ion Physics'] as const;
+
+/**
+ * Canonical values the corpus stores under more than one spelling. A filter on
+ * one sends every spelling (multi-value is OR) and echoes the expansion. Maps,
+ * so a caller value naming an object member (`constructor`) expands to nothing.
+ */
+export const SPELLING_EXPANSIONS: Partial<
+  Record<VocabularyParam, ReadonlyMap<string, readonly string[]>>
+> = {
+  collision_type: new Map([['PbPb', PBPB_SPELLINGS]]),
+  category: new Map([['Heavy-Ion Physics', HEAVY_ION_SPELLINGS]]),
+};
+
 const CANONICAL_VALUES: Record<VocabularyParam, readonly string[]> = {
   type: Object.keys(RECORD_TYPE_MEANINGS),
   experiment: Object.keys(EXPERIMENT_MEANINGS),
@@ -240,6 +364,10 @@ const CANONICAL_VALUES: Record<VocabularyParam, readonly string[]> = {
   collision_type: Object.keys(COLLISION_TYPE_MEANINGS),
   file_type: Object.keys(FILE_TYPE_MEANINGS),
   availability: Object.keys(AVAILABILITY_MEANINGS),
+  category: Object.keys(CATEGORY_EXPERIMENTS),
+  magnet_polarity: Object.keys(MAGNET_POLARITY_MEANINGS),
+  stripping_stream: Object.keys(STRIPPING_STREAM_MEANINGS),
+  stripping_version: STRIPPING_VERSIONS,
 };
 
 /** Spellings that do not reduce to a canonical value by case and whitespace alone. */
@@ -254,7 +382,7 @@ function matchKey(value: string): string {
 }
 
 const TABLES = Object.fromEntries(
-  (Object.keys(CANONICAL_VALUES) as VocabularyParam[]).map((param) => {
+  VOCABULARY_PARAMS.map((param) => {
     const table = new Map<string, string>();
     for (const value of CANONICAL_VALUES[param]) table.set(matchKey(value), value);
     for (const [alias, value] of Object.entries(ALIASES[param] ?? {})) table.set(alias, value);
@@ -262,12 +390,15 @@ const TABLES = Object.fromEntries(
   }),
 ) as Record<VocabularyParam, Map<string, string>>;
 
+/** Parameters whose values are `Primary` or `Primary::Secondary`. */
+const PAIRED_PARAMS: ReadonlySet<VocabularyParam> = new Set(['type', 'category']);
+
 /**
  * The first `/`, `:` or `::` between primary and secondary becomes `::`, the
  * whitespace around it dropped. Found with one scan and trims, so the time is
  * linear however long the whitespace runs.
  */
-function normalizeTypeSeparator(value: string): string {
+function normalizePairSeparator(value: string): string {
   const at = value.search(/[:/]/);
   if (at < 0) return value;
   const width = value.startsWith('::', at) ? 2 : 1;
@@ -281,7 +412,7 @@ function normalizeTypeSeparator(value: string): string {
  */
 export function canonicalize(param: VocabularyParam, raw: string): string {
   const trimmed = raw.trim();
-  const keyed = param === 'type' ? normalizeTypeSeparator(trimmed) : trimmed;
+  const keyed = PAIRED_PARAMS.has(param) ? normalizePairSeparator(trimmed) : trimmed;
   return TABLES[param].get(matchKey(keyed)) ?? trimmed;
 }
 
@@ -336,6 +467,11 @@ function entriesOf(meanings: Record<string, string>): ReferenceEntry[] {
   return Object.entries(meanings).map(([value, meaning]) => ({ value, meaning }));
 }
 
+function describeCategory(value: string, experiments: readonly string[]): string {
+  const note = CATEGORY_NOTES[value];
+  return `Experiments: ${experiments.join(', ')}.${note ? ` ${note}` : ''}`;
+}
+
 /** Every reference table, in {@link REFERENCE_TOPICS} order. */
 export const REFERENCE_TABLES: readonly ReferenceTable[] = [
   {
@@ -387,13 +523,35 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
     ],
   },
   {
+    topic: 'categories',
+    summary:
+      'Static snapshot dated 2026-10-01 of the category filter values: the physics categories of simulated datasets, a primary or Primary::Secondary combined with OR, each with the experiments whose datasets carry it. The live category facet of cern_opendata_search_records is the source of truth; its 10-value cap hides Supersymmetry and Standard Model Physics on an unfiltered search. Case and the separator are normalized (higgs physics/standard model becomes Higgs Physics::Standard Model). Higgs and Higgs Physics, Susy and Supersymmetry, and Standard Model and Standard Model Physics are distinct values used by different experiments.',
+    entries: Object.entries(CATEGORY_EXPERIMENTS).map(([value, experiments]) => ({
+      value,
+      meaning: describeCategory(value, experiments),
+    })),
+  },
+  {
+    topic: 'lhcb',
+    summary:
+      'Static snapshot dated 2026-10-01 of the values for the LHCb filters magnet_polarity, stripping_stream and stripping_version; the live facets of cern_opendata_search_records are the source of truth. Only LHCb collision datasets carry a magnet polarity; the stripping filters also match LHCb stripping documentation (Documentation::Stripping). Input case is normalized (magdown becomes MagDown, dimuon becomes DIMUON, Stripping21r1 becomes stripping21r1).',
+    entries: [
+      ...entriesOf(MAGNET_POLARITY_MEANINGS),
+      ...entriesOf(STRIPPING_STREAM_MEANINGS),
+      ...STRIPPING_VERSIONS.map((value) => ({
+        value,
+        meaning: 'stripping_version: an LHCb stripping (offline event selection) version.',
+      })),
+    ],
+  },
+  {
     topic: 'identifiers',
     summary: 'Identifier forms the tools accept, with their accepted spellings.',
     entries: [
       {
         value: 'recid',
         meaning:
-          'Digits (6004); also recid:6004 or https://opendata.cern.ch/record/6004. Taken by cern_opendata_get_records, cern_opendata_list_files, cern_opendata_get_analysis_env, cern_opendata_get_validated_runs and the cern-opendata://record/{recid} resource.',
+          'Up to 12 digits (6004), or an experiment prefix and digits for newer records (atlas-160006); also recid:6004 or https://opendata.cern.ch/record/6004. Leading zeros are ignored and the prefix is read in any case. Taken by cern_opendata_get_records, cern_opendata_list_files, cern_opendata_get_analysis_env, cern_opendata_get_validated_runs and the cern-opendata://record/{recid} resource.',
       },
       {
         value: 'DOI',
@@ -413,12 +571,12 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
       {
         value: 'file-index key',
         meaning:
-          'An indexes[].key from cern_opendata_list_files (ending _file_index.json; the .txt spelling is accepted). Taken by cern_opendata_list_files as index.',
+          'An indexes[].key from cern_opendata_list_files, matched exactly: usually ending _file_index.json, or a name such as training_files.json; the .txt spelling is accepted. Taken by cern_opendata_list_files as index.',
       },
       {
         value: 'trigger path',
         meaning:
-          'HLT_IsoMu24, or a prefix pattern HLT_IsoMu*. A trailing _v<n> is stripped and a missing HLT_ prefix added. Taken by cern_opendata_search_trigger_paths.',
+          'HLT_IsoMu24 or AlCa_EcalPi0, or a prefix pattern HLT_IsoMu*. A trailing _v<n> is stripped, and a name without the HLT_ prefix is matched against record path names in the case given and also searched with HLT_ added. Taken by cern_opendata_search_trigger_paths.',
       },
       {
         value: 'run period',
@@ -430,13 +588,18 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
   {
     topic: 'query_syntax',
     summary:
-      'Forms for the query parameter of cern_opendata_search_records: OpenSearch query_string with default operator AND over the title (boosted) and every field. Invalid syntax fails with invalid_query.',
+      'Forms for the query parameter of cern_opendata_search_records: OpenSearch query_string with default operator AND over the title (boosted) and every field. A query with an unbalanced parenthesis, range bracket or double quote, or ending in a backslash, fails with invalid_query before it is sent; inside a range such as [a TO b], parentheses and brackets are part of the bound and need no balancing. The portal rejects other invalid syntax with invalid_query, or on some requests with HTTP 500, reported as query_server_error.',
     entries: [
       {
         value: 'muon tau',
         meaning: 'Every term must match (default operator AND).',
       },
       { value: '"exact phrase"', meaning: 'Phrase match.' },
+      {
+        value: 'muon \\(',
+        meaning:
+          'A backslash makes the next character literal; escape a lone parenthesis, bracket, brace or double quote this way.',
+      },
       { value: 'a OR b, NOT a, (a OR b) c', meaning: 'Boolean operators and grouping.' },
       { value: 'title:"..."', meaning: 'Match within the title.' },
       {
@@ -458,7 +621,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
       {
         value: 'HLT_IsoMu*',
         meaning:
-          'Trailing wildcard on a bare term; a field-qualified wildcard such as title:HLT_IsoMu* does not match.',
+          'Trailing wildcard on a bare term. title is stored as one whole-title term, so title:HLT_IsoMu* matches nothing (trigger titles begin "High-Level Trigger path information").',
       },
       {
         value: '/DoubleMuParked/Run2012B-22Jan2013-v1/AOD',
@@ -505,7 +668,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
   {
     topic: 'run_periods',
     summary:
-      'Static snapshot dated 2026-10-01 of the CMS run periods with validated-run lists and the variants each has. cern_opendata_get_validated_runs reads the live CMS-Validated-Runs collection and is the source of truth, so a period added upstream after that date is still found by the live tool. A bare 2012B matches Run2012B. CMS trigger path records cover 2010-2016.',
+      'Static snapshot dated 2026-10-01 of the CMS run periods with validated-run lists and the variants each has. cern_opendata_get_validated_runs reads the live CMS-Validated-Runs collection and is the source of truth, so a period added upstream after that date is still found by the live tool. A bare 2012B matches Run2012B. CMS trigger path records cover 2011-2016.',
     entries: RUN_PERIOD_SNAPSHOT.map((snapshot) => ({
       value: snapshot.period,
       meaning: describeRunPeriod(snapshot),

@@ -109,7 +109,7 @@ describe('definition smoke test', () => {
   it('runs the reference tool end to end and returns every topic', async () => {
     const result = await listReference.handler(listReference.input.parse({}), createMockContext());
     expect(result).toEqual(expect.schemaMatching(listReference.output));
-    expect(result.topics).toHaveLength(10);
+    expect(result.topics).toHaveLength(12);
     expect(listReference.format?.(result)[0]).toMatchObject({ type: 'text' });
   });
 

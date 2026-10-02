@@ -1,12 +1,15 @@
 /**
  * @fileoverview The Record output schema shared by `cern_opendata_get_records`
  * (one entry of `records[]`) and the `cern-opendata://record/{recid}`
- * resource. Mirrors `RecordShape` in the service types; strings are relayed as
- * the portal sent them, and absent upstream fields are omitted, never defaulted.
+ * resource, and the record type schema and its text rendering shared with
+ * `cern_opendata_search_records` and `cern_opendata_get_analysis_env`. Mirrors
+ * `RecordShape` in the service types; strings are relayed as the portal sent
+ * them, and absent upstream fields are omitted, never defaulted.
  * @module mcp-server/record-schema
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { inline, NOT_AVAILABLE } from '@/services/cern-opendata/text.js';
 
 /** File counts by availability state, `{ online?, on_demand? }`. */
 export const AvailabilityCountsSchema = z
@@ -33,6 +36,16 @@ export const RecordTypeSchema = z
   })
   .describe('Record type as the portal classifies it.');
 
+/**
+ * A record type for an inline slot, `Dataset (Collision, Derived)`: the
+ * secondaries follow the primary in parentheses, and `Not available` stands in
+ * for a primary the record does not state, secondaries still listed.
+ */
+export function renderRecordType({ primary, secondary }: z.infer<typeof RecordTypeSchema>): string {
+  const label = primary === '' ? NOT_AVAILABLE : inline(primary);
+  return secondary.length > 0 ? `${label} (${secondary.map(inline).join(', ')})` : label;
+}
+
 /** The Record shape (one `cern_opendata_get_records` entry, or the record resource). */
 export const RecordSchema = z
   .object({
@@ -42,7 +55,12 @@ export const RecordSchema = z
     kind: z
       .enum(['record', 'doc'])
       .describe('doc for documentation and news pages (they carry a slug), record otherwise.'),
-    recid: z.string().optional().describe('Record id (digits); absent on docs and news.'),
+    recid: z
+      .string()
+      .optional()
+      .describe(
+        'Record id: digits (6004), or an experiment prefix and digits (atlas-160006); absent on docs and news.',
+      ),
     slug: z.string().optional().describe('Documentation or news slug; absent on records.'),
     matched_inputs: z
       .array(z.string().describe('One input id.'))
@@ -126,21 +144,32 @@ export const RecordSchema = z
       .string()
       .optional()
       .describe('What the record is used with, HTML as the portal sent it.'),
+    pileup_html: z
+      .string()
+      .optional()
+      .describe(
+        'Simulated data: how pile-up events were mixed in, HTML as the portal sent it; the pile-up datasets are in links with source pileup.',
+      ),
     links: z
       .array(
         z
           .object({
             source: z
-              .enum(['abstract', 'note', 'usage', 'validation', 'use_with', 'software'])
+              .enum(['abstract', 'note', 'usage', 'validation', 'use_with', 'pileup', 'software'])
               .describe('The metadata section the link came from.'),
             recid: z.string().optional().describe('Linked record id.'),
             url: z.string().optional().describe('Linked URL; portal-relative paths start with /.'),
-            description: z.string().optional().describe('Link text as the portal states it.'),
+            description: z
+              .string()
+              .optional()
+              .describe(
+                'Link text as the portal states it; for a pile-up link, the pile-up dataset path.',
+              ),
           })
           .describe('One link.'),
       )
       .describe(
-        'Links from the abstract, note, usage, validation and use_with sections and software links; empty when none.',
+        'Links from the abstract, note, usage, validation, use_with and pile-up sections and software links; empty when none.',
       ),
     relations: z
       .array(
@@ -192,7 +221,54 @@ export const RecordSchema = z
         json_url: z.string().optional().describe('Dataset semantics (JSON).'),
       })
       .optional()
-      .describe('Variable descriptions for the dataset, on the portal.'),
+      .describe(
+        'Pages describing the dataset variables, on the portal; a record with an inline dictionary carries variables instead.',
+      ),
+    variables: z
+      .array(
+        z
+          .object({
+            variable: z.string().describe('Variable or branch name, as the portal states it.'),
+            type: z.string().optional().describe('Data type, such as float or std::vector<float>.'),
+            unit: z.string().optional().describe('Unit, when the record states one.'),
+            description_html: z
+              .string()
+              .optional()
+              .describe('What the variable holds, HTML as the portal sent it.'),
+          })
+          .describe('One variable.'),
+      )
+      .optional()
+      .describe('The variable dictionary of a derived or event-level dataset, every entry.'),
+    category: z
+      .object({
+        primary: z
+          .string()
+          .describe(
+            'Physics category, such as Standard Model Physics or Higgs, exactly as stored (the search category filter).',
+          ),
+        secondary: z
+          .array(z.string().describe('One subcategory.'))
+          .describe('Subcategories, such as Top physics; empty when none.'),
+        source: z.string().optional().describe('Who assigned the category, when stated.'),
+      })
+      .optional()
+      .describe('Physics category of the dataset.'),
+    keywords: z
+      .array(z.string().describe('One keyword.'))
+      .optional()
+      .describe('Keywords, case as stored (the search keywords filter).'),
+    magnet_polarity: z
+      .string()
+      .optional()
+      .describe('LHCb: magnet polarity during data taking, MagDown or MagUp.'),
+    stripping: z
+      .object({
+        stream: z.string().optional().describe('Stripping stream, such as DIMUON.'),
+        version: z.string().optional().describe('Stripping version, such as stripping21r1.'),
+      })
+      .optional()
+      .describe('LHCb datasets and stripping pages: the stripping stream and version.'),
     short_description: z
       .string()
       .optional()
@@ -201,16 +277,28 @@ export const RecordSchema = z
     body: z
       .string()
       .optional()
-      .describe('Docs and news: the page body (markdown), cut at 30,000 characters.'),
+      .describe(
+        'Docs and news: the page body (markdown), at most 30,000 characters (UTF-16 code units) from body_offset.',
+      ),
     body_format: z.string().optional().describe('Docs and news: body format, such as md.'),
     body_length: z
       .number()
       .optional()
-      .describe('Docs and news: original body length in characters.'),
+      .describe('Docs and news: length of the whole body in characters (UTF-16 code units).'),
+    body_offset: z
+      .number()
+      .optional()
+      .describe('Docs and news: where this body slice starts in the whole body; 0 for its start.'),
+    body_next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Docs and news: where the rest of the body starts, present only when more follows; pass it as body_offset with this id alone to continue.',
+      ),
     body_truncated: z
       .boolean()
       .optional()
-      .describe('Docs and news: true when the body was cut at 30,000 characters.'),
+      .describe('Docs and news: true when more body follows this slice (see body_next_offset).'),
     license: z
       .object({
         id: z.string().optional().describe('SPDX-style license id, such as CC0-1.0.'),

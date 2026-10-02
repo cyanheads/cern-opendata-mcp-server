@@ -46,23 +46,49 @@ function lengthCap(element: z.ZodString): number {
  * empties, canonicalize, dedupe, and cut at `max + 1` items so an oversized
  * list fails with one `too_big` issue. An item longer than `itemMax` is kept
  * trimmed but never canonicalized, so the element schema rejects it before any
- * normalization reads it. An empty result becomes `undefined`.
+ * normalization reads it. In a split string, two adjacent pieces that form one
+ * whole value, neither being one alone, are rejoined, so
+ * `Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos, Supersymmetry` keeps
+ * its comma value while `13TeV, 13.6TeV, 8TeV` stays three values. An empty
+ * result becomes `undefined`.
  */
 function splitList(value: unknown, max: number, itemMax: number, options: ListOptions): unknown {
+  const { isWholeValue } = options;
   let items: unknown[];
+  let rejoin: typeof isWholeValue;
   if (typeof value === 'string') {
-    items = options.isWholeValue?.(value) ? [value] : value.split(',');
+    if (isWholeValue?.(value)) {
+      items = [value];
+    } else {
+      items = value.split(',');
+      rejoin = isWholeValue;
+    }
   } else if (Array.isArray(value)) {
     items = value;
   } else {
     return value;
   }
   const out: unknown[] = [];
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
     if (out.length > max) break;
-    if (typeof item !== 'string') {
-      out.push(item);
+    const raw = items[i];
+    if (typeof raw !== 'string') {
+      out.push(raw);
       continue;
+    }
+    let item = raw;
+    const next = items[i + 1];
+    if (
+      rejoin &&
+      typeof next === 'string' &&
+      item.trim() !== '' &&
+      next.trim() !== '' &&
+      rejoin(`${item},${next}`) &&
+      !rejoin(item) &&
+      !rejoin(next)
+    ) {
+      item = `${item},${next}`;
+      i++;
     }
     const trimmed = item.trim();
     if (trimmed === '') continue;
@@ -108,18 +134,22 @@ export function requiredListInput(
   );
 }
 
+/** Parameters with a known value that holds a comma: `13TeV, 13.6TeV`, `Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos`. */
+const COMMA_VALUE_PARAMS: ReadonlySet<VocabularyParam> = new Set(['collision_energy', 'category']);
+
 /**
  * An optional search-filter list for a vocabulary parameter: items ≤ 100
  * characters, canonicalized against the verified table (unknown values pass
- * through trimmed). `collision_energy`'s string form is first matched whole
- * (`13TeV, 13.6TeV` is one upstream value) and split on commas only when it is
- * not one. `type` rejects Glossary in any form. Add `.describe()` at the call site.
+ * through trimmed). The string form of `collision_energy` and `category` is
+ * first matched whole (`13TeV, 13.6TeV` is one upstream value) and split on
+ * commas only when it is not one. `type` rejects Glossary in any form. Add
+ * `.describe()` at the call site.
  */
 export function vocabularyListInput(param: VocabularyParam, max: number) {
   const element = z.string().max(100).describe(`One ${param} value.`);
   const options: ListOptions = {
     canonicalize: (item) => canonicalize(param, item),
-    ...(param === 'collision_energy'
+    ...(COMMA_VALUE_PARAMS.has(param)
       ? { isWholeValue: (raw: string) => isKnownValue(param, canonicalize(param, raw)) }
       : {}),
   };
@@ -136,15 +166,22 @@ export function vocabularyListInput(param: VocabularyParam, max: number) {
 
 /**
  * A required recid: trims, strips a leading `recid:` (any case), reduces
- * `http(s)://opendata.cern.ch/record/{n}` or `/api/records/{n}` (any trailing
- * path, query or fragment) to `n`, strips leading zeros, then requires 1-12
- * digits (so an all-zero recid is rejected). For an optional recid use
- * `blankAsUnset(recidInput().optional())`.
+ * `http(s)://opendata.cern.ch/record/{recid}` or `/api/records/{recid}` (any
+ * trailing path, query or fragment) to the recid, lowercases an experiment
+ * prefix and strips leading zeros from the number, then requires 1-12 digits,
+ * optionally after a prefix of 1-16 letters and `-` (`6004`, `atlas-160006`),
+ * so an all-zero number is rejected. Shared by the tools and the record
+ * resource. For an optional recid use `blankAsUnset(recidInput().optional())`.
  */
 export function recidInput() {
   return z.preprocess(
     (value) => (typeof value === 'string' ? reduceRecidSpelling(value) : value),
-    z.string().regex(/^\d{1,12}$/, 'A recid is 1-12 digits, such as 6004.'),
+    z
+      .string()
+      .regex(
+        /^(?:[a-z]{1,16}-)?\d{1,12}$/,
+        'A recid is 1-12 digits (6004), optionally after an experiment prefix (atlas-160006).',
+      ),
   );
 }
 

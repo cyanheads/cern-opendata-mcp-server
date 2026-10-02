@@ -13,7 +13,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { searchRecords } from '@/mcp-server/tools/definitions/search-records.tool.js';
-import { inline } from '@/services/cern-opendata/text.js';
+import { inline, inlineSpelling } from '@/services/cern-opendata/text.js';
 import {
   type ContractResult,
   dataOf,
@@ -40,6 +40,7 @@ import {
   syntheticHits,
   WINDOW_ERROR_BODY,
 } from '../fixtures/cern-opendata-upstream.js';
+import { expectLinearTime } from '../fixtures/cpu-time.js';
 
 type Output = Awaited<ReturnType<typeof searchRecords.handler>>;
 type Enrichment = {
@@ -95,7 +96,7 @@ describe('cern_opendata_search_records registration', () => {
     });
   });
 
-  it('declares the five error reasons with the right codes and the service-thrown ones marked', () => {
+  it('declares the six error reasons with the right codes and the service-thrown ones marked', () => {
     const byReason = Object.fromEntries(
       (searchRecords.errors ?? []).map((entry) => [entry.reason, entry]),
     );
@@ -103,9 +104,13 @@ describe('cern_opendata_search_records registration', () => {
       'invalid_query',
       'invalid_range',
       'page_window_exceeded',
+      'query_server_error',
       'rate_limited',
       'upstream_unreadable',
     ]);
+    expect(byReason.query_server_error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(byReason.query_server_error).not.toHaveProperty('retryable');
+    expect(byReason.query_server_error).not.toHaveProperty('severity');
     expect(byReason.invalid_query?.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(byReason.page_window_exceeded?.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(byReason.invalid_range?.code).toBe(JsonRpcErrorCode.ValidationError);
@@ -142,6 +147,11 @@ describe('cern_opendata_search_records input', () => {
     file_type: [],
     availability: '',
     collection: ' ',
+    category: '',
+    keywords: ' ',
+    magnet_polarity: [],
+    stripping_stream: '\t',
+    stripping_version: ' , ',
     year_from: '',
     year_to: ' ',
     min_events: '',
@@ -182,6 +192,11 @@ describe('cern_opendata_search_records input', () => {
       'number_events',
       'availability',
       'collection',
+      'category',
+      'keywords',
+      'magnet_polarity',
+      'stripping_stream',
+      'stripping_version',
       'expanded',
       'unrecognized_values',
     ]) {
@@ -204,6 +219,20 @@ describe('cern_opendata_search_records input', () => {
     ['availability', 'on demand', ['ondemand']],
     ['availability', 'On-Demand,ONLINE', ['ondemand', 'online']],
     ['file_type', 'NANOAOD, daod_physlite, ROOT', ['nanoaod', 'DAOD_PHYSLITE', 'root']],
+    ['category', 'higgs physics/standard model', ['Higgs Physics::Standard Model']],
+    ['category', ' heavy-ion physics ', ['Heavy-Ion Physics']],
+    [
+      'category',
+      'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos',
+      ['Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos'],
+    ],
+    ['category', 'Exotica::Dark Matter, Supersymmetry', ['Exotica::Dark Matter', 'Supersymmetry']],
+    ['category', 'susy, SUPERSYMMETRY', ['Susy', 'Supersymmetry']],
+    ['magnet_polarity', 'magdown', ['MagDown']],
+    ['magnet_polarity', 'MAGUP, magdown', ['MagUp', 'MagDown']],
+    ['stripping_stream', 'dimuon', ['DIMUON']],
+    ['stripping_stream', ['charm.mdst', 'Semileptonic'], ['CHARM.MDST', 'SEMILEPTONIC']],
+    ['stripping_version', 'Stripping21r1', ['stripping21r1']],
   ] as const)('canonicalizes %s %j to %j', (param, value, expected) => {
     const parsed = searchRecords.input.parse({ [param]: value }) as Record<string, unknown>;
     expect(parsed[param]).toEqual(expected);
@@ -227,6 +256,16 @@ describe('cern_opendata_search_records input', () => {
     expect(searchRecords.input.parse({ collection: ['A', 'B'] }).collection).toEqual(['A', 'B']);
   });
 
+  it('keeps keywords as given, trimmed, case variants apart', () => {
+    expect(searchRecords.input.parse({ keywords: ' education , Education' }).keywords).toEqual([
+      'education',
+      'Education',
+    ]);
+    expect(
+      searchRecords.input.parse({ keywords: ['Jet substructure, OmniFold'] }).keywords,
+    ).toEqual(['Jet substructure, OmniFold']);
+  });
+
   it.each([
     ['Glossary', { type: 'Glossary' }],
     ['glossary in any case', { type: ['Dataset', 'GLOSSARY'] }],
@@ -238,6 +277,18 @@ describe('cern_opendata_search_records input', () => {
     ['a collection list over 10', { collection: Array.from({ length: 11 }, (_, i) => `c${i}`) }],
     ['a filter value over 100 characters', { experiment: 'x'.repeat(101) }],
     ['a collection name over 100 characters', { collection: 'x'.repeat(101) }],
+    ['a category list over 20', { category: Array.from({ length: 21 }, (_, i) => `c${i}`) }],
+    ['a keywords list over 10', { keywords: Array.from({ length: 11 }, (_, i) => `k${i}`) }],
+    ['a keyword over 100 characters', { keywords: 'x'.repeat(101) }],
+    ['a magnet_polarity list over 2', { magnet_polarity: 'MagUp, MagDown, MagSide' }],
+    [
+      'a stripping_stream list over 11',
+      { stripping_stream: Array.from({ length: 12 }, (_, i) => `s${i}`) },
+    ],
+    [
+      'a stripping_version list over 12',
+      { stripping_version: Array.from({ length: 13 }, (_, i) => `v${i}`) },
+    ],
     ['a query over 500 characters', { query: 'x'.repeat(501) }],
     ['year_from below 1900', { year_from: 1899 }],
     ['year_to above 2100', { year_to: 2101 }],
@@ -259,15 +310,20 @@ describe('cern_opendata_search_records input', () => {
     expect(http.calls).toHaveLength(0);
   });
 
-  it('rejects a type value holding a million spaces as too long, in linear time', () => {
-    const long = `a${' '.repeat(1_000_000)}b`;
-    for (const type of [long, [long]]) {
-      const started = performance.now();
-      const result = searchRecords.input.safeParse({ type });
-      expect(performance.now() - started).toBeLessThan(250);
-      expect(result.error?.issues[0]).toMatchObject({ code: 'too_big', path: ['type', 0] });
-    }
-  });
+  it.each<[string, (n: number) => unknown]>([
+    ['a string', (n) => `a${' '.repeat(n)}b`],
+    ['an array item', (n) => [`a${' '.repeat(n)}b`]],
+  ])(
+    'rejects a type value holding a million spaces as too long, as %s, in linear time',
+    (_form, make) => {
+      const parse = (type: unknown) => searchRecords.input.safeParse({ type });
+      expect(parse(make(1_000_000)).error?.issues[0]).toMatchObject({
+        code: 'too_big',
+        path: ['type', 0],
+      });
+      expectLinearTime(make, parse, { sizes: [62_500, 250_000, 1_000_000], maxMs: 250 });
+    },
+  );
 
   it('says Glossary is not served in the rejection', async () => {
     serve(emptySearchBody);
@@ -293,7 +349,7 @@ describe('cern_opendata_search_records on the wire', () => {
       ['type', 'Software'],
       ['type', 'Supplementaries'],
       ['type', 'News'],
-      ['sort', 'mostrecent'],
+      ['sort', '-mostrecent'],
       ['size', '10'],
       ['page', '1'],
       ['skip_files', '1'],
@@ -338,7 +394,7 @@ describe('cern_opendata_search_records on the wire', () => {
     expect(params.get('number_events')).toBe('1000--5000');
     expect(params.getAll('availability')).toEqual(['online']);
     expect(params.getAll('collections')).toEqual(['CMS-Primary-Datasets']);
-    expect(params.get('sort')).toBe('title_desc');
+    expect(params.get('sort')).toBe('-title');
     expect(params.get('size')).toBe('25');
     expect(params.get('page')).toBe('3');
     expect(params.get('skip_files')).toBe('1');
@@ -358,6 +414,11 @@ describe('cern_opendata_search_records on the wire', () => {
       min_events: 1,
       availability: 'online',
       collection: 'C',
+      category: 'Exotica',
+      keywords: 'education',
+      magnet_polarity: 'MagUp',
+      stripping_stream: 'DIMUON',
+      stripping_version: 'stripping21',
       sort: 'title',
     });
     const allowed = new Set([
@@ -369,6 +430,11 @@ describe('cern_opendata_search_records on the wire', () => {
       'file_type',
       'availability',
       'collections',
+      'category',
+      'keywords',
+      'magnet_polarity',
+      'stripping_stream',
+      'stripping_version',
       'year',
       'number_events',
       'sort',
@@ -435,6 +501,76 @@ describe('cern_opendata_search_records on the wire', () => {
     expect(paramsOf(http).getAll('collision_energy')).toEqual(['13TeV, 13.6TeV']);
   });
 
+  it('sends the category, keyword and LHCb filters under their portal names', async () => {
+    const { http } = serve(emptySearchBody);
+    await run({
+      category: 'higgs physics/standard model, susy',
+      keywords: 'education, Education',
+      magnet_polarity: 'magdown',
+      stripping_stream: 'dimuon, ew',
+      stripping_version: 'Stripping21r1',
+      experiment: 'lhcb',
+    });
+    const params = paramsOf(http);
+    expect(params.getAll('category')).toEqual(['Higgs Physics::Standard Model', 'Susy']);
+    expect(params.getAll('keywords')).toEqual(['education', 'Education']);
+    expect(params.getAll('magnet_polarity')).toEqual(['MagDown']);
+    expect(params.getAll('stripping_stream')).toEqual(['DIMUON', 'EW']);
+    expect(params.getAll('stripping_version')).toEqual(['stripping21r1']);
+    expect(params.has('subcategory')).toBe(false);
+  });
+
+  it('expands Heavy-Ion Physics to both upstream spellings and echoes the expansion', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run({ category: 'heavy-ion physics' }));
+    expect(paramsOf(http).getAll('category')).toEqual(['Heavy-Ion Physics', ' Heavy-Ion Physics']);
+    expect(result.applied_filters.category).toEqual(['Heavy-Ion Physics']);
+    expect(result.applied_filters.expanded).toEqual([
+      {
+        param: 'category',
+        value: 'Heavy-Ion Physics',
+        sent: ['Heavy-Ion Physics', ' Heavy-Ion Physics'],
+      },
+    ]);
+  });
+
+  it('echoes every expansion of one call, PbPb and Heavy-Ion Physics together', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(
+      await run({ category: ['Exotica', 'Heavy-Ion Physics'], collision_type: 'pbpb' }),
+    );
+    expect(paramsOf(http).getAll('category')).toEqual([
+      'Exotica',
+      'Heavy-Ion Physics',
+      ' Heavy-Ion Physics',
+    ]);
+    expect(paramsOf(http).getAll('collision_type')).toEqual(['PbPb', 'Pb-Pb']);
+    expect(result.applied_filters.expanded).toEqual([
+      { param: 'collision_type', value: 'PbPb', sent: ['PbPb', 'Pb-Pb'] },
+      {
+        param: 'category',
+        value: 'Heavy-Ion Physics',
+        sent: ['Heavy-Ion Physics', ' Heavy-Ion Physics'],
+      },
+    ]);
+  });
+
+  it('expands nothing for a value that names an object member', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run({ category: 'constructor', collision_type: '__proto__' }));
+    expect(paramsOf(http).getAll('category')).toEqual(['constructor']);
+    expect(paramsOf(http).getAll('collision_type')).toEqual(['__proto__']);
+    expect(result.applied_filters).not.toHaveProperty('expanded');
+  });
+
+  it('keeps a category that holds a comma as one upstream value', async () => {
+    const { http } = serve(emptySearchBody);
+    await run({ category: 'exotica/heavy fermions, heavy righ-handed neutrinos' });
+    expect(paramsOf(http).getAll('category')).toEqual([
+      'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos',
+    ]);
+  });
+
   it('sends an explicit type without the defaulted flag', async () => {
     const { http } = serve(emptySearchBody);
     const result = success(await run({ type: 'documentation' }));
@@ -443,6 +579,31 @@ describe('cern_opendata_search_records on the wire', () => {
       type: ['Documentation'],
       type_defaulted: false,
     });
+  });
+
+  it.each([
+    ['bestmatch', 'bestmatch'],
+    ['mostrecent', '-mostrecent'],
+    ['title', 'title'],
+    ['title_desc', '-title'],
+  ] as const)(
+    'sends sort %s as %s, the direction a - prefix gives, and echoes the caller value',
+    async (sort, sent) => {
+      const { http } = serve(emptySearchBody);
+      const result = success(await run({ sort }));
+      expect(paramsOf(http).getAll('sort')).toEqual([sent]);
+      expect(result.applied_filters).toMatchObject({ sort, sort_defaulted: false });
+    },
+  );
+
+  it.each([
+    ['without a query, newest first', {}, '-mostrecent', 'mostrecent'],
+    ['with a query, by relevance', { query: 'muon' }, 'bestmatch', 'bestmatch'],
+  ] as const)('defaults the sort %s', async (_when, input, sent, echoed) => {
+    const { http } = serve(emptySearchBody);
+    const result = success(await run(input));
+    expect(paramsOf(http).getAll('sort')).toEqual([sent]);
+    expect(result.applied_filters).toMatchObject({ sort: echoed, sort_defaulted: true });
   });
 
   it('echoes an explicit sort as not defaulted, and the default as defaulted', async () => {
@@ -524,6 +685,69 @@ describe('cern_opendata_search_records applied_filters', () => {
       }),
     );
     expect(applied_filters).not.toHaveProperty('unrecognized_values');
+  });
+
+  it('echoes the category, keyword and LHCb filters as parsed', async () => {
+    serve(emptySearchBody);
+    const { applied_filters } = success(
+      await run({
+        category: 'exotica:dark matter',
+        keywords: 'Education',
+        magnet_polarity: 'magup',
+        stripping_stream: 'charm.mdst',
+        stripping_version: 'STRIPPING29R2P3',
+      }),
+    );
+    expect(applied_filters).toMatchObject({
+      category: ['Exotica::Dark Matter'],
+      keywords: ['Education'],
+      magnet_polarity: ['MagUp'],
+      stripping_stream: ['CHARM.MDST'],
+      stripping_version: ['stripping29r2p3'],
+    });
+  });
+
+  it('reports unknown category and LHCb values as unrecognized, never a keyword', async () => {
+    const { http } = serve(emptySearchBody);
+    const { applied_filters } = success(
+      await run({
+        category: ['Exotica', 'Imaginary Physics'],
+        keywords: 'no such keyword',
+        magnet_polarity: 'MagSideways',
+        stripping_stream: 'NOPE',
+        stripping_version: 'stripping99',
+      }),
+    );
+    expect(applied_filters.unrecognized_values).toEqual([
+      { param: 'category', value: 'Imaginary Physics' },
+      { param: 'magnet_polarity', value: 'MagSideways' },
+      { param: 'stripping_stream', value: 'NOPE' },
+      { param: 'stripping_version', value: 'stripping99' },
+    ]);
+    expect(paramsOf(http).getAll('category')).toEqual(['Exotica', 'Imaginary Physics']);
+    expect(paramsOf(http).getAll('magnet_polarity')).toEqual(['MagSideways']);
+  });
+
+  it('shows the new filters and a whitespace-padded spelling in the text trailer', async () => {
+    serve(emptySearchBody);
+    const trailer = textOf(
+      await run({
+        category: 'Heavy-Ion Physics',
+        keywords: 'Jet substructure',
+        magnet_polarity: 'MagDown',
+        stripping_stream: 'DIMUON',
+        stripping_version: 'stripping21',
+      }),
+      1,
+    );
+    expect(trailer).toContain('- **category:** Heavy-Ion Physics');
+    expect(trailer).toContain('- **keywords:** Jet substructure');
+    expect(trailer).toContain('- **magnet_polarity:** MagDown');
+    expect(trailer).toContain('- **stripping_stream:** DIMUON');
+    expect(trailer).toContain('- **stripping_version:** stripping21');
+    expect(trailer).toContain(
+      '- **expanded:** category Heavy-Ion Physics → Heavy-Ion Physics, " Heavy-Ion Physics"',
+    );
   });
 
   it('shows what is sent in the text trailer', async () => {
@@ -618,6 +842,46 @@ describe('cern_opendata_search_records enrichment', () => {
     );
   });
 
+  it.each([
+    ['category', 'categories', 'Imaginary Physics'],
+    ['magnet_polarity', 'lhcb', 'MagSideways'],
+    ['stripping_stream', 'lhcb', 'NOPE'],
+    ['stripping_version', 'lhcb', 'stripping99'],
+  ] as const)(
+    'zero-result page routes an unknown %s value to topic %s',
+    async (param, topic, value) => {
+      serve(emptySearchBody);
+      const result = success(await run({ [param]: value }));
+      expect(result.notice).toBe(
+        `"${value}" is not a known ${param} value, so it was sent as given; call cern_opendata_list_reference with topic ${topic} for the accepted spellings. ` +
+          'The facet counts in this response show what each filter would match with the other filters applied; relax the filter whose facet lists the alternatives and call cern_opendata_search_records again.',
+      );
+    },
+  );
+
+  it('zero-result page with keywords says keywords are exact and case-sensitive', async () => {
+    serve(emptySearchBody);
+    const result = success(await run({ keywords: 'EDUCATION' }));
+    expect(result.notice).toBe(
+      'The facet counts in this response show what each filter would match with the other filters applied; relax the filter whose facet lists the alternatives and call cern_opendata_search_records again. ' +
+        'Keywords are exact and case-sensitive (Education and education are different keywords); the keywords facet in this response lists the first ones the other filters match, alphabetically.',
+    );
+  });
+
+  it.each([
+    ['category', 'Exotica'],
+    ['keywords', 'education'],
+    ['magnet_polarity', 'MagDown'],
+    ['stripping_stream', 'DIMUON'],
+    ['stripping_version', 'stripping21'],
+  ] as const)('zero-result page treats %s as a filter', async (param, value) => {
+    serve(emptySearchBody);
+    const result = success(await run({ query: 'muon', [param]: value }));
+    expect(result.notice).toMatch(/^The facet counts in this response/);
+    expect(result.notice).toContain('call cern_opendata_search_records with the query alone');
+    expect(result.notice).not.toContain('No record matched the query');
+  });
+
   it('zero-result page with a query and filters names the unfiltered query as the next call', async () => {
     serve(emptySearchBody);
     const result = success(await run({ query: 'muon', experiment: 'CMS' }));
@@ -670,12 +934,13 @@ describe('cern_opendata_search_records enrichment', () => {
 
   it('composes the zero-result fragments in the documented order', async () => {
     serve(searchBody([], { total: 0, aggregations: aggregationsBody }));
-    const result = success(await run({ experiment: 'NOPE', collection: 'c' }));
+    const result = success(await run({ experiment: 'NOPE', collection: 'c', keywords: 'k' }));
     const notice = result.notice ?? '';
     const order = [
       'is not a known experiment value',
       'The facet counts in this response',
       'Collection names are exact',
+      'Keywords are exact',
       '5 glossary entries matched',
     ].map((fragment) => notice.indexOf(fragment));
     expect(order.every((position) => position >= 0)).toBe(true);
@@ -936,6 +1201,37 @@ describe('cern_opendata_search_records result', () => {
     expect(facets.number_events.other_count).toBe(0);
   });
 
+  it('carries the category facet with subcategories and the leading-space spelling as received', async () => {
+    serve(searchBody([collisionDatasetHit], { total: 1, aggregations: aggregationsBody }));
+    const { facets } = success(await run({}));
+    expect(facets.category.buckets.map((bucket) => bucket.value)).toEqual([
+      ' Heavy-Ion Physics',
+      'Exotica',
+      'Heavy-Ion Physics',
+      'Higgs Physics',
+    ]);
+    expect(facets.category.buckets[3]).toEqual({
+      value: 'Higgs Physics',
+      count: 11_232,
+      subcategories: [
+        { value: 'Beyond Standard Model', count: 6815 },
+        { value: 'Standard Model', count: 4417 },
+      ],
+    });
+    expect(facets.category.other_count).toBe(25_724);
+    expect(facets.keywords.other_count).toBe(474);
+    expect(facets.magnet_polarity.buckets).toEqual([
+      { value: 'MagDown', count: 61 },
+      { value: 'MagUp', count: 60 },
+    ]);
+    expect(facets.stripping_stream.buckets.map((bucket) => bucket.value)).toEqual([
+      'BHADRON',
+      'DIMUON',
+    ]);
+    expect(facets.stripping_version.other_count).toBe(4);
+    expect(facets).not.toHaveProperty('signature');
+  });
+
   it('returns every facet, empty, when the portal sends no aggregations', async () => {
     serve(searchBody([collisionDatasetHit], { total: 1 }));
     const { facets } = success(await run({}));
@@ -948,6 +1244,11 @@ describe('cern_opendata_search_records result', () => {
       'availability',
       'year',
       'number_events',
+      'category',
+      'keywords',
+      'magnet_polarity',
+      'stripping_stream',
+      'stripping_version',
     ]);
     for (const facet of Object.values(facets)) {
       expect(facet).toEqual({ buckets: [], other_count: 0 });
@@ -979,7 +1280,7 @@ describe('cern_opendata_search_records errors', () => {
 
   it('invalid_query: the portal syntax 400 carries the upstream message and the recovery', async () => {
     serve(SYNTAX_ERROR_BODY, { status: 400 });
-    const result = await run({ query: 'title:(' });
+    const result = await run({ query: 'title:' });
     expect(result.isError).toBe(true);
     const error = errorOf(result);
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
@@ -996,6 +1297,63 @@ describe('cern_opendata_search_records errors', () => {
     expect(text).toContain('Error: The portal rejected the search');
     expect(text).toContain('Recovery: Quote phrases');
     expect(text).toContain('reason invalid_query');
+  });
+
+  it.each([
+    ['(foo', 'its ( at character 1 is never closed'],
+    ['title:(', 'its ( at character 7 is never closed'],
+    ['foo)', 'its ) at character 4 closes nothing opened before it'],
+    [')(', 'its ) at character 1 closes nothing opened before it'],
+    ['"foo', 'its " at character 1 is never closed'],
+    ['foo"bar', 'its " at character 4 is never closed'],
+    ['"foo\\"', 'its " at character 1 is never closed'],
+    ['date_created:[2010 TO 2012', 'its [ at character 14 is never closed'],
+    ['date_created:[2010 TO 2012)', 'its [ at character 14 is never closed'],
+    ['foo]', 'its ] at character 4 closes nothing opened before it'],
+    ['foo {', 'its { at character 5 is never closed'],
+    ['foo\\', 'it ends with a \\ that escapes nothing'],
+  ])(
+    'invalid_query: %s is refused before any request, naming the unbalanced character',
+    async (query, problem) => {
+      const { http } = serve(emptySearchBody);
+      const result = await run({ query });
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({ reason: 'invalid_query', query });
+      expect(error.message).toBe(`The query was not sent: ${problem}.`);
+      expect(hintOf(error)).toContain('balance parentheses');
+      expect(textOf(result)).toContain('reason invalid_query');
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    'muon \\(',
+    '"foo (bar"',
+    'title:"Double (Muon"',
+    'date_created:[2010 TO 2012]',
+    'date_created:{2010 TO 2012}',
+    'date_created:[2010 TO 2012}',
+    '[2010 TO 2012]',
+    'title:(Double Muon)',
+    '(muon OR electron) 2012',
+    'title:/DoubleMu.*/',
+    'foo"bar"',
+    '"foo \\"bar"',
+    'foo\\"bar',
+    'foo\\\\',
+    "Higgs' boson",
+    "O'Neil",
+    '/DoubleMuParked/Run2012B-22Jan2013-v1/AOD',
+    'title:[A( TO B]',
+    'title:["a TO b]',
+    'title:[A" TO B] "muon"',
+  ])('sends the balanced query %s to the portal as written', async (query) => {
+    const { http } = serve(emptySearchBody);
+    const result = await run({ query });
+    expect(result.isError).toBeFalsy();
+    expect(http.calls).toHaveLength(1);
+    expect(paramsOf(http).get('q')).toBe(query);
   });
 
   it('invalid_query: any other 400 is carried too, with its field errors', async () => {
@@ -1212,6 +1570,14 @@ describe('cern_opendata_search_records format', () => {
     expect(text).toContain('**type:** Dataset (Collision, Derived)');
   });
 
+  it('renders the secondary types of a hit that states no primary type', async () => {
+    const { data, text } = await rendered([
+      hit('3', { recid: '3', title: 'Secondary only', type: { secondary: ['Collision'] } }),
+    ]);
+    expect(data.hits[0]?.type).toEqual({ primary: '', secondary: ['Collision'] });
+    expect(text).toContain('**type:** Not available (Collision)');
+  });
+
   it('shows the recid and slug when they differ from the id', () => {
     const blocks = searchRecords.format?.({
       hits: [
@@ -1231,10 +1597,13 @@ describe('cern_opendata_search_records format', () => {
     expect(text).toContain('**id:** abc · **recid:** 77 · **slug:** a-slug');
   });
 
-  it('declares bucket subtypes on the type facet only', () => {
-    for (const [name, facet] of Object.entries(searchRecords.output.shape.facets.shape)) {
+  it('declares bucket subtypes on the type facet and subcategories on the category facet only', () => {
+    const shapes = Object.entries(searchRecords.output.shape.facets.shape);
+    expect(shapes).toHaveLength(13);
+    for (const [name, facet] of shapes) {
       const bucket = facet.shape.buckets.element.shape;
       expect('subtypes' in bucket, name).toBe(name === 'type');
+      expect('subcategories' in bucket, name).toBe(name === 'category');
     }
   });
 
@@ -1263,10 +1632,14 @@ describe('cern_opendata_search_records format', () => {
       expect(text, name).toContain(`- **${name}:**`);
       for (const bucket of facet.buckets) {
         expect(text, `${name} ${bucket.value}`).toContain(
-          `${inline(bucket.value)} (${bucket.count}`,
+          `${inlineSpelling(bucket.value)} (${bucket.count}`,
         );
-        for (const sub of ('subtypes' in bucket ? bucket.subtypes : undefined) ?? []) {
-          expect(text).toContain(`${inline(sub.value)} ${sub.count}`);
+        const nested = [
+          ...(('subtypes' in bucket ? bucket.subtypes : undefined) ?? []),
+          ...(('subcategories' in bucket ? bucket.subcategories : undefined) ?? []),
+        ];
+        for (const sub of nested) {
+          expect(text).toContain(`${inlineSpelling(sub.value)} ${sub.count}`);
         }
       }
       if (facet.other_count > 0) expect(text).toContain(`other values: ${facet.other_count}`);
@@ -1276,6 +1649,65 @@ describe('cern_opendata_search_records format', () => {
     );
     expect(text).not.toContain('Glossary');
     expect(text).toContain('- **experiment:** ATLAS (12), CMS (700) · other values: 3');
+    expect(text).toContain(
+      '- **category:** " Heavy-Ion Physics" (219), Exotica (14584: Dark Matter 2138, "Heavy Fermions, Heavy Righ-Handed Neutrinos" 2301), Heavy-Ion Physics (3), Higgs Physics (11232: Beyond Standard Model 6815, Standard Model 4417) · other values: 25724',
+    );
+    expect(text).toContain('- **keywords:** Education (1), Roman Pot (2) · other values: 474');
+    expect(text).toContain('- **magnet_polarity:** MagDown (61), MagUp (60)');
+    expect(text).toContain(
+      '- **stripping_stream:** BHADRON (3160), DIMUON (154) · other values: 390',
+    );
+    expect(text).toContain(
+      '- **stripping_version:** stripping21 (2186), stripping21r1 (2178) · other values: 4',
+    );
+    expect(text).not.toContain('signature');
+  });
+
+  it('quotes a facet value with edge whitespace in every facet, so it stays apart from its trimmed twin', async () => {
+    const { text } = await rendered([], {
+      keywords: {
+        buckets: [
+          { key: 'Higgs ', doc_count: 1 },
+          { key: 'Higgs', doc_count: 2 },
+        ],
+      },
+      category: {
+        buckets: [
+          { key: 'X', doc_count: 1, subcategory: { buckets: [{ key: ' Y', doc_count: 1 }] } },
+        ],
+      },
+    });
+    expect(text).toContain('- **keywords:** "Higgs " (1), Higgs (2)');
+    expect(text).toContain('- **category:** X (1: " Y" 1)');
+  });
+
+  it('quotes a facet value holding a comma, so it reads as one value', async () => {
+    const { text } = await rendered([], {
+      collision_energy: {
+        buckets: [
+          { key: '13TeV', doc_count: 5 },
+          { key: '13TeV, 13.6TeV', doc_count: 1 },
+        ],
+      },
+      category: {
+        buckets: [
+          {
+            key: 'Exotica',
+            doc_count: 3,
+            subcategory: {
+              buckets: [
+                { key: 'Dark Matter', doc_count: 1 },
+                { key: 'Heavy Fermions, Heavy Righ-Handed Neutrinos', doc_count: 2 },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(text).toContain('- **collision_energy:** 13TeV (5), "13TeV, 13.6TeV" (1)');
+    expect(text).toContain(
+      '- **category:** Exotica (3: Dark Matter 1, "Heavy Fermions, Heavy Righ-Handed Neutrinos" 2)',
+    );
   });
 
   it('renders an empty facet as none', async () => {
@@ -1353,5 +1785,10 @@ function emptyFacets() {
     availability: empty,
     year: empty,
     number_events: empty,
+    category: empty,
+    keywords: empty,
+    magnet_polarity: empty,
+    stripping_stream: empty,
+    stripping_version: empty,
   };
 }

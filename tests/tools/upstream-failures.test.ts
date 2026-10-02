@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRecords } from '@/mcp-server/tools/definitions/get-records.tool.js';
 import { listFiles } from '@/mcp-server/tools/definitions/list-files.tool.js';
 import { searchRecords } from '@/mcp-server/tools/definitions/search-records.tool.js';
+import { searchTriggerPaths } from '@/mcp-server/tools/definitions/search-trigger-paths.tool.js';
 import {
   type ContractResult,
   disposeInstalledService,
@@ -28,6 +29,7 @@ import {
   HTML_ERROR_PAGE,
   jsonResponse,
   portalRoute,
+  SYNTAX_ERROR_BODY,
 } from '../fixtures/cern-opendata-upstream.js';
 
 const MiB = 1024 * 1024;
@@ -238,6 +240,108 @@ describe.each(TARGETS)('$name: upstream failures on the wire', (target) => {
     expect(result.isError).toBe(true);
     expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
     expect(http.calls).toHaveLength(0);
+  });
+});
+
+describe('search_records: a 500 on every attempt', () => {
+  /** A search route answering each request with the next status in `statuses`, then the last one. */
+  function answering(...statuses: number[]) {
+    let calls = 0;
+    return installService([
+      searchRoute(() => {
+        const status = statuses[Math.min(calls++, statuses.length - 1)] ?? 200;
+        if (status === 200) return jsonResponse(emptySearchBody);
+        if (status === 400) return jsonResponse(SYNTAX_ERROR_BODY, { status });
+        return new Response('<html>Internal Server Error</html>', { status });
+      }),
+    ]);
+  }
+
+  const searchWith = async (input: Record<string, unknown>) => {
+    const outcome = await settle(() => runToolContract(searchRecords, input as never));
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  };
+
+  it('fails a search with query as query_server_error, carrying the original data and pointing at the query', async () => {
+    const { http } = answering(500);
+    const result = await searchWith({ query: 'title:' });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      reason: 'query_server_error',
+      status: 500,
+      retryAttempts: 3,
+    });
+    expect(error.data).not.toHaveProperty('retryable');
+    expect(error.message).toBe(
+      'CERN Open Data answered HTTP 500 to all 3 attempts at this search, as it does for some malformed queries.',
+    );
+    const text = textOf(result);
+    expect(text).toContain(
+      'Recovery: Check query for an operator or field name with nothing after it',
+    );
+    expect(text).toContain('call cern_opendata_search_records again in a minute');
+    expect(text).toContain('reason query_server_error');
+    expect(http.calls).toHaveLength(3);
+  });
+
+  it('keeps the baseline ServiceUnavailable for a search without query', async () => {
+    const { http } = answering(500);
+    const error = errorOf(await searchWith({ experiment: 'CMS' }));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ status: 500, retryAttempts: 3 });
+    expect(error.data).not.toHaveProperty('reason');
+    expect(http.calls).toHaveLength(3);
+  });
+
+  it.each([
+    ['a 500 then a 503', [500, 500, 503]],
+    ['a 503 then 500s', [503, 500, 500]],
+  ])(
+    'keeps the baseline ServiceUnavailable when not every attempt answers 500: %s',
+    async (_case, statuses) => {
+      const { http } = answering(...statuses);
+      const error = errorOf(await searchWith({ query: 'title:' }));
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).not.toHaveProperty('reason');
+      expect(http.calls).toHaveLength(3);
+    },
+  );
+
+  it('still maps a 400 on a later attempt to invalid_query', async () => {
+    const { http } = answering(500, 500, 400);
+    const error = errorOf(await searchWith({ query: 'title:' }));
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({
+      reason: 'invalid_query',
+      upstreamMessage: 'The syntax of the search query is invalid.',
+    });
+    expect(http.calls).toHaveLength(3);
+  });
+
+  it('returns the page when a retry after a 500 succeeds', async () => {
+    const { http } = answering(500, 200);
+    expect((await searchWith({ query: 'title:x' })).isError).toBeFalsy();
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it.each([
+    ['get_records', () => runToolContract(getRecords, { ids: ['6004'] } as never)],
+    [
+      'search_trigger_paths',
+      () => runToolContract(searchTriggerPaths as never, { path: 'HLT_IsoMu24' } as never),
+    ],
+  ])('leaves %s on the baseline ServiceUnavailable', async (_tool, call) => {
+    const { http } = answering(500);
+    const outcome = await settle(call);
+    if (!outcome.ok) throw outcome.error;
+    const error = errorOf(outcome.value);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ status: 500, retryAttempts: 3 });
+    expect(error.data).not.toHaveProperty('reason');
+    expect(http.calls).toHaveLength(3);
   });
 });
 

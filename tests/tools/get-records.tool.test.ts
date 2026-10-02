@@ -2,8 +2,10 @@
  * @fileoverview Tests for cern_opendata_get_records: id parsing and mixed
  * identifier forms, the combined lookup query, matches in input order,
  * `missing` with guidance (unrecognized ids included), the uppercase-DOI retry,
- * license and citation in every record, doc-body caps and their notice, sparse
- * payloads, the text twin of structuredContent, and errors on the wire.
+ * license and citation in every record, doc-body slices read on with
+ * `body_offset` and their notice, the variable dictionary, category, pile-up
+ * and LHCb fields, the 64,000-byte response budget and its `deferred` list,
+ * sparse payloads, the text twin of structuredContent, and errors on the wire.
  * @module tests/tools/get-records.tool.test
  */
 
@@ -34,14 +36,31 @@ import {
   hit,
   jsonResponse,
   licensedDatasetHit,
+  METHODOLOGY_5202_HTML,
+  METHODOLOGY_5208_HTML,
   newsHit,
   portalRoute,
+  prefixedDatasetHit,
   richDatasetHit,
   SYNTAX_ERROR_BODY,
   searchBody,
+  selectionCutHits,
   softwareHit,
   sparseHit,
 } from '../fixtures/cern-opendata-upstream.js';
+import {
+  anchorVariablesHit12102,
+  categoryOnlyPrimaryHit88449,
+  entityVariablesHit15009,
+  largeVariablesHit12320,
+  lhcbHit28004,
+  pileupHit67817,
+  pileupNoLinksHit30595,
+  strippingDocHit,
+  typelessVariablesHit4803,
+  unitsHit84000,
+  variablesHit12220,
+} from '../fixtures/record-metadata-upstream.js';
 
 type Output = Awaited<ReturnType<typeof getRecords.handler>>;
 type Record_ = Output['records'][number];
@@ -82,17 +101,23 @@ describe('cern_opendata_get_records registration', () => {
     });
   });
 
-  it('declares only the two shared service errors, naming the tool in each recovery', () => {
+  it('declares the two shared service errors and invalid_body_offset, naming the tool in each recovery', () => {
     expect(getRecords.errors?.map((entry) => entry.reason)).toEqual([
+      'invalid_body_offset',
       'rate_limited',
       'upstream_unreadable',
     ]);
     expect(getRecords.errors?.[0]).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+    });
+    expect(getRecords.errors?.[0]).not.toHaveProperty('thrownBy');
+    expect(getRecords.errors?.[1]).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
       thrownBy: 'service',
     });
-    expect(getRecords.errors?.[1]).toMatchObject({
+    expect(getRecords.errors?.[2]).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
       thrownBy: 'service',
     });
@@ -229,6 +254,44 @@ describe('cern_opendata_get_records lookup on the wire', () => {
     expect(missing.map((entry) => entry.input)).toEqual(['0010']);
     expect(records).toHaveLength(1);
     expect(records[0]?.matched_inputs).toEqual(['06004', 'recid:0006004']);
+  });
+
+  it('resolves a numeric and a prefixed recid from one search, prefixed spellings included', async () => {
+    const { http } = servePool([collisionDatasetHit, prefixedDatasetHit]);
+    const result = await run([
+      '6004',
+      'atlas-160006',
+      'https://opendata.cern.ch/record/ATLAS-160006',
+    ]);
+    const { records, missing } = success(result);
+    expect(http.calls).toHaveLength(1);
+    expect(queriesOf(http)[0]?.get('q')).toBe('recid:(6004 OR atlas-160006 OR atlas-160006)');
+    expect(missing).toEqual([]);
+    expect(records.map((record) => [record.recid, record.matched_inputs])).toEqual([
+      ['6004', ['6004']],
+      ['atlas-160006', ['atlas-160006', 'https://opendata.cern.ch/record/ATLAS-160006']],
+    ]);
+    expect(records[1]).toMatchObject({
+      id: 'atlas-160006',
+      portal_url: 'https://opendata.cern.ch/record/atlas-160006',
+      citation: { doi: '10.7483/OPENDATA.ATLAS.XEVX.LJJ2' },
+    });
+    expect(textOf(result)).toContain(
+      '**id:** atlas-160006 · **kind:** record · **recid:** atlas-160006',
+    );
+  });
+
+  it('reports a prefixed recid that no record has as a missing recid, not a doc slug', async () => {
+    servePool([]);
+    const { missing } = success(await run(['cms-99999']));
+    expect(missing).toEqual([
+      {
+        input: 'cms-99999',
+        interpreted_as: 'recid',
+        guidance:
+          "No record has recid cms-99999. Call cern_opendata_search_records with a title keyword to find the record's recid.",
+      },
+    ]);
   });
 
   it('makes no request when no id is recognized, and reports each as unrecognized', async () => {
@@ -618,14 +681,19 @@ describe('cern_opendata_get_records uppercase DOI retry', () => {
 });
 
 describe('cern_opendata_get_records documentation bodies', () => {
-  it('cuts a body over 30,000 characters, flags it, and says so in the notice', async () => {
+  it('cuts a body over 30,000 characters, flags it, and names the call that continues it', async () => {
     servePool([docHitWithBody('long-page', 30_001)]);
     const result = success(await run('long-page'));
     const [record] = result.records;
     expect(record?.body).toHaveLength(30_000);
-    expect(record).toMatchObject({ body_truncated: true, body_length: 30_001 });
+    expect(record).toMatchObject({
+      body_truncated: true,
+      body_length: 30_001,
+      body_offset: 0,
+      body_next_offset: 30_000,
+    });
     expect(result.notice).toBe(
-      'The body of long-page was cut at 30,000 of 30001 characters; read the full page at https://opendata.cern.ch/docs/long-page.',
+      'The body of long-page was cut at character 30000 of 30001; call cern_opendata_get_records with ids ["long-page"] and body_offset 30000 to continue it.',
     );
   });
 
@@ -633,7 +701,12 @@ describe('cern_opendata_get_records documentation bodies', () => {
     servePool([docHitWithBody('edge-page', 30_000)]);
     const result = success(await run('edge-page'));
     expect(result.records[0]?.body).toHaveLength(30_000);
-    expect(result.records[0]).toMatchObject({ body_truncated: false, body_length: 30_000 });
+    expect(result.records[0]).toMatchObject({
+      body_truncated: false,
+      body_length: 30_000,
+      body_offset: 0,
+    });
+    expect(result.records[0]).not.toHaveProperty('body_next_offset');
     expect(result).not.toHaveProperty('notice');
   });
 
@@ -644,9 +717,10 @@ describe('cern_opendata_get_records documentation bodies', () => {
       docHitWithBody('long-c', 72_000),
     ]);
     const result = success(await run(['long-a', 'short-b', 'long-c']));
+    expect(result.deferred).toEqual([]);
     expect(result.notice).toBe(
-      'The body of long-a was cut at 30,000 of 40000 characters; read the full page at https://opendata.cern.ch/docs/long-a. ' +
-        'The body of long-c was cut at 30,000 of 72000 characters; read the full page at https://opendata.cern.ch/docs/long-c.',
+      'The body of long-a was cut at character 30000 of 40000; call cern_opendata_get_records with ids ["long-a"] and body_offset 30000 to continue it. ' +
+        'The body of long-c was cut at character 30000 of 72000; call cern_opendata_get_records with ids ["long-c"] and body_offset 30000 to continue it.',
     );
   });
 
@@ -663,7 +737,7 @@ describe('cern_opendata_get_records documentation bodies', () => {
     const result = success(await run('777'));
     expect(result.records[0]?.slug).toBe('x](https://evil.example) <img src=y>');
     expect(result.notice).toBe(
-      'The body of x\\](https://evil.example) &lt;img src=y&gt; was cut at 30,000 of 30001 characters; read the full page at https://opendata.cern.ch/docs/x%5D%28https%3A%2F%2Fevil.example%29%20%3Cimg%20src%3Dy%3E.',
+      'The body of x\\](https://evil.example) &lt;img src=y&gt; was cut at character 30000 of 30001; call cern_opendata_get_records with ids ["x\\](https://evil.example) &lt;img src=y&gt;"] and body_offset 30000 to continue it.',
     );
     expect(result.notice).not.toMatch(/(?<!\\)\]\(/);
     expect(result.notice).not.toContain('<img');
@@ -687,21 +761,23 @@ describe('cern_opendata_get_records documentation bodies', () => {
   it('renders the cut in the text and the text carries at most the capped body', async () => {
     servePool([docHitWithBody('long-page', 30_100)]);
     const text = textOf(await run('long-page'));
-    expect(text).toContain('### Body (format md, 30100 characters, truncated at 30000 characters)');
+    expect(text).toContain(
+      '### Body (format md, 30100 characters, from body_offset 0, cut at character 30000; continue with body_offset 30000)',
+    );
     expect(text.length).toBeLessThan(31_000);
   });
 
-  it('renders a whole body as not truncated', async () => {
+  it('renders a whole body as read to the end', async () => {
     servePool([docHit]);
     expect(textOf(await run('cms-guide-docker'))).toContain(
-      '### Body (format md, 56 characters, not truncated)',
+      '### Body (format md, 56 characters, from body_offset 0 to the end)',
     );
   });
 
   it('renders a one-character body in the singular', async () => {
     servePool([docHitWithBody('one-char', 1)]);
     expect(textOf(await run('one-char'))).toContain(
-      '### Body (format md, 1 character, not truncated)',
+      '### Body (format md, 1 character, from body_offset 0 to the end)',
     );
   });
 });
@@ -769,6 +845,20 @@ describe('cern_opendata_get_records format', () => {
     expect(text).not.toContain('<b>');
   });
 
+  it('renders selection cuts written with a bare < or > in full, and keeps the HTML as received', async () => {
+    const { data, text } = await recordText(selectionCutHits, ['5202', '5208']);
+    for (const cut of [
+      'both with |eta| < 2.4, at least one muon was a global muon, the invariant mass of the two muons was > 0.3 GeV and < 300 GeV, and they have opposite-sign charge.',
+      'with pT > 20 GeV and |eta| < 2.1 and the invariant mass of the two muons was > 60 GeV and < 120 GeV.',
+    ]) {
+      expect(text, cut).toContain(cut);
+    }
+    expect(data.records.map((record) => record.methodology_html)).toEqual([
+      METHODOLOGY_5202_HTML,
+      METHODOLOGY_5208_HTML,
+    ]);
+  });
+
   it('renders every link and relation', async () => {
     const { text } = await recordText([richDatasetHit], '9001');
     expect(text).toContain('### Links');
@@ -797,6 +887,30 @@ describe('cern_opendata_get_records format', () => {
     expect(text).not.toContain('### Links');
     expect(text).not.toContain('### Relations');
     expect(text).not.toContain('**Formats:**');
+  });
+
+  it('renders the secondary types structuredContent carries when the record states no primary type', async () => {
+    const { data, text } = await recordText(
+      [hit('6004', { recid: '6004', title: 'T', type: { secondary: ['Collision', 'Derived'] } })],
+      '6004',
+    );
+    const { type } = data.records[0] ?? {};
+    expect(type).toEqual({ primary: '', secondary: ['Collision', 'Derived'] });
+    expect(text).toContain(
+      `**Type:** Not available (${type?.secondary.join(', ')}) · **Experiment:** Not available`,
+    );
+  });
+
+  it('renders a type with no secondaries as the primary alone, and no type at all as Not available', async () => {
+    const { text } = await recordText(
+      [
+        hit('6005', { recid: '6005', title: 'P', type: { primary: 'Dataset' } }),
+        hit('6006', { recid: '6006', title: 'None' }),
+      ],
+      ['6005', '6006'],
+    );
+    expect(text).toContain('**Type:** Dataset · **Experiment:**');
+    expect(text).toContain('**Type:** Not available · **Experiment:**');
   });
 
   it('renders a distribution that states only some numbers with Not available for the rest', async () => {
@@ -954,6 +1068,480 @@ describe('cern_opendata_get_records format', () => {
       if (record.citation) expect(text).toContain(record.citation.text);
       expect(text).toContain(`(basis: ${record.license.basis})`);
     }
+  });
+});
+
+describe('cern_opendata_get_records variables, category, pile-up and LHCb fields', () => {
+  async function recordText(pool: readonly RawHit[], ids: string | string[]) {
+    servePool(pool);
+    const result = await run(ids);
+    return { data: success(result), text: textOf(result) };
+  }
+
+  it('returns the variable dictionary and renders it as a table with the Type column', async () => {
+    const { data, text } = await recordText([variablesHit12220], '12220');
+    const [record] = data.records;
+    expect(record?.variables).toHaveLength(87);
+    expect(record?.variables?.[0]).toEqual({
+      variable: 'hit_global_x',
+      type: 'std::vector<float>',
+      description_html: 'global x position of the RecHit',
+    });
+    expect(record?.keywords).toEqual(['datascience']);
+    expect(text).toContain(
+      '### Variables\n| Variable | Type | Description |\n|:--|:--|:--|\n| hit_global_x | std::vector&lt;float&gt; | global x position of the RecHit |',
+    );
+    expect(text).toContain('**Keywords:** datascience');
+    for (const variable of record?.variables ?? [])
+      expect(text).toContain(`| ${variable.variable} |`);
+  });
+
+  it('adds the Unit column only when an entry carries a unit', async () => {
+    const { text } = await recordText([unitsHit84000], '84000');
+    expect(text).toContain('| Variable | Type | Unit | Description |\n|:--|:--|:--|:--|');
+    expect(text).toContain(
+      '| track_rp_*_x | double | Milimeters | x coordinate of the hit in the Roman Pot number *, equals 0 if valid flag is flase |',
+    );
+  });
+
+  it('renders an untyped dictionary with the Variable and Description columns only', async () => {
+    const { text } = await recordText([typelessVariablesHit4803], '4803');
+    expect(text).toContain('| Variable | Description |\n|:--|:--|');
+    expect(text).toContain(
+      '| amplL | PMT amplitude measured from the "left" side of a scintillator strip (in photo-electrons) |',
+    );
+  });
+
+  it('fills a cell an entry lacks with Not available when its column is shown', async () => {
+    const mixed = hit(9200, {
+      recid: '9200',
+      title: 'Mixed dictionary',
+      dataset_semantics: [
+        { variable: 'pt', type: 'float', unit: 'GeV', description: 'Transverse momentum' },
+        { variable: 'n' },
+      ],
+    });
+    const { text } = await recordText([mixed], '9200');
+    expect(text).toContain('| pt | float | GeV | Transverse momentum |');
+    expect(text).toContain('| n | Not available | Not available | Not available |');
+  });
+
+  it('renders a description link as text with its URL, neutralized in the cell, and keeps the HTML', async () => {
+    const { data, text } = await recordText(
+      [anchorVariablesHit12102, entityVariablesHit15009],
+      ['12102', '15009'],
+    );
+    expect(
+      data.records[0]?.variables?.find((variable) => variable.variable === 'fj_doubleb')
+        ?.description_html,
+    ).toContain('<a href="http://cms-results.web.cern.ch/');
+    expect(text).toContain(
+      '| fj_doubleb | Float_t | Double-b tagging discriminant based on a boosted decision tree calculated for the AK8 jet (see CMS-BTV-16-002 &lt;http://cms-results.web.cern.ch/cms-results/public-results/publications/BTV-16-002/&gt;) |',
+    );
+    expect(text).toContain('Pixel&lt;5e17&lt;SCT&lt;3e18&lt;LAr&lt;4.8e18&lt;Tile.');
+  });
+
+  it('keeps line breaks, pipes and markup in a variable entry inside its table cell', async () => {
+    const hostile = hit(9201, {
+      recid: '9201',
+      title: 'Hostile dictionary',
+      dataset_semantics: [
+        {
+          variable: 'a|b\n## injected',
+          type: 'x]](javascript:y)',
+          description: '<p>first</p><p>second | third</p>\n# heading',
+        },
+      ],
+    });
+    const { text } = await recordText([hostile], '9201');
+    expect(text).toContain(
+      '| a\\|b ## injected | x\\]\\](javascript:y) | first  second \\| third # heading |',
+    );
+    expect(text).not.toContain('\n## injected');
+  });
+
+  it('returns the physics category and pile-up, with pile-up links under Links', async () => {
+    const { data, text } = await recordText([pileupHit67817], '67817');
+    const [record] = data.records;
+    expect(record?.category).toEqual({
+      primary: 'Standard Model Physics',
+      secondary: ['Top physics'],
+      source: 'CMS Collaboration',
+    });
+    expect(record?.pileup_html).toContain('<a href="/docs/cms-guide-pileup-simulation">');
+    expect(record?.links).toContainEqual({
+      source: 'pileup',
+      recid: '30595',
+      description:
+        '/Neutrino_E-10_gun/RunIISummer20ULPrePremix-UL16_106X_mcRun2_asymptotic_v13-v1/PREMIX',
+    });
+    expect(text).toContain(
+      '**Category:** Standard Model Physics (Top physics) · **Category source:** CMS Collaboration',
+    );
+    expect(text).toContain(
+      '### Pile-up\n```\nTo make these simulated data comparable with the collision data, pile-up events <https://opendata.cern.ch/docs/cms-guide-pileup-simulation> are added to the simulated event in the DIGI2RAW step.\n```',
+    );
+    expect(text).toContain(
+      '- [pileup] /Neutrino_E-10_gun/RunIISummer20ULPrePremix-UL16_106X_mcRun2_asymptotic_v13-v1/PREMIX — recid 30595',
+    );
+  });
+
+  it('renders a category with no secondary or source, and pile-up with no links', async () => {
+    const { data, text } = await recordText(
+      [pileupNoLinksHit30595, categoryOnlyPrimaryHit88449],
+      ['30595', '88449'],
+    );
+    expect(data.records.map((record) => record.category)).toEqual([
+      { primary: 'Pileup', secondary: [], source: 'CMS Collaboration' },
+      { primary: 'Higgs', secondary: [] },
+    ]);
+    expect(text).toContain('**Category:** Pileup · **Category source:** CMS Collaboration');
+    expect(text).toContain('**Category:** Higgs\n');
+    expect(text).toContain('### Pile-up');
+    expect(text).not.toContain('[pileup]');
+  });
+
+  it('quotes a category spelled with edge whitespace, as stored', async () => {
+    const heavyIon = hit(9202, {
+      recid: '9202',
+      title: 'Heavy-ion dataset',
+      categories: { primary: ' Heavy-Ion Physics', source: 'CMS Collaboration' },
+    });
+    const { data, text } = await recordText([heavyIon], '9202');
+    expect(data.records[0]?.category?.primary).toBe(' Heavy-Ion Physics');
+    expect(text).toContain('**Category:** " Heavy-Ion Physics"');
+  });
+
+  it('quotes a secondary category holding a comma, so it reads as one value', async () => {
+    const exotica = hit(9203, {
+      recid: '9203',
+      title: 'Heavy-fermion simulation',
+      categories: {
+        primary: 'Exotica',
+        secondary: ['Heavy Fermions, Heavy Righ-Handed Neutrinos', 'Dark Matter'],
+      },
+    });
+    const { text } = await recordText([exotica], '9203');
+    expect(text).toContain(
+      '**Category:** Exotica ("Heavy Fermions, Heavy Righ-Handed Neutrinos", Dark Matter)',
+    );
+  });
+
+  it('returns and renders the LHCb magnet polarity and stripping of a dataset and a stripping page', async () => {
+    const { data, text } = await recordText(
+      [lhcbHit28004, strippingDocHit],
+      ['28004', 'stripping21-bhadron-b02dhhwsd2hhhhwsbeauty2charmline'],
+    );
+    expect(
+      data.records.map(({ magnet_polarity, stripping }) => ({ magnet_polarity, stripping })),
+    ).toEqual([
+      { magnet_polarity: 'MagDown', stripping: { stream: 'DIMUON', version: 'stripping21r1' } },
+      { magnet_polarity: undefined, stripping: { stream: 'BHADRON', version: 'stripping21' } },
+    ]);
+    expect(text).toContain(
+      '**Magnet polarity:** MagDown · **Stripping:** stream DIMUON, version stripping21r1',
+    );
+    expect(text).toContain('**Stripping:** stream BHADRON, version stripping21');
+    const partial = hit(9203, { recid: '9203', title: 'Partial', stripping: { version: 's20' } });
+    expect((await recordText([partial], '9203')).text).toContain(
+      '**Stripping:** stream Not available, version s20',
+    );
+  });
+
+  it('renders a record that carries none of these keys without any of their labels', async () => {
+    const { text } = await recordText(
+      [richDatasetHit, sparseHit, collisionDatasetHit, docHit, newsHit, softwareHit],
+      ['9001', '1120', '6004', 'cms-guide-docker', 'cms-releases-2026', '101'],
+    );
+    for (const label of [
+      '### Variables',
+      '### Pile-up',
+      '[pileup]',
+      '**Category',
+      '**Keywords:**',
+      '**Magnet polarity:**',
+      '**Stripping:**',
+    ]) {
+      expect(text, label).not.toContain(label);
+    }
+  });
+});
+
+const BUDGET = 64_000;
+const deferralNotice = (n: number) =>
+  n === 1
+    ? 'The response reached its 64,000-byte budget, so 1 record was deferred; call cern_opendata_get_records with ids set to the deferred list to fetch it.'
+    : `The response reached its 64,000-byte budget, so ${n} records were deferred; call cern_opendata_get_records with ids set to the deferred list to fetch them.`;
+
+/** UTF-8 bytes of each surface the caller receives: structuredContent JSON and every content[] text block. */
+function surfaces(result: ContractResult) {
+  return {
+    json: Buffer.byteLength(JSON.stringify(result.structuredContent)),
+    text: Buffer.byteLength(
+      result.content.map((block) => (block.type === 'text' ? block.text : '')).join(''),
+    ),
+  };
+}
+
+const runArgs = (args: { body_offset?: unknown; ids: unknown }) =>
+  runToolContract(getRecords, args as never);
+
+describe('cern_opendata_get_records response budget', () => {
+  const pool = [
+    variablesHit12220,
+    largeVariablesHit12320,
+    unitsHit84000,
+    pileupHit67817,
+    lhcbHit28004,
+    collisionDatasetHit,
+    docHit,
+  ];
+
+  it('returns every record under the budget, with deferred [] and body_offset 0 on docs', async () => {
+    servePool(pool);
+    const result = success(await run(['6004', 'cms-guide-docker', '28004']));
+    expect(result.records.map((record) => record.id)).toEqual([
+      '6004',
+      'cms-guide-docker',
+      '28004',
+    ]);
+    expect(result.deferred).toEqual([]);
+    expect(result.records[1]).toMatchObject({ body_offset: 0, body_truncated: false });
+    expect(result.records[0]).not.toHaveProperty('body_offset');
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  it('stops at the first record that would cross the budget, deferring it and every record after it', async () => {
+    servePool(pool);
+    const both = await run(['12220', '84000']);
+    expect(success(both).deferred).toEqual([]);
+    expect(surfaces(both).json).toBeLessThan(BUDGET);
+
+    const result = await run(['12220', '12320', '84000']);
+    const data = success(result);
+    expect(data.records.map((record) => record.id)).toEqual(['12220']);
+    expect(data.deferred).toEqual(['12320', '84000']);
+    expect(data.notice).toBe(deferralNotice(2));
+    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
+    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
+  });
+
+  it('returns the first record whole even alone over the budget, and nothing after it', async () => {
+    servePool(pool);
+    const result = await run(['12320', '84000']);
+    const data = success(result);
+    expect(data.records.map((record) => record.id)).toEqual(['12320']);
+    expect(data.records[0]?.variables).toHaveLength(622);
+    expect(data.deferred).toEqual(['84000']);
+    expect(data.notice).toBe(deferralNotice(1));
+    expect(surfaces(result).json).toBeGreaterThan(BUDGET);
+    expect(textOf(result)).toContain('## Deferred\n- 84000');
+  });
+
+  it('lists every input of a deferred record in input order, and keeps misses under missing', async () => {
+    servePool(pool);
+    const data = success(
+      await run(['12220', '12320', 'no-such-page', '84000', 'recid:12320', '012220']),
+    );
+    expect(data.records.map((record) => record.id)).toEqual(['12220']);
+    expect(data.records[0]?.matched_inputs).toEqual(['12220', '012220']);
+    expect(data.deferred).toEqual(['12320', '84000', 'recid:12320']);
+    expect(data.missing.map((entry) => entry.input)).toEqual(['no-such-page']);
+  });
+
+  it('returns the deferred records when the deferred list is passed back as ids, budgeted again', async () => {
+    servePool(pool);
+    const first = success(await run(['12220', '12320', '84000']));
+    expect(first.deferred).toEqual(['12320', '84000']);
+    const second = success(await run(first.deferred));
+    expect(second.records.map((record) => record.id)).toEqual(['12320']);
+    expect(second.deferred).toEqual(['84000']);
+    const third = success(await run(second.deferred));
+    expect(third.records.map((record) => record.id)).toEqual(['84000']);
+    expect(third.deferred).toEqual([]);
+    expect(third).not.toHaveProperty('notice');
+  });
+
+  it('puts the body cut and the deferral in one notice, for admitted records only', async () => {
+    servePool([...pool, docHitWithBody('cut-a', 40_000), docHitWithBody('cut-b', 40_000)]);
+    const data = success(await run(['cut-a', '12320', 'cut-b']));
+    expect(data.records.map((record) => record.id)).toEqual(['cut-a']);
+    expect(data.deferred).toEqual(['12320', 'cut-b']);
+    expect(data.notice).toBe(
+      `The body of cut-a was cut at character 30000 of 40000; call cern_opendata_get_records with ids ["cut-a"] and body_offset 30000 to continue it. ${deferralNotice(2)}`,
+    );
+  });
+
+  it('holds both assembled surfaces to 64,000 bytes, notice included, across a sweep over the edge', async () => {
+    const outcomes = new Set<number>();
+    for (let fill = 1_000; fill <= 4_000; fill += 37) {
+      disposeInstalledService();
+      servePool([
+        docHitWithBody('cut-a', 40_000),
+        docHitWithBody('cut-b', 40_000),
+        docHitWithBody('fill', fill),
+      ]);
+      const result = await run(['cut-a', 'cut-b', 'no-such-page', 'fill']);
+      const data = success(result);
+      const { json, text } = surfaces(result);
+      expect(json, `fill ${fill}`).toBeLessThanOrEqual(BUDGET);
+      expect(text, `fill ${fill}`).toBeLessThanOrEqual(BUDGET);
+      expect(data.records.slice(0, 2).map((record) => record.id)).toEqual(['cut-a', 'cut-b']);
+      expect(data.deferred).toEqual(data.records.length === 3 ? [] : ['fill']);
+      outcomes.add(data.records.length);
+    }
+    expect([...outcomes].sort()).toEqual([2, 3]);
+  });
+
+  it('holds a 20-id batch of long pages and #13 records to the budget, deferring a tail in input order', async () => {
+    const pages = Array.from({ length: 14 }, (_, i) =>
+      docHitWithBody(`stripping-line-${i}-page`, 47_000),
+    );
+    servePool([...pool, ...pages]);
+    const ids = [
+      ...pages.map((page) => String(page.id)),
+      '12220',
+      '84000',
+      '67817',
+      '28004',
+      '6004',
+      'cms-guide-docker',
+    ];
+    const result = await run(ids);
+    const data = success(result);
+    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
+    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
+    const returned = data.records.map((record) => record.id);
+    expect(returned).toEqual(ids.slice(0, returned.length));
+    expect(data.deferred).toEqual(ids.slice(returned.length));
+    expect(data.notice).toContain(deferralNotice(ids.length - returned.length));
+  });
+});
+
+describe('cern_opendata_get_records body_offset', () => {
+  it('continues a body from body_offset with one id, echoing the offset', async () => {
+    servePool([docHitWithBody('long', 70_000)]);
+    const data = success(await runArgs({ ids: ['long'], body_offset: 30_000 }));
+    expect(data.records[0]).toMatchObject({
+      body_offset: 30_000,
+      body_next_offset: 60_000,
+      body_length: 70_000,
+      body_truncated: true,
+    });
+    expect(data.records[0]?.body).toHaveLength(30_000);
+    expect(data.notice).toBe(
+      'The body of long was cut at character 60000 of 70000; call cern_opendata_get_records with ids ["long"] and body_offset 60000 to continue it.',
+    );
+  });
+
+  it('rebuilds the portal body exactly by following body_next_offset, surrogate pairs on the boundaries', async () => {
+    const pair = '\u{1F600}';
+    const body = `${'a'.repeat(29_999)}${pair}${'b'.repeat(29_998)}${pair}${pair}${'c'.repeat(5_000)}`;
+    servePool([
+      hit('emoji-guide', {
+        slug: 'emoji-guide',
+        title: 'Emoji guide',
+        type: { primary: 'Documentation' },
+        body: { content: body, format: 'md' },
+      }),
+    ]);
+    const slices: string[] = [];
+    let offset: number | undefined = 0;
+    let calls = 0;
+    while (offset !== undefined) {
+      const data = success(await runArgs({ ids: ['emoji-guide'], body_offset: offset }));
+      calls += 1;
+      const [record] = data.records;
+      expect(record?.body_offset).toBe(offset);
+      slices.push(record?.body ?? '');
+      offset = record?.body_next_offset;
+      if (offset !== undefined)
+        expect(data.notice).toContain(`and body_offset ${offset} to continue it.`);
+      else expect(data).not.toHaveProperty('notice');
+    }
+    expect(calls).toBe(3);
+    expect(slices.join('')).toBe(body);
+  });
+
+  it('echoes an offset on the second half of a surrogate pair as one less', async () => {
+    servePool([
+      hit('pair-page', {
+        slug: 'pair-page',
+        type: { primary: 'Documentation' },
+        body: { content: `ab\u{1F600}cd`, format: 'md' },
+      }),
+    ]);
+    const data = success(await runArgs({ ids: ['pair-page'], body_offset: 3 }));
+    expect(data.records[0]).toMatchObject({ body: '\u{1F600}cd', body_offset: 2 });
+  });
+
+  it('fails invalid_body_offset before any request when a positive offset rides beside two ids', async () => {
+    const { http } = servePool([docHit, collisionDatasetHit]);
+    const error = errorOf(await runArgs({ ids: ['cms-guide-docker', '6004'], body_offset: 5 }));
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ reason: 'invalid_body_offset' });
+    expect(error.message).toBe(
+      'body_offset 5 continues one body, so it takes exactly one id; 2 ids were given.',
+    );
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('accepts body_offset 0 with any number of ids', async () => {
+    servePool([docHit, collisionDatasetHit]);
+    const data = success(await runArgs({ ids: ['cms-guide-docker', '6004'], body_offset: 0 }));
+    expect(data.records.map((record) => record.id)).toEqual(['cms-guide-docker', '6004']);
+  });
+
+  it('fails invalid_body_offset after the lookup for an offset at or past the body length', async () => {
+    const { http } = servePool([docHitWithBody('short-page', 100)]);
+    const error = errorOf(await runArgs({ ids: ['short-page'], body_offset: 100 }));
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ reason: 'invalid_body_offset' });
+    expect(error.message).toBe(
+      'body_offset 100 is at or past the end of the body of short-page, which is 100 characters long.',
+    );
+    expect(http.calls).toHaveLength(1);
+    const last = success(await runArgs({ ids: ['short-page'], body_offset: 99 }));
+    expect(last.records[0]).toMatchObject({ body: 'x', body_offset: 99, body_truncated: false });
+  });
+
+  it('fails invalid_body_offset for a record with no body, stating its absence', async () => {
+    servePool([collisionDatasetHit]);
+    const error = errorOf(await runArgs({ ids: ['6004'], body_offset: 10 }));
+    expect(error.data).toMatchObject({ reason: 'invalid_body_offset' });
+    expect(error.message).toBe(
+      'body_offset 10 needs a documentation or news body, and 6004 has none.',
+    );
+  });
+
+  it('reports an unresolved id under missing, not as an error, whatever the offset', async () => {
+    servePool([docHit]);
+    const data = success(await runArgs({ ids: ['no-such-page'], body_offset: 10 }));
+    expect(data.records).toEqual([]);
+    expect(data.missing.map((entry) => entry.input)).toEqual(['no-such-page']);
+  });
+
+  it('rejects a negative or fractional offset at the schema and treats a blank one as 0', async () => {
+    servePool([docHit]);
+    for (const body_offset of [-1, 1.5, '3']) {
+      expect(errorOf(await runArgs({ ids: ['cms-guide-docker'], body_offset })).code).toBe(
+        JsonRpcErrorCode.InvalidParams,
+      );
+    }
+    const blank = success(await runArgs({ ids: ['cms-guide-docker'], body_offset: '' }));
+    expect(blank.records[0]?.body_offset).toBe(0);
+  });
+
+  it('renders the slice position and the continuation offset in the body heading', async () => {
+    servePool([docHitWithBody('long', 70_000)]);
+    const middle = textOf(await runArgs({ ids: ['long'], body_offset: 30_000 }));
+    expect(middle).toContain(
+      '### Body (format md, 70000 characters, from body_offset 30000, cut at character 60000; continue with body_offset 60000)',
+    );
+    const last = textOf(await runArgs({ ids: ['long'], body_offset: 60_000 }));
+    expect(last).toContain(
+      '### Body (format md, 70000 characters, from body_offset 60000 to the end)',
+    );
   });
 });
 

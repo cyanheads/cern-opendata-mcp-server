@@ -9,10 +9,12 @@
  * @module tests/tools/get-analysis-env.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAnalysisEnv } from '@/mcp-server/tools/definitions/get-analysis-env.tool.js';
+import { getRecords } from '@/mcp-server/tools/definitions/get-records.tool.js';
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { absoluteUrl } from '@/services/cern-opendata/text.js';
 import type { RawHit } from '@/services/cern-opendata/types.js';
@@ -34,11 +36,13 @@ import {
   jsonResponse,
   NOT_FOUND_BODY,
   portalRoute,
+  prefixedCmsHit,
   richDatasetHit,
   SYNTAX_ERROR_BODY,
   searchBody,
   softwareHit,
 } from '../fixtures/cern-opendata-upstream.js';
+import { cpuTimedAsync } from '../fixtures/cpu-time.js';
 
 type Output = Awaited<ReturnType<typeof getAnalysisEnv.handler>>;
 type Result = Output & { notice?: string };
@@ -89,7 +93,7 @@ function routes({ records = { '9001': richDatasetHit }, linked, docs = {} }: Ups
       '/api/records/',
       (request) => {
         const q = new URL(request.url).searchParams.get('q') ?? '';
-        const found = records[/^recid:(\d+)$/.exec(q)?.[1] ?? ''];
+        const found = records[/^recid:(\S+)$/.exec(q)?.[1] ?? ''];
         return jsonResponse(searchBody(found ? [found] : []));
       },
       { query: (p) => p.get('q')?.startsWith('recid:') === true },
@@ -183,6 +187,25 @@ describe('cern_opendata_get_analysis_env registration', () => {
   it('says in its description that the software is licensed apart from the CC0 data', () => {
     expect(getAnalysisEnv.description).toContain('licensed separately from the CC0 data');
   });
+
+  it('describes every notice it writes, the anchor fallback included', () => {
+    expect(getAnalysisEnv.enrichment?.notice?.description).toBe(
+      'What could not be assembled and how to get it: an empty environment, linked records that could not be read, guides not fetched, not found or cut, a guide anchor no heading carries, or more linked records than shown.',
+    );
+  });
+
+  it('describes a quoted section with the LF line ends it is joined with', () => {
+    const guides = z.toJSONSchema(getAnalysisEnv.output, { unrepresentable: 'any' }).properties
+      ?.guides;
+    const guide = typeof guides === 'object' ? guides.items : undefined;
+    const section =
+      guide && typeof guide === 'object' && !Array.isArray(guide)
+        ? guide.properties?.section
+        : undefined;
+    expect(typeof section === 'object' ? section.description : undefined).toBe(
+      'The linked section (or the opening section) as markdown, as the portal sent it but with LF line ends; at most 12,000 characters.',
+    );
+  });
 });
 
 describe('cern_opendata_get_analysis_env input', () => {
@@ -200,6 +223,22 @@ describe('cern_opendata_get_analysis_env input', () => {
     expect(requestedUrls(http)[0]?.searchParams.get('q')).toBe('recid:9001');
   });
 
+  it.each([['cms-93956'], ['CMS-93956'], ['https://opendata.cern.ch/record/cms-093956']])(
+    'looks the prefixed spelling %j up as cms-93956 in both searches',
+    async (recid) => {
+      const { http } = serve({ records: { 'cms-93956': prefixedCmsHit } });
+      const result = await run({ recid });
+      expect(success(result)).toMatchObject({
+        recid: 'cms-93956',
+        title: '/EphemeralHLTPhysics1/Run2024F-v1/RAW',
+      });
+      const [record, linked] = requestedUrls(http);
+      expect(record?.searchParams.get('q')).toBe('recid:cms-93956');
+      expect(linked?.searchParams.get('q')).toBe('use_with.links.recid:cms-93956');
+      expect(textOf(result)).toContain('## Analysis environment for record cms-93956');
+    },
+  );
+
   it.each([
     [''],
     ['   '],
@@ -209,6 +248,9 @@ describe('cern_opendata_get_analysis_env input', () => {
     ['0'],
     ['https://evil.example/record/9001'],
     ['1234567890123'],
+    ['cms-'],
+    ['cms-93956x'],
+    ['cms_93956'],
   ])('rejects the recid %j as invalid arguments before any request', async (recid) => {
     const { http } = serve();
     const result = await run({ recid });
@@ -682,16 +724,33 @@ describe('cern_opendata_get_analysis_env guides', () => {
   });
 
   it('scans a heading line of 20,000 unclosed anchor tags in linear time', async () => {
-    const record = guideRecord('9117', [{ url: '/docs/noisy#intro' }]);
-    const noisy = `## ${'<a id '.repeat(20_000)}\n\nNoise.\n\n## <a name="intro">Intro</a>\n\nIntro text.`;
-    serve({ records: { '9117': record }, docs: { noisy: docBody('noisy', noisy) } });
-    const started = performance.now();
-    const result = success(await run({ recid: '9117' }));
-    expect(performance.now() - started).toBeLessThan(250);
-    expect(result.guides[0]?.section).toBe('## <a name="intro">Intro</a>\n\nIntro text.');
+    const noisy = (anchors: number) =>
+      `## ${'<a id '.repeat(anchors)}\n\nNoise.\n\n## <a name="intro">Intro</a>\n\nIntro text.`;
+    serve({
+      records: {
+        '9117': guideRecord('9117', [{ url: '/docs/noisy#intro' }]),
+        '9118': guideRecord('9118', [{ url: '/docs/quiet#intro' }]),
+      },
+      docs: {
+        noisy: docBody('noisy', noisy(20_000)),
+        quiet: docBody('quiet', noisy(1_250)),
+      },
+    });
+    const fastest = { '9117': Number.POSITIVE_INFINITY, '9118': Number.POSITIVE_INFINITY };
+    for (let round = 0; round < 3; round++) {
+      for (const recid of ['9118', '9117'] as const) {
+        const { ms, value } = await cpuTimedAsync(() => run({ recid }));
+        expect(success(value).guides[0]?.section).toBe(
+          '## <a name="intro">Intro</a>\n\nIntro text.',
+        );
+        fastest[recid] = Math.min(fastest[recid], ms);
+      }
+    }
+    expect(fastest['9117'] / fastest['9118']).toBeLessThan(64);
+    expect(fastest['9117']).toBeLessThan(250);
   });
 
-  it('cuts a section at 12,000 characters, flags it and says how to read the whole page', async () => {
+  it('cuts a section at 12,000 characters, flags it and names the body offset where it stops', async () => {
     const long = `## <a name="big">Big</a>\n\n${'x'.repeat(20_000)}`;
     const record = guideRecord('9114', [{ url: '/docs/big#big' }]);
     serve({ records: { '9114': record }, docs: { big: docBody('big', long) } });
@@ -700,7 +759,78 @@ describe('cern_opendata_get_analysis_env guides', () => {
     expect(guide?.section).toHaveLength(12_000);
     expect(guide?.section_truncated).toBe(true);
     expect(result.notice).toBe(
-      'Guide big was cut at 12,000 characters; call cern_opendata_get_records with ids ["big"] for the page body.',
+      'Guide big was cut at 12,000 characters; call cern_opendata_get_records with ids ["big"] and body_offset 12000 to read on from the cut.',
+    );
+  });
+
+  it("names the cut of an anchored section at the section's start plus its quoted length", async () => {
+    const preamble = '# Top\n\nOpening text.\n\n## <a name="first">First</a>\n\nFirst text.\n\n';
+    const long = `${preamble}## <a name="big">Big</a>\n\n${'x'.repeat(20_000)}\n\n## <a name="after">After</a>`;
+    const record = guideRecord('9118', [{ url: '/docs/big#big' }]);
+    serve({ records: { '9118': record }, docs: { big: docBody('big', long) } });
+    const result = success(await run({ recid: '9118' }));
+    const offset = preamble.length + 12_000;
+    expect(result.guides[0]?.section).toBe(long.slice(preamble.length, offset));
+    expect(result.notice).toBe(
+      `Guide big was cut at 12,000 characters; call cern_opendata_get_records with ids ["big"] and body_offset ${offset} to read on from the cut.`,
+    );
+  });
+
+  it('maps the cut back to the body as the portal sent it when its lines end in CRLF', async () => {
+    const lines = [
+      '# Top',
+      '',
+      'Opening.',
+      '',
+      '## <a name="big">Big</a>',
+      '',
+      ...Array.from({ length: 1_500 }, (_, i) => `line ${String(i).padStart(4, '0')} xxxx`),
+    ];
+    const long = lines.join('\r\n');
+    const record = guideRecord('9119', [{ url: '/docs/big#big' }]);
+    serve({ records: { '9119': record }, docs: { big: docBody('big', long) } });
+    const result = success(await run({ recid: '9119' }));
+    const section = result.guides[0]?.section ?? '';
+    expect(section).toHaveLength(12_000);
+    const offset = Number(/body_offset (\d+) to read on/.exec(result.notice ?? '')?.[1]);
+    const start = long.indexOf('## <a name="big">');
+    expect(long.slice(start, offset).replaceAll('\r\n', '\n')).toBe(section);
+    expect(offset).toBeGreaterThan(start + 12_000);
+  });
+
+  it('continues a cut section in one hop: get_records from the named offset reads on exactly where it stopped', async () => {
+    const preamble = '# Top\n\nOpening text.\n\n';
+    const long = `${preamble}## <a name="big">Big</a>\n\n${'0123456789'.repeat(3_000)}`;
+    const record = guideRecord('9120', [{ url: '/docs/big#big' }]);
+    installService([
+      ...routes({ records: { '9120': record }, docs: { big: docBody('big', long) } }),
+      portalRoute(
+        '/api/records/',
+        () =>
+          jsonResponse(
+            searchBody([
+              hit('big', {
+                slug: 'big',
+                title: 'Big',
+                type: { primary: 'Documentation' },
+                body: { content: long, format: 'md' },
+              }),
+            ]),
+          ),
+        { query: (p) => p.get('q')?.startsWith('slug:') === true },
+      ),
+    ]);
+    const env = success(await run({ recid: '9120' }));
+    const hop = /call cern_opendata_get_records with ids \["([^"]+)"\] and body_offset (\d+)/.exec(
+      env.notice ?? '',
+    );
+    expect(hop?.[1]).toBe('big');
+    const next = dataOf<{ records: { body?: string; body_offset?: number }[] }>(
+      await runToolContract(getRecords, { ids: [hop?.[1] ?? ''], body_offset: Number(hop?.[2]) }),
+    ).records[0];
+    expect(next?.body_offset).toBe(Number(hop?.[2]));
+    expect(`${env.guides[0]?.section}${next?.body}`).toBe(
+      long.slice(preamble.length, Number(hop?.[2]) + (next?.body?.length ?? 0)),
     );
   });
 
@@ -1174,6 +1304,14 @@ describe('cern_opendata_get_analysis_env format', () => {
     expect(text).toContain('### Guides (0)\nNone linked.');
     expect(text).toContain('### Other links (0)\nNone.');
     expect(text).not.toMatch(/undefined|null|NaN/);
+  });
+
+  it('renders the secondary types of a record that states no primary type', async () => {
+    const secondaryOnly = hit('9132', { recid: '9132', type: { secondary: ['Collision'] } });
+    serve({ records: { '9132': secondaryOnly } });
+    const result = await run({ recid: '9132' });
+    expect(success(result).type).toEqual({ primary: '', secondary: ['Collision'] });
+    expect(textOf(result)).toContain('**Type:** Not available (Collision) · **Experiment:**');
   });
 
   it('renders a guide that was not fetched as such, without a section or a cut flag', async () => {

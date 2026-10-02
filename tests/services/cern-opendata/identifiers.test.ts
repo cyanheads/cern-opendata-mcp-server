@@ -38,6 +38,23 @@ describe('reduceRecidSpelling', () => {
     expect(reduceRecidSpelling(raw)).toBe(expected);
   });
 
+  it.each([
+    ['atlas-160006', 'atlas-160006'],
+    ['ATLAS-160006', 'atlas-160006'],
+    ['  Atlas-160006  ', 'atlas-160006'],
+    ['recid:atlas-160006', 'atlas-160006'],
+    ['RECID: ATLAS-160006', 'atlas-160006'],
+    ['https://opendata.cern.ch/record/atlas-160006', 'atlas-160006'],
+    ['http://opendata.cern.ch/api/records/atlas-160006/files', 'atlas-160006'],
+    ['HTTPS://OPENDATA.CERN.CH/RECORD/CMS-93956?ln=en', 'cms-93956'],
+    ['https://opendata.cern.ch/record/cms-93956#files', 'cms-93956'],
+    ['atlas-0160006', 'atlas-160006'],
+    ['cms-00093956', 'cms-93956'],
+    ['atlas-0', 'atlas-'],
+  ])('reduces the prefixed spelling %j to %j', (raw, expected) => {
+    expect(reduceRecidSpelling(raw)).toBe(expected);
+  });
+
   it('leaves values it cannot reduce unvalidated', () => {
     expect(reduceRecidSpelling('abc')).toBe('abc');
     expect(reduceRecidSpelling('https://opendata.cern.ch/record/6004evil')).toBe(
@@ -70,6 +87,24 @@ describe('classifyIdentifier', () => {
       kind: 'recid',
       value: '6004',
     });
+  });
+
+  it.each([
+    ['atlas-160006'],
+    ['ATLAS-160006'],
+    ['recid:atlas-160006'],
+    ['https://opendata.cern.ch/record/atlas-160006'],
+    ['http://opendata.cern.ch/api/records/ATLAS-0160006/files'],
+  ])('classifies the prefixed recid %j as atlas-160006, keeping the input as given', (input) => {
+    expect(classifyIdentifier(input)).toEqual({ input, kind: 'recid', value: 'atlas-160006' });
+  });
+
+  it('keeps a documentation slug whose last part is not all digits a doc slug', () => {
+    expect(classifyIdentifier('cms-guide-docker')).toMatchObject({
+      kind: 'doc_slug',
+      value: 'cms-guide-docker',
+    });
+    expect(classifyIdentifier('cms-2016-pileup')).toMatchObject({ kind: 'doc_slug' });
   });
 
   it('does not classify an all-zero number as a recid', () => {

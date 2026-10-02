@@ -186,6 +186,41 @@ export const environmentSystemHit: RawHit = hit(12100, {
   },
 });
 
+/** Dataset whose recid carries an experiment prefix, the form the portal mints for new records. */
+export const prefixedDatasetHit: RawHit = hit('atlas-160006', {
+  recid: 'atlas-160006',
+  title: 'ATLAS multi-process simulation for ML-based jet flavour tagging (JetSet2)',
+  type: { primary: 'Dataset', secondary: ['Derived', 'Simulated'] },
+  experiment: ['ATLAS'],
+  collaboration: { name: 'ATLAS collaboration' },
+  date_published: '2026',
+  doi: '10.7483/OPENDATA.ATLAS.XEVX.LJJ2',
+  license: { attribution: 'CC0-1.0' },
+  collision_information: { energy: '13TeV, 13.6TeV', type: 'pp' },
+  distribution: { formats: ['h5'], number_files: 309, size: 15_781_638_659_434 },
+  relations: [{ type: 'isRelatedTo', recid: '93940' }],
+});
+
+/** CMS collision dataset with a prefixed recid; it links no validated-run list. */
+export const prefixedCmsHit: RawHit = hit('cms-93956', {
+  recid: 'cms-93956',
+  title: '/EphemeralHLTPhysics1/Run2024F-v1/RAW',
+  type: { primary: 'Dataset', secondary: ['Collision'] },
+  experiment: ['CMS'],
+  collaboration: { name: 'CMS Collaboration' },
+  date_created: ['2024'],
+  date_published: '2025',
+  doi: '10.7843/OPENDATA.CMS.KU3N.B38W',
+  license: { attribution: 'CC0-1.0' },
+  collections: ['CMS-Primary-Datasets'],
+  collision_information: { energy: '13.6TeV', type: 'pp' },
+  distribution: { formats: ['root', 'raw'] },
+  abstract: {
+    description:
+      '<p>A sample from the EphemeralHLTPhysics1 primary dataset in RAW format from RunF of 2024.</p>',
+  },
+});
+
 // Aggregations
 
 export const aggregationsBody = {
@@ -233,6 +268,65 @@ export const aggregationsBody = {
   collision_type: { buckets: [{ key: 'pp', doc_count: 300 }], sum_other_doc_count: 0 },
   file_type: { buckets: [{ key: 'aod', doc_count: 250 }], sum_other_doc_count: 11 },
   availability: { buckets: [{ key: 'online', doc_count: 650 }], sum_other_doc_count: 0 },
+  // The portal's shape: every category bucket nests a subcategory aggregation, and
+  // CMS stores one Heavy-Ion Physics spelling with a leading space.
+  category: {
+    buckets: [
+      { key: ' Heavy-Ion Physics', doc_count: 219, subcategory: { buckets: [] } },
+      {
+        key: 'Exotica',
+        doc_count: 14_584,
+        subcategory: {
+          buckets: [
+            { key: 'Dark Matter', doc_count: 2138 },
+            { key: 'Heavy Fermions, Heavy Righ-Handed Neutrinos', doc_count: 2301 },
+          ],
+        },
+      },
+      { key: 'Heavy-Ion Physics', doc_count: 3, subcategory: { buckets: [] } },
+      {
+        key: 'Higgs Physics',
+        doc_count: 11_232,
+        subcategory: {
+          buckets: [
+            { key: 'Beyond Standard Model', doc_count: 6815 },
+            { key: 'Standard Model', doc_count: 4417 },
+          ],
+        },
+      },
+    ],
+    sum_other_doc_count: 25_724,
+  },
+  keywords: {
+    buckets: [
+      { key: 'Education', doc_count: 1 },
+      { key: 'Roman Pot', doc_count: 2 },
+    ],
+    sum_other_doc_count: 474,
+  },
+  magnet_polarity: {
+    buckets: [
+      { key: 'MagDown', doc_count: 61 },
+      { key: 'MagUp', doc_count: 60 },
+    ],
+    sum_other_doc_count: 0,
+  },
+  stripping_stream: {
+    buckets: [
+      { key: 'BHADRON', doc_count: 3160 },
+      { key: 'DIMUON', doc_count: 154 },
+    ],
+    sum_other_doc_count: 390,
+  },
+  stripping_version: {
+    buckets: [
+      { key: 'stripping21', doc_count: 2186 },
+      { key: 'stripping21r1', doc_count: 2178 },
+    ],
+    sum_other_doc_count: 4,
+  },
+  // A facet the portal sends that search does not expose.
+  signature: { buckets: [{ key: 'Higgs', doc_count: 9 }], sum_other_doc_count: 0 },
 };
 
 // Search envelopes
@@ -291,10 +385,11 @@ export function indexFile(n: number, extras: Record<string, unknown> = {}) {
   };
 }
 
-/** `GET /api/records/{recid}` wrapper. */
+/** `GET /api/records/{recid}` wrapper; a prefixed recid stays a string `id`, as the portal sends it. */
 export function recordBody(metadata: RawMetadata) {
+  const recid = metadata.recid ?? '0';
   return {
-    id: Number(metadata.recid ?? 0),
+    id: /^\d+$/.test(recid) ? Number(recid) : recid,
     created: '2020-01-01T00:00:00+00:00',
     updated: '2026-01-01T00:00:00+00:00',
     links: { self: `${PORTAL}/api/records/${metadata.recid}`, bucket: `${PORTAL}/api/files/b1` },
@@ -361,6 +456,150 @@ export const nanoaodRecordBody = recordBody({
   _files: [FILE_A],
   relations: [{ type: 'isParentOf', recid: '30501', title: 'MINIAOD counterpart' }],
 });
+
+/** Record atlas-160006 trimmed to two of its eight file indexes (keys as the portal names them, members synthetic). */
+export const prefixedRecordBody = recordBody({
+  recid: 'atlas-160006',
+  title: 'ATLAS multi-process simulation for ML-based jet flavour tagging (JetSet2)',
+  availability: 'online',
+  _file_indices: [fileIndex('training_files.json', 2), fileIndex('test_VHbb_files.json', 2)],
+});
+
+/** One JetSet2 member as the portal lists it: no `key`, and an XRootD URI on port 1094. */
+function jetSet2File(dir: string, filename: string, size: number, checksum: string) {
+  return {
+    availability: 'online',
+    checksum,
+    filename,
+    size,
+    uri: `root://eospublic.cern.ch:1094//eos/opendata/atlas/datascience/ATL-SOFT-PUB-2026-002/${dir}/${filename}`,
+  };
+}
+
+/** One JetSet2 index entry: an empty `availability` and no `number_files`, as the portal sends it. */
+function jetSet2Index(key: string, size: number, files: ReturnType<typeof jetSet2File>[]) {
+  return { availability: {}, description: key, key, size, files };
+}
+
+/**
+ * Record atlas-160006 as the portal sends it: no regular files, eight file
+ * indexes whose members carry only `availability`, `checksum`, `filename`,
+ * `size` and `uri`, and no `_availability_details`. Real index keys, sizes and
+ * members, each index trimmed to its first member (`training_files.json` to
+ * its first three).
+ */
+export const jetSet2RecordBody = recordBody({
+  recid: 'atlas-160006',
+  title: 'ATLAS multi-process simulation for ML-based jet flavour tagging (JetSet2)',
+  availability: 'online',
+  _availability_details: null,
+  _files: [],
+  _file_indices: [
+    jetSet2Index('training_files.json', 14_190_227_850_197, [
+      jetSet2File(
+        'train',
+        'jetset2-release_v1.pp_output_train-full_0.h5',
+        72_161_839_049,
+        'adler32:47ef28c2',
+      ),
+      jetSet2File(
+        'train',
+        'jetset2-release_v1.pp_output_train-full_1.h5',
+        72_170_677_285,
+        'adler32:96b1127c',
+      ),
+      jetSet2File(
+        'train',
+        'jetset2-release_v1.pp_output_train-full_10.h5',
+        72_159_847_785,
+        'adler32:1fa008fb',
+      ),
+    ]),
+    jetSet2Index('test_Gammatautau_files.json', 28_647_192_106, [
+      jetSet2File(
+        'test/Gammatautau',
+        'pp_output_test_Gammatautau_0.h5',
+        8_287_211_900,
+        'adler32:884eb16f',
+      ),
+    ]),
+    jetSet2Index('test_VHbb_files.json', 34_731_638_743, [
+      jetSet2File('test/VHbb', 'pp_output_test_VHbb_0.h5', 16_426_075_293, 'adler32:13842195'),
+    ]),
+    jetSet2Index('test_VHcc_files.json', 26_540_542_778, [
+      jetSet2File('test/VHcc', 'pp_output_test_VHcc_0.h5', 15_717_749_203, 'adler32:74e95972'),
+    ]),
+    jetSet2Index('test_VHtautau_files.json', 8_640_790_215, [
+      jetSet2File(
+        'test/VHtautau',
+        'pp_output_test_VHtautau_0.h5',
+        8_640_790_215,
+        'adler32:3b42ca2d',
+      ),
+    ]),
+    jetSet2Index('test_Zprime_files.json', 204_216_498_604, [
+      jetSet2File('test/Zprime', 'pp_output_test_Zprime_0.h5', 17_625_350_491, 'adler32:098fab7f'),
+    ]),
+    jetSet2Index('test_qcd_files.json', 725_727_418_532, [
+      jetSet2File('test/qcd', 'pp_output_test_qcd_0.h5', 16_459_755_949, 'adler32:ca5c5bd0'),
+    ]),
+    jetSet2Index('test_ttbar_files.json', 562_906_728_259, [
+      jetSet2File('test/ttbar', 'pp_output_test_ttbar_0.h5', 12_295_607_802, 'adler32:83d2a568'),
+    ]),
+  ],
+});
+
+// Per-index reads: GET /record/{recid}/file_index/{key} and the record's q=recid: search
+
+/** A record GET body (or any `{ id, metadata }`), as the routes below read it. */
+export interface RecordBody {
+  id: string | number;
+  metadata: RawMetadata;
+}
+
+/** The portal's HTML page for an unknown record or index key on a `/record/…` route (trimmed). */
+export const PAGE_NOT_FOUND_HTML =
+  '<!DOCTYPE html><html lang="en"><head><title>Page not found | CERN Open Data Portal</title></head><body></body></html>';
+
+/** The record GET body as its search hit: `skip_files` drops `_files`, `files` and `_file_indices`. */
+export function filesSkippedHit(body: RecordBody): RawHit {
+  const { _files: _regular, files: _plain, _file_indices: _indexed, ...metadata } = body.metadata;
+  return hit(body.id, metadata);
+}
+
+/**
+ * `GET /record/{recid}/file_index/{key}` answered from `bodies` (recid →
+ * record GET body): the `_file_indices` entry whose key matches, as the
+ * portal returns it, else a 404 HTML page whether the recid or the key is
+ * unknown (the portal answers both alike).
+ */
+export function fileIndexRoute(bodies: Readonly<Record<string, RecordBody>>): FetchMockRoute {
+  return portalRoute(/^\/record\/[^/]+\/file_index\/[^/]+$/, (request) => {
+    const [, , recid = '', , key = ''] = new URL(request.url).pathname.split('/');
+    const entry = bodies[decodeURIComponent(recid)]?.metadata._file_indices?.find(
+      (index) => index.key === decodeURIComponent(key),
+    );
+    return entry
+      ? jsonResponse(entry)
+      : new Response(PAGE_NOT_FOUND_HTML, {
+          status: 404,
+          headers: { 'content-type': 'text/html' },
+        });
+  });
+}
+
+/** The `q=recid:{recid}` search answered from `bodies`: one files-skipped hit, or none. */
+export function recordSearchRoute(bodies: Readonly<Record<string, RecordBody>>): FetchMockRoute {
+  return portalRoute(
+    '/api/records/',
+    (request) => {
+      const recid = (new URL(request.url).searchParams.get('q') ?? '').replace(/^recid:/, '');
+      const body = bodies[recid];
+      return jsonResponse(body ? searchBody([filesSkippedHit(body)]) : emptySearchBody);
+    },
+    { query: (params) => params.get('q')?.startsWith('recid:') ?? false },
+  );
+}
 
 // Validated-run lists
 
@@ -455,6 +694,32 @@ export const TRIGGER_ABSTRACT_HTML =
   '<p>last  seen online on run 178380 (/cdaq/physics/Run2011/5e32/v4.2/HLT/V2)</p>' +
   '<p>V1: (runs 160404 - 163261) seeded by: L1_SingleMu12</p>' +
   '<p>See also the full list of triggers for CMS 2011 open data: <a href="/record/3000">list</a></p></blockquote>';
+
+/** Record 5202's methodology as the portal serves it: selection cuts written with a bare `<` and `>`. */
+export const METHODOLOGY_5202_HTML =
+  '<p>An event was selected if there were two muons in the event, both with |eta| < 2.4, at least one muon was a global muon, the invariant mass of the two muons was > 0.3 GeV and < 300 GeV, and they have opposite-sign charge.</p>';
+
+/** Record 5208's methodology as the portal serves it. */
+export const METHODOLOGY_5208_HTML =
+  '<p>An event was selected if there were two muons in the event with pT > 20 GeV and |eta| < 2.1 and the invariant mass of the two muons was > 60 GeV and < 120 GeV.</p>';
+
+/** Records 5202 and 5208, trimmed to their methodology. */
+export const selectionCutHits: readonly RawHit[] = [
+  hit(5202, {
+    recid: '5202',
+    title: 'Events with two muons from 2011 (Primary dataset SingleMu 2011)',
+    type: { primary: 'Dataset', secondary: ['Derived'] },
+    experiment: ['CMS'],
+    methodology: { description: METHODOLOGY_5202_HTML },
+  }),
+  hit(5208, {
+    recid: '5208',
+    title: 'Z to two muons from 2011',
+    type: { primary: 'Dataset', secondary: ['Derived'] },
+    experiment: ['CMS'],
+    methodology: { description: METHODOLOGY_5208_HTML },
+  }),
+];
 
 // Tool-layer fixtures
 
@@ -639,14 +904,23 @@ export function docBody(slug: string, content: string, title = `Guide ${slug}`) 
   };
 }
 
-/** A `Supplementaries::Trigger` hit: the title names the path, `abstract.description` is the HTML. */
+/**
+ * A `Supplementaries::Trigger` hit: the title names the path and, with
+ * `dataset`, one primary dataset (` (SingleMu dataset)`) or, with `datasets`,
+ * several (` (DoubleMu, DoubleMuParked datasets)`); `abstract.description` is
+ * the HTML.
+ */
 export function triggerHit(
   recid: string,
   path: string,
   abstractHtml: string | undefined,
-  options: { dataset?: string; year?: string } = {},
+  options: { dataset?: string; datasets?: string[]; year?: string } = {},
 ): RawHit {
-  const dataset = options.dataset ? ` (${options.dataset} dataset)` : '';
+  const dataset = options.datasets
+    ? ` (${options.datasets.join(', ')} datasets)`
+    : options.dataset
+      ? ` (${options.dataset} dataset)`
+      : '';
   return hit(recid, {
     recid,
     title: `High-Level Trigger path information ${path}${dataset}`,

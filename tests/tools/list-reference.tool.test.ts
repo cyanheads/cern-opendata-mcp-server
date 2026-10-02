@@ -5,6 +5,7 @@
  * @module tests/tools/list-reference.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -43,6 +44,17 @@ describe('cern_opendata_list_reference registration', () => {
   it('declares no error contract and no enrichment (static, offline)', () => {
     expect(listReference.errors).toBeUndefined();
     expect((listReference as { enrichment?: unknown }).enrichment).toBeUndefined();
+  });
+
+  it('describes an entry value as a name, not an accepted spelling, in identifiers and licensing', () => {
+    const json = JSON.stringify(z.toJSONSchema(listReference.output, { unrepresentable: 'any' }));
+    expect(json).toContain(
+      'A value or query form, spelled exactly as the tools accept it; in the identifiers and licensing topics, the name of an identifier form or a licensing rule.',
+    );
+    const valuesOf = (topic: string) =>
+      REFERENCE_TABLES.find((table) => table.topic === topic)?.entries.map((entry) => entry.value);
+    expect(valuesOf('identifiers')).toContain('file-index key');
+    expect(valuesOf('licensing')).toContain('Per-record license');
   });
 });
 
@@ -93,7 +105,22 @@ describe('cern_opendata_list_reference output', () => {
       collision_energies: 15,
       collision_types: 5,
       file_types: 65,
+      categories: 39,
+      lhcb: 25,
     });
+  });
+
+  it('serves the category and LHCb snapshots on both surfaces, dated', async () => {
+    for (const [topic, sample] of [
+      ['categories', '| Higgs Physics::Standard Model | Experiments: CMS, ATLAS. |'],
+      ['lhcb', '| MagDown | magnet_polarity: data taken with'],
+    ] as const) {
+      const result = await runToolContract(listReference, { topic });
+      const [table] = topicsOf(result);
+      expect(table?.summary, topic).toMatch(/^Static snapshot dated 2026-10-01/);
+      expect(textOf(result), topic).toContain(`## ${topic}`);
+      expect(textOf(result), topic).toContain(sample);
+    }
   });
 
   it('matches the vocabulary tables value for value', async () => {

@@ -1,8 +1,9 @@
 /**
  * @fileoverview cern_opendata_list_reference — the static vocabulary the other
  * tools accept: experiments, record types, collision energies and types, file
- * types, availability states, identifier forms, query syntax, licensing and
- * CMS run periods. Offline; no upstream calls.
+ * types, availability states, physics categories, LHCb magnet polarities and
+ * stripping streams and versions, identifier forms, query syntax, licensing
+ * and CMS run periods. Offline; no upstream calls.
  * @module mcp-server/tools/definitions/list-reference.tool
  */
 
@@ -14,11 +15,11 @@ import { blankAsUnset } from '../inputs.js';
 export const listReference = tool('cern_opendata_list_reference', {
   title: 'List Reference Vocabulary',
   description:
-    'Decode the vocabulary the other cern_opendata tools accept: experiments, record types, collision energies and types, file formats and data tiers, availability states, identifier forms, query syntax, licensing, and the CMS run periods that have validated-run lists. Static and offline; omit topic for every table.',
+    'Decode the vocabulary the other cern_opendata tools accept: experiments, record types, collision energies and types, file formats and data tiers, availability states, physics categories, LHCb magnet polarities and stripping streams and versions, identifier forms, query syntax, licensing, and the CMS run periods that have validated-run lists. Static and offline; omit topic for every table.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     topic: blankAsUnset(z.enum(REFERENCE_TOPICS).optional()).describe(
-      'One table to return: experiments, record_types, collision_energies, collision_types, file_types, availability, identifiers, query_syntax, licensing or run_periods. Omit for every table.',
+      'One table to return: experiments, record_types, collision_energies, collision_types, file_types, availability, categories, lhcb, identifiers, query_syntax, licensing or run_periods. Omit for every table.',
     ),
   }),
   output: z.object({
@@ -36,7 +37,9 @@ export const listReference = tool('cern_opendata_list_reference', {
                   .object({
                     value: z
                       .string()
-                      .describe('The value or form, spelled exactly as the tools accept it.'),
+                      .describe(
+                        'A value or query form, spelled exactly as the tools accept it; in the identifiers and licensing topics, the name of an identifier form or a licensing rule.',
+                      ),
                     meaning: z.string().describe('What the value means and where it applies.'),
                   })
                   .describe('One vocabulary value.'),
