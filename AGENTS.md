@@ -19,20 +19,21 @@ Seven read-only tools and one resource over the CERN Open Data Portal (`https://
 
 | Upstream route | Used by |
 |:---------------|:--------|
-| `GET /api/records/?…` (search; `ondemand=true` on every query) | `cern_opendata_search_records`, `cern_opendata_get_records`, `cern_opendata_search_trigger_paths`, `cern_opendata_get_analysis_env`, `cern_opendata_get_validated_runs`, `cern-opendata://record/{recid}` |
-| `GET /api/records/{recid}` (full record with its file manifest; 32 MiB ceiling, cached) | `cern_opendata_list_files` |
+| `GET /api/records/?…` (search; `ondemand=true` on every query) | `cern_opendata_search_records`, `cern_opendata_get_records`, `cern_opendata_search_trigger_paths`, `cern_opendata_get_analysis_env`, `cern_opendata_get_validated_runs`, `cern_opendata_list_files` (index scope), `cern-opendata://record/{recid}` |
+| `GET /api/records/{recid}` (full record with its file manifest; 32 MiB ceiling, attempt cut only at the call's deadline, cached) | `cern_opendata_list_files` (record scope, and index scope on a cached manifest) |
+| `GET /record/{recid}/file_index/{key}` (one file index; 8 MiB ceiling, cached) | `cern_opendata_list_files` (index scope without a cached manifest, beside the record's `q=recid:` search) |
 | `GET /api/docs/{slug}` | `cern_opendata_get_analysis_env` (guide sections) |
 | `GET /record/{recid}/files/{key}` | `cern_opendata_get_validated_runs` (the good-run list file) |
 
 `cern_opendata_list_reference` serves static tables from `vocabulary.ts` and makes no upstream call.
 
-`CernOpenDataService` (`src/services/cern-opendata/cern-opendata-service.ts`) owns every upstream request: one pacer (50 requests a minute, 4 concurrent, a cooldown after a 429), a header gate on `x-ratelimit-remaining`, `withRetry` (2 retries) inside a 50 s budget per tool call from `startBudget()`, a per-route accept-list with byte ceilings, and two caches (compact file manifests, an LRU of 8 for 15 minutes; the validated-run collection, 15 minutes). `docs/design.md` § Services is the full contract.
+`CernOpenDataService` (`src/services/cern-opendata/cern-opendata-service.ts`) owns every upstream request: one pacer (50 requests a minute, 4 concurrent, a cooldown after a 429), a header gate on `x-ratelimit-remaining`, `withRetry` (2 retries) inside a 50 s budget per tool call from `startBudget()`, a per-route accept-list with byte ceilings and a 30 s attempt cap (none on the record GET, which runs to the call's deadline), and 15-minute caches: compact file manifests (an LRU of 8), file indexes read on their own and their record heads (LRUs of 16), and the validated-run collection. `docs/design.md` § Services is the full contract.
 
 Conventions every definition follows:
 
 - **Every portal request goes through `CernOpenDataService`**, with one `service.startBudget()` per tool call passed to each of its requests. Never `fetch` from a handler.
 - **Shared inputs** come from `src/mcp-server/tools/inputs.ts`: `blankAsUnset` on every optional input, `listInput` / `vocabularyListInput` / `requiredListInput` for lists (an array or one comma-separated string), `recidInput` for recids. Vocabulary tables live in `vocabulary.ts`, shared with `cern_opendata_list_reference`.
-- **Portal text is data.** Render portal strings in `format()` only through the `text.ts` helpers (`inline`, `inlineList`, `inlineOrNA`, `fence`, `fenceHtml`, `printUrl`), and any portal-derived value in a notice or error message through `noticeValue` / `noticeList`; `structuredContent` and error `data` keep every string as received, HTML in `_html` fields.
+- **Portal text is data.** Render portal strings in `format()` only through the `text.ts` helpers (`inline`, `inlineSpelling`, `inlineList`, `inlineOrNA`, `fence`, `fenceHtml`, `printUrl`), and any portal-derived value in a notice or error message through `noticeValue` / `noticeList`; `structuredContent` and error `data` keep every string as received, HTML in `_html` fields.
 - **No fabrication.** An absent upstream field stays absent and renders as `Not available`; `license` comes from the record or the `cern_terms_default` rule (Decision 12), and `citation` only from record fields (Decision 13).
 - **List-shaped tools** (`search_records`, `list_files`, `get_validated_runs`, `search_trigger_paths`) call `startListEnrichment` first and `finishListEnrichment` once, with one notice from `composeNotice` (`src/mcp-server/tools/enrichment.ts`).
 - **Errors.** Every definition that reaches the portal declares `rate_limited` and `upstream_unreadable` inline, with `thrownBy: 'service'` and a recovery naming that tool; caller-input reasons carry `severity: 'notice'`.
@@ -84,7 +85,7 @@ import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-s
 import { classifyIdentifier } from '@/services/cern-opendata/identifiers.js';
 import { toRecord } from '@/services/cern-opendata/normalize.js';
 import { composeNotice } from '../enrichment.js';
-import { requiredListInput } from '../inputs.js';
+import { blankAsUnset, requiredListInput } from '../inputs.js';
 
 export const getRecords = tool('cern_opendata_get_records', {
   title: 'Get CERN Open Data Records',
@@ -93,14 +94,17 @@ export const getRecords = tool('cern_opendata_get_records', {
   input: z.object({
     ids: requiredListInput(20, z.string().max(500).describe('One identifier: …'), 'At least one identifier is required …')
       .describe('Identifiers to resolve, 1-20: an array, or one comma-separated string. …'),
+    body_offset: blankAsUnset(z.number().int().min(0).default(0)).describe('With exactly one documentation or news id: where its body slice starts …'),
   }),
   output: z.object({
     records: z.array(RecordSchema).describe('Resolved records, in the order of their first matching input.'),
     missing: z.array(z.object({ input: …, interpreted_as: z.enum(INTERPRETED_AS)…, guidance: … }))
       .describe('Identifiers that resolved to no record; empty when every id resolved.'),
+    deferred: z.array(z.string()…).describe('Inputs whose records were left out to hold the response to 64,000 bytes …'),
   }),
   enrichment: { notice: z.string().optional().describe('Caveats about the returned records, …') },
   errors: [
+    { reason: 'invalid_body_offset', code: JsonRpcErrorCode.ValidationError, severity: 'notice', when: '…', recovery: '…' },
     { reason: 'rate_limited', code: JsonRpcErrorCode.RateLimited, retryable: true, thrownBy: 'service',
       when: "The portal's 60-a-minute budget is spent: …",
       recovery: 'Wait the retryAfter seconds given in this error …, then call cern_opendata_get_records again with the same arguments.' },
@@ -108,13 +112,17 @@ export const getRecords = tool('cern_opendata_get_records', {
   ],
 
   async handler(input, ctx) {
+    if (input.body_offset > 0 && input.ids.length > 1) throw ctx.fail('invalid_body_offset', `body_offset … takes exactly one id …`);
     const classified = input.ids.map(classifyIdentifier);
     const service = getCernOpenDataService();
     const { matches, missing } = await service.lookup(classified, service.startBudget(), ctx);
-    const records = matches.map((match) => toRecord(match.hit, match.matchedInputs));
-    const notice = composeNotice(records.map((r) => (r.body_truncated ? `The body of … was cut …` : undefined)));
+    const resolved = matches.map((match) => toRecord(match.hit, match.matchedInputs, input.body_offset));
+    // … invalid_body_offset when the one record has no body or the offset is past body_length
+    const missingOut = missing.map((id) => ({ input: id.input, interpreted_as: id.kind, guidance: missingGuidance(id) }));
+    // Records in response order while both surfaces stay within 64,000 bytes; the rest go to `deferred`.
+    const { records, deferred, notice } = withinBudget(resolved, input.ids, missingOut);
     if (notice) ctx.enrich.notice(notice);
-    return { records, missing: missing.map((id) => ({ input: id.input, interpreted_as: id.kind, guidance: missingGuidance(id) })) };
+    return { records, missing: missingOut, deferred };
   },
 
   // format() populates content[], the markdown twin of structuredContent; both must carry
@@ -131,8 +139,8 @@ Condensed from `src/mcp-server/resources/definitions/record.resource.ts`:
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { RecordSchema } from '@/mcp-server/record-schema.js';
+import { recidInput } from '@/mcp-server/tools/inputs.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
-import { reduceRecidSpelling } from '@/services/cern-opendata/identifiers.js';
 import { toRecord } from '@/services/cern-opendata/normalize.js';
 
 export const recordResource = resource('cern-opendata://record/{recid}', {
@@ -141,7 +149,7 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   description: "One CERN Open Data Portal record's metadata by recid: … Tool coverage: cern_opendata_get_records.",
   mimeType: 'application/json',
   params: z.object({
-    recid: z.string().regex(/^0*[1-9]\d*$/, 'A recid is digits, such as 6004.').describe('Record id: digits, such as 6004; …'),
+    recid: recidInput().describe('Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); …'),
   }),
   output: RecordSchema,
   cacheHint: { ttlMs: 900_000, cacheScope: 'public' },
@@ -151,9 +159,9 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
     // plus rate_limited and upstream_unreadable (thrownBy: 'service'), recoveries naming the resource read
   ],
   async handler(params, ctx) {
-    const recid = reduceRecidSpelling(params.recid);
+    const { recid } = params;
     const service = getCernOpenDataService();
-    const { matches } = await service.lookup([{ input: params.recid, kind: 'recid', value: recid }], service.startBudget(), ctx);
+    const { matches } = await service.lookup([{ input: recid, kind: 'recid', value: recid }], service.startBudget(), ctx);
     const match = matches[0];
     if (!match) throw ctx.fail('record_not_found', `No record has recid ${recid}.`, { recid });
     return toRecord(match.hit, [recid]);
@@ -207,7 +215,7 @@ Handlers receive a unified `ctx` object. The properties this server uses:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.enrich` | Success-path agent context — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). The list-shaped tools go through `startListEnrichment` / `finishListEnrichment`; `cern_opendata_search_trigger_paths` echoes the normalized path. |
+| `ctx.enrich` | Success-path agent context — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). The list-shaped tools go through `startListEnrichment` / `finishListEnrichment`; `cern_opendata_search_trigger_paths` echoes the query it built from the normalized path. |
 | `ctx.fail` | Builds the declared contract error for a `reason`, for the handler to throw — `throw ctx.fail('record_not_found', message, data)`. |
 | `ctx.signal` | `AbortSignal` for cancellation. The service passes it to `withRetry`; `cern_opendata_get_analysis_env` rethrows instead of degrading when it fired. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
@@ -270,6 +278,7 @@ src/
       cern-opendata-service.ts            # Portal client: pacer, retry, budget, accept-list, byte ceilings, caches
       identifiers.ts                      # Recid spelling reduction, get_records id classification
       normalize.ts                        # Hits and records to output shapes, license, citation
+      query-syntax.ts                     # Search query delimiter scan (refused before sending)
       text.ts                             # HTML to text, inline neutralization, fences, URL printing
       trigger-parse.ts                    # Trigger path abstract parser
       vocabulary.ts                       # Canonical filter tables, reference topics
@@ -291,7 +300,7 @@ src/
     resources/definitions/
       index.ts                            # allResourceDefinitions barrel
       record.resource.ts                  # cern-opendata://record/{recid}
-tests/                                    # Mirrors src/; fixtures/ holds portal payloads and the fetch harness
+tests/                                    # Mirrors src/; fixtures/ holds portal payloads, the fetch harness and cpu-time.ts (thread-CPU linear-time assertions)
 docs/
   design.md                               # Tool surface, portal API reference, design decisions
 ```
