@@ -38,6 +38,7 @@ import {
   type ListSpec,
   NOT_FOUND_BODY,
   portalRoute,
+  prefixedCmsHit,
   RUN_LIST_BODY,
   searchBody,
   validatedListHit,
@@ -78,13 +79,13 @@ function routes({ specs = LIST_SPECS, collection, records = {}, files = {} }: Up
       '/api/records/',
       (request) => {
         const q = new URL(request.url).searchParams.get('q') ?? '';
-        const found = records[/^recid:(\d+)$/.exec(q)?.[1] ?? ''];
+        const found = records[/^recid:(\S+)$/.exec(q)?.[1] ?? ''];
         return jsonResponse(searchBody(found ? [found] : []));
       },
       { query: (params) => params.get('q')?.startsWith('recid:') === true },
     ),
-    portalRoute(/^\/record\/\d+\/files\/.+$/, (request) => {
-      const recid = /^\/record\/(\d+)\//.exec(new URL(request.url).pathname)?.[1] ?? '';
+    portalRoute(/^\/record\/[^/]+\/files\/.+$/, (request) => {
+      const recid = /^\/record\/([^/]+)\//.exec(new URL(request.url).pathname)?.[1] ?? '';
       return jsonResponse(recid in files ? files[recid] : RUN_LIST_BODY);
     }),
   ];
@@ -205,6 +206,29 @@ describe('cern_opendata_get_validated_runs input', () => {
     expect(result.list?.recid).toBe('1002');
   });
 
+  it('looks a prefixed dataset recid up instead of rejecting it, and finds no list it links', async () => {
+    const { http } = serve({ records: { 'cms-93956': prefixedCmsHit } });
+    const error = errorOf(await run({ recid: 'CMS-93956' }));
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({ reason: 'no_validated_runs', recid: 'cms-93956' });
+    expect(http.calls).toHaveLength(2);
+    expect(requestedUrls(http)[1]?.searchParams.get('q')).toBe('recid:cms-93956');
+  });
+
+  it('uses a prefixed list recid as named and reads its file under that recid', async () => {
+    const key = 'Cert_380000-390000_13p6TeV_Collisions24_JSON.txt';
+    const specs = [...LIST_SPECS, { recid: 'cms-94001', key, periods: ['Run2024F'] }];
+    const { http } = serve({ specs });
+    const result = await run({ recid: 'https://opendata.cern.ch/record/cms-94001' });
+    expect(success(result).list).toMatchObject({
+      recid: 'cms-94001',
+      https_url: `https://opendata.cern.ch/record/cms-94001/files/${key}`,
+      portal_url: 'https://opendata.cern.ch/record/cms-94001',
+    });
+    expect(requestsOf(http)[1]).toBe(`/record/cms-94001/files/${key}`);
+    expect(textOf(result)).toContain('## Validated runs: list cms-94001 (full)');
+  });
+
   it.each([
     ['abc'],
     ['60o4'],
@@ -213,6 +237,9 @@ describe('cern_opendata_get_validated_runs input', () => {
     ['0'],
     ['https://evil.example/record/1002'],
     ['1234567890123'],
+    ['cms-'],
+    ['cms-0'],
+    ['cms-93956x'],
   ])('rejects the recid %j as invalid arguments before any request', async (recid) => {
     const { http } = serve();
     const result = await run({ recid });
@@ -511,23 +538,202 @@ describe('cern_opendata_get_validated_runs dataset recid', () => {
     expect(http.calls).toHaveLength(2);
   });
 
-  it('refuses a dataset that links no list of the collection, naming the record', async () => {
+  /** A CMS collision dataset that links nothing, as records 93950 and cms-93956 are. */
+  const unlinkedCollision = (recid: string, title: string, runPeriod: string[] | null = null) =>
+    hit(recid, {
+      recid,
+      title,
+      type: { primary: 'Dataset', secondary: ['Collision'] },
+      experiment: ['CMS'],
+      run_period: runPeriod,
+      date_created: ['2017'],
+    });
+
+  it('routes a CMS collision dataset that links no list to the list covering its run period', async () => {
     const d = datasetLinkingLists('6104', { abstract: ['99999'] });
     serve({ records: { '6104': d } });
-    const error = errorOf(await run({ recid: '6104' }));
+    const result = await run({ recid: '6104' });
+    const error = errorOf(result);
     expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data).toMatchObject({ reason: 'no_validated_runs', recid: '6104' });
+    expect(error.data).toMatchObject({
+      reason: 'no_validated_runs',
+      recid: '6104',
+      run_period: ['Run2012B'],
+    });
     expect(error.message).toBe(
-      'Record 6104 links no validated-run list; lists exist for CMS collision data only, so simulated, non-CMS and non-collision records have none.',
+      'Record 6104 is CMS collision data from run period Run2012B and links no validated-run list, but the collection holds a list for that run period. Call cern_opendata_get_validated_runs with run_period Run2012B.',
+    );
+    expect(hintOf(error)).toBe('Call cern_opendata_get_validated_runs with run_period Run2012B.');
+    expect(textOf(result).match(/with run_period Run2012B\./g)).toHaveLength(1);
+  });
+
+  it.each(['muons_only', 'full'] as const)(
+    'carries variant %s into the run_period call it routes to',
+    async (variant) => {
+      const d = datasetLinkingLists('6104', { abstract: ['99999'] });
+      serve({ records: { '6104': d } });
+      const result = await run({ recid: '6104', variant });
+      const error = errorOf(result);
+      const hint = `Call cern_opendata_get_validated_runs with run_period Run2012B and variant ${variant}.`;
+      expect(error.data).toMatchObject({ reason: 'no_validated_runs', recid: '6104' });
+      expect(error.message).toBe(
+        `Record 6104 is CMS collision data from run period Run2012B and links no validated-run list, but the collection holds a list for that run period. ${hint}`,
+      );
+      expect(hintOf(error)).toBe(hint);
+      expect(textOf(result).split(hint)).toHaveLength(2);
+    },
+  );
+
+  it('carries the variant into the call routed to one of several covered run periods', async () => {
+    const d = datasetLinkingLists('6107', {}, { run_period: ['Run2012B', 'HIRun2010'] });
+    serve({ records: { '6107': d } });
+    const result = await run({ recid: '6107', variant: 'muons_only' });
+    const hint =
+      'Call cern_opendata_get_validated_runs with run_period set to one of them and variant muons_only.';
+    expect(errorOf(result).message).toBe(
+      `Record 6107 is CMS collision data from run periods Run2012B, HIRun2010 and links no validated-run list, but the collection holds lists for Run2012B, HIRun2010. ${hint}`,
+    );
+    expect(hintOf(errorOf(result))).toBe(hint);
+    expect(textOf(result).split(hint)).toHaveLength(2);
+  });
+
+  it('carries the variant into the call that follows the run_periods topic when no period is named', async () => {
+    serve({ records: { '93952': unlinkedCollision('93952', 'ZeroBias collisions of 2017') } });
+    const result = await run({ recid: '93952', variant: 'muons_only' });
+    const hint =
+      'Call cern_opendata_list_reference with topic run_periods for the periods that have lists, then call cern_opendata_get_validated_runs with run_period and variant muons_only.';
+    expect(errorOf(result).message).toBe(
+      `Record 93952 is CMS collision data but states no run period and links no validated-run list. ${hint}`,
+    );
+    expect(hintOf(errorOf(result))).toBe(hint);
+    expect(textOf(result).split(hint)).toHaveLength(2);
+  });
+
+  it('names no variant when no published list covers the period: nothing is routed to this tool', async () => {
+    serve({ records: { '93950': unlinkedCollision('93950', '/ZeroBias/Run2017E-v1/RAW') } });
+    const error = errorOf(await run({ recid: '93950', variant: 'muons_only' }));
+    expect(error.message).toBe(
+      'Record 93950 is CMS collision data from run period Run2017E, which its dataset path names; no published validated-run list covers it. Call cern_opendata_list_reference with topic run_periods for the periods that have lists.',
+    );
+    expect(hintOf(error)).not.toContain('variant');
+  });
+
+  it.each([
+    [
+      ['Run2012B', 'HIRun2010', 'Run2017E'],
+      'from run periods Run2012B, HIRun2010, Run2017E and links no validated-run list, but the collection holds lists for Run2012B, HIRun2010. Call cern_opendata_get_validated_runs with run_period set to one of them.',
+    ],
+    [
+      ['run2012b', 'Run2017E'],
+      'from run periods run2012b, Run2017E and links no validated-run list, but the collection holds a list for Run2012B. Call cern_opendata_get_validated_runs with run_period Run2012B.',
+    ],
+  ])('names the covered ones of several stated run periods %j', async (periods, tail) => {
+    const d = datasetLinkingLists('6107', {}, { run_period: periods });
+    serve({ records: { '6107': d } });
+    expect(errorOf(await run({ recid: '6107' })).message).toBe(
+      `Record 6107 is CMS collision data ${tail}`,
     );
   });
 
-  it('refuses a dataset with no links at all (simulated or non-CMS)', async () => {
-    serve({ records: { '30517': hit('30517', { recid: '30517', title: 'Simulated' }) } });
-    expect(errorOf(await run({ recid: '30517' })).data).toMatchObject({
-      reason: 'no_validated_runs',
-      recid: '30517',
+  it('routes a dataset path era the collection holds a list for, when no run_period is stated', async () => {
+    const d = unlinkedCollision('93953', '/ZeroBias/Run2012B-v1/RAW');
+    serve({ records: { '93953': d } });
+    expect(errorOf(await run({ recid: '93953' })).message).toBe(
+      'Record 93953 is CMS collision data from run period Run2012B, which its dataset path names, and links no validated-run list, but the collection holds a list for that run period. Call cern_opendata_get_validated_runs with run_period Run2012B.',
+    );
+  });
+
+  it('says no published list covers the run period a CMS collision dataset path names (record 93950)', async () => {
+    serve({ records: { '93950': unlinkedCollision('93950', '/ZeroBias/Run2017E-v1/RAW') } });
+    const result = await run({ recid: '93950' });
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({ reason: 'no_validated_runs', recid: '93950' });
+    expect(error.data).not.toHaveProperty('run_period');
+    expect(error.message).toBe(
+      'Record 93950 is CMS collision data from run period Run2017E, which its dataset path names; no published validated-run list covers it. Call cern_opendata_list_reference with topic run_periods for the periods that have lists.',
+    );
+    expect(textOf(result)).not.toContain('simulated, non-CMS and non-collision');
+    expect(textOf(result).match(/topic run_periods/g)).toHaveLength(1);
+    expect(hintOf(error)).toBe(
+      'Call cern_opendata_list_reference with topic run_periods for the periods that have lists.',
+    );
+  });
+
+  it('says no published list covers the run periods a CMS collision dataset states', async () => {
+    serve({
+      records: {
+        '93951': unlinkedCollision('93951', '/ZeroBias/Run2017E-v1/RAW', ['Run2017E', 'Run2017F']),
+      },
     });
+    const error = errorOf(await run({ recid: '93951' }));
+    expect(error.data).toMatchObject({ recid: '93951', run_period: ['Run2017E', 'Run2017F'] });
+    expect(error.message).toBe(
+      'Record 93951 is CMS collision data from run periods Run2017E, Run2017F; no published validated-run list covers them. Call cern_opendata_list_reference with topic run_periods for the periods that have lists.',
+    );
+  });
+
+  it('reads the run period of a prefixed CMS collision record from its dataset path', async () => {
+    serve({ records: { 'cms-93956': prefixedCmsHit } });
+    expect(errorOf(await run({ recid: 'cms-93956' })).message).toBe(
+      'Record cms-93956 is CMS collision data from run period Run2024F, which its dataset path names; no published validated-run list covers it. Call cern_opendata_list_reference with topic run_periods for the periods that have lists.',
+    );
+  });
+
+  it.each([
+    ['a title that is not a dataset path', 'ZeroBias collisions of 2017'],
+    [
+      'a dataset path whose era names no run period',
+      '/MinimumBias/Commissioning10-May19ReReco-v1/RECO',
+    ],
+  ])(
+    'names no period for a CMS collision dataset with %s and no run_period',
+    async (_name, title) => {
+      serve({ records: { '93952': unlinkedCollision('93952', title) } });
+      const error = errorOf(await run({ recid: '93952' }));
+      expect(error.message).toBe(
+        'Record 93952 is CMS collision data but states no run period and links no validated-run list. Call cern_opendata_list_reference with topic run_periods for the periods that have lists, then call cern_opendata_get_validated_runs with run_period.',
+      );
+      expect(error.message).not.toContain('simulated');
+    },
+  );
+
+  it.each([
+    ['a record with no type or experiment', { title: 'Simulated' }],
+    [
+      'a CMS simulated dataset',
+      {
+        title: '/DYJetsToLL/RunIIFall15/AODSIM',
+        type: { primary: 'Dataset', secondary: ['Simulated'] },
+        experiment: ['CMS'],
+      },
+    ],
+    [
+      'a collision dataset of another experiment',
+      {
+        title: '/ALICE/LHC10h/ESD',
+        type: { primary: 'Dataset', secondary: ['Collision'] },
+        experiment: ['ALICE'],
+        run_period: ['Run2012B'],
+      },
+    ],
+    [
+      'a CMS derived dataset',
+      {
+        title: 'Derived from /DoubleMu/Run2012B-22Jan2013-v1/AOD',
+        type: { primary: 'Dataset', secondary: ['Derived'] },
+        experiment: ['CMS'],
+        run_period: ['Run2012B'],
+      },
+    ],
+  ])('keeps the CMS-collision-only explanation for %s', async (_name, meta) => {
+    serve({ records: { '30517': hit('30517', { recid: '30517', ...meta }) } });
+    const result = await run({ recid: '30517' });
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({ reason: 'no_validated_runs', recid: '30517' });
+    expect(error.message).toBe(
+      'Record 30517 links no validated-run list; lists exist for CMS collision data only, so simulated, non-CMS and non-collision records have none.',
+    );
+    expect(hintOf(error)).toContain('topic run_periods');
   });
 
   it('refuses a dataset whose only linked list has no twin in the requested variant', async () => {

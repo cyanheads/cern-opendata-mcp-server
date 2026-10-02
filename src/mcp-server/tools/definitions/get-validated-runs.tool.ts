@@ -28,7 +28,12 @@ import {
   oneLine,
   printUrl,
 } from '@/services/cern-opendata/text.js';
-import type { RunList, RunListVariant, ValidatedRunList } from '@/services/cern-opendata/types.js';
+import type {
+  RawMetadata,
+  RunList,
+  RunListVariant,
+  ValidatedRunList,
+} from '@/services/cern-opendata/types.js';
 import {
   composeNotice,
   finishListEnrichment,
@@ -87,6 +92,77 @@ function selectionOf(
 
 function uniqueByRecid(lists: readonly ValidatedRunList[]): ValidatedRunList[] {
   return lists.filter((list, i) => lists.findIndex((other) => other.recid === list.recid) === i);
+}
+
+/** The run period a CMS dataset path's era begins with: `/ZeroBias/Run2017E-v1/RAW` gives Run2017E. */
+const PATH_ERA_PERIOD = /^\/[^/]+\/((?:HI)?Run\d{4}[A-Z]?)(?=[-_/])/;
+
+const isCmsCollision = (meta: RawMetadata): boolean =>
+  (strList(meta.experiment) ?? []).includes('CMS') &&
+  meta.type?.primary === 'Dataset' &&
+  (strList(meta.type.secondary) ?? []).includes('Collision');
+
+/**
+ * The `no_validated_runs` message, data and recovery for a dataset that links
+ * no list of the collection. Lists exist for CMS collision data only, so any
+ * other record keeps that explanation. A CMS collision dataset is told about
+ * its run periods (stated, else the one its dataset path's era names): a
+ * period the collection holds a list for is named for a `run_period` call;
+ * otherwise no published list covers it. A `run_period` call it routes to
+ * carries the caller's `variant`, when one was given.
+ */
+function unlinkedDataset(
+  recid: string,
+  meta: RawMetadata,
+  lists: readonly ValidatedRunList[],
+  variant: RunListVariant | undefined,
+): { data: Record<string, unknown>; message: string } {
+  if (!isCmsCollision(meta)) {
+    return {
+      message: `Record ${recid} links no validated-run list; lists exist for CMS collision data only, so simulated, non-CMS and non-collision records have none.`,
+      data: { recid },
+    };
+  }
+  const stated = strList(meta.run_period);
+  const fromPath = PATH_ERA_PERIOD.exec(str(meta.title)?.trim() ?? '')?.[1];
+  const periods = stated ?? (fromPath ? [fromPath] : []);
+  const data = stated ? { recid, run_period: stated } : { recid };
+  const toReference =
+    'Call cern_opendata_list_reference with topic run_periods for the periods that have lists';
+  const withVariant = variant ? ` and variant ${variant}` : '';
+  if (periods.length === 0) {
+    const hint = `${toReference}, then call cern_opendata_get_validated_runs with run_period${withVariant}.`;
+    return {
+      message: `Record ${recid} is CMS collision data but states no run period and links no validated-run list. ${hint}`,
+      data: { ...data, recovery: { hint } },
+    };
+  }
+  const from = `${periods.length === 1 ? 'run period' : 'run periods'} ${noticeList(periods)}${stated ? '' : ', which its dataset path names'}`;
+  const covered = [
+    ...new Set(periods.flatMap((period) => lists.flatMap((list) => periodIn(list, period) ?? []))),
+  ];
+  const [only, ...more] = covered;
+  if (only === undefined) {
+    const hint = `${toReference}.`;
+    return {
+      message: `Record ${recid} is CMS collision data from ${from}; no published validated-run list covers ${periods.length === 1 ? 'it' : 'them'}. ${hint}`,
+      data: { ...data, recovery: { hint } },
+    };
+  }
+  const holds =
+    more.length > 0
+      ? `lists for ${noticeList(covered)}`
+      : periods.length === 1
+        ? 'a list for that run period'
+        : `a list for ${noticeValue(only)}`;
+  const hint =
+    more.length > 0
+      ? `Call cern_opendata_get_validated_runs with run_period set to one of them${withVariant}.`
+      : `Call cern_opendata_get_validated_runs with run_period ${noticeValue(only)}${withVariant}.`;
+  return {
+    message: `Record ${recid} is CMS collision data from ${from}${stated ? '' : ','} and links no validated-run list, but the collection holds ${holds}. ${hint}`,
+    data: { ...data, recovery: { hint } },
+  };
 }
 
 /** Runs ascending, each with its lumi-section count and ranges. */
@@ -230,7 +306,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: blankAsUnset(recidInput().optional()).describe(
-      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): up to 12 digits, recid:N or a portal record URL. Give this or run_period.',
+      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): up to 12 digits, optionally after an experiment prefix (cms-93956); recid:N or a portal record URL also work. Give this or run_period.',
     ),
     run_period: blankAsUnset(
       z.preprocess(
@@ -291,9 +367,9 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     {
       reason: 'no_validated_runs',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No list matches: the record links none (simulated, non-CMS or non-collision records), the run period has no list, or the variant has no list for it. The message names which case applied.',
+      when: 'No list matches: the record links none (a simulated, non-CMS or non-collision record; or CMS collision data whose run period no published list covers, or which links none although the collection holds a list for its period), the run period has no list, or the variant has no list for it. The message names which case applied.',
       recovery:
-        'Call cern_opendata_list_reference with topic run_periods for the periods that have lists, then call cern_opendata_get_validated_runs with run_period, or with variant full when no muons-only list exists.',
+        'Call cern_opendata_list_reference with topic run_periods for the periods that have lists, then call cern_opendata_get_validated_runs with one of them as run_period, or with variant full when no muons-only list exists. A record whose run period has no list has no good-run list to read.',
       severity: 'notice',
     },
     {
@@ -415,11 +491,8 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         );
         const linked = lists.filter((list) => linkedRecids.has(list.recid));
         if (linked.length === 0) {
-          throw ctx.fail(
-            'no_validated_runs',
-            `Record ${datasetRecid} links no validated-run list; lists exist for CMS collision data only, so simulated, non-CMS and non-collision records have none.`,
-            { recid: datasetRecid },
-          );
+          const { message, data } = unlinkedDataset(datasetRecid, meta, lists, input.variant);
+          throw ctx.fail('no_validated_runs', message, data);
         }
         candidates = uniqueByRecid(
           linked.flatMap((list) =>
