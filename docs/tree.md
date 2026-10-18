@@ -1,6 +1,6 @@
 # cern-opendata-mcp-server - Directory Structure
 
-Generated on: 2026-10-02 16:46:19
+Generated on: 2026-10-18 06:22:08
 
 ```text
 cern-opendata-mcp-server/
@@ -131,6 +131,7 @@ cern-opendata-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -155,6 +156,7 @@ cern-opendata-mcp-server/
 │   ├── services/
 │   │   └── cern-opendata/
 │   │       ├── cern-opendata-service.ts
+│   │       ├── guide-markdown.ts
 │   │       ├── identifiers.ts
 │   │       ├── normalize.ts
 │   │       ├── query-syntax.ts
@@ -176,6 +178,7 @@ cern-opendata-mcp-server/
 │   │   └── record.resource.test.ts
 │   ├── services/
 │   │   └── cern-opendata/
+│   │       ├── guide-markdown.test.ts
 │   │       ├── identifiers.test.ts
 │   │       ├── normalize.test.ts
 │   │       ├── query-syntax.test.ts
