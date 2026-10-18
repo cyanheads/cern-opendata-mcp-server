@@ -2,10 +2,10 @@
 
 **Server:** cern-opendata-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -27,12 +27,12 @@ Seven read-only tools and one resource over the CERN Open Data Portal (`https://
 
 `cern_opendata_list_reference` serves static tables from `vocabulary.ts` and makes no upstream call.
 
-`CernOpenDataService` (`src/services/cern-opendata/cern-opendata-service.ts`) owns every upstream request: one pacer (50 requests a minute, 4 concurrent, a cooldown after a 429), a header gate on `x-ratelimit-remaining`, `withRetry` (2 retries) inside a 50 s budget per tool call from `startBudget()`, a per-route accept-list with byte ceilings and a 30 s attempt cap (none on the record GET, which runs to the call's deadline), and 15-minute caches: compact file manifests (an LRU of 8), file indexes read on their own and their record heads (LRUs of 16), and the validated-run collection. `docs/design.md` § Services is the full contract.
+`CernOpenDataService` (`src/services/cern-opendata/cern-opendata-service.ts`) owns every upstream request: one pacer (50 requests a minute, 4 concurrent, a cooldown after a 429), a header gate on `x-ratelimit-remaining`, `withRetry` (2 retries) inside a 50 s budget per tool call from `startBudget()`, a per-route accept-list with byte ceilings and a 30 s attempt cap (none on the record GET, which runs to the call's deadline), and 15-minute caches: the hits `lookup()` resolved (an LRU charged by bytes, capped at 8 MiB, shared by `cern_opendata_get_records` and the record resource), compact file manifests (an LRU of 8), file indexes read on their own and their record heads (LRUs of 16), and the validated-run collection. `docs/design.md` § Services is the full contract.
 
 Conventions every definition follows:
 
 - **Every portal request goes through `CernOpenDataService`**, with one `service.startBudget()` per tool call passed to each of its requests. Never `fetch` from a handler.
-- **Shared inputs** come from `src/mcp-server/tools/inputs.ts`: `blankAsUnset` on every optional input, `listInput` / `vocabularyListInput` / `requiredListInput` for lists (an array or one comma-separated string), `recidInput` for recids. Vocabulary tables live in `vocabulary.ts`, shared with `cern_opendata_list_reference`.
+- **Shared inputs** come from `src/mcp-server/tools/inputs.ts`: `blankAsUnset` on every optional input, `listInput` / `vocabularyListInput` / `requiredListInput` for lists (an array, or one string read as a JSON array or split on commas), `recidInput` for recids. Vocabulary tables live in `vocabulary.ts`, shared with `cern_opendata_list_reference`.
 - **Portal text is data.** Render portal strings in `format()` only through the `text.ts` helpers (`inline`, `inlineSpelling`, `inlineList`, `inlineOrNA`, `fence`, `fenceHtml`, `printUrl`), and any portal-derived value in a notice or error message through `noticeValue` / `noticeList`; `structuredContent` and error `data` keep every string as received, HTML in `_html` fields.
 - **No fabrication.** An absent upstream field stays absent and renders as `Not available`; `license` comes from the record or the `cern_terms_default` rule (Decision 12), and `citation` only from record fields (Decision 13).
 - **List-shaped tools** (`search_records`, `list_files`, `get_validated_runs`, `search_trigger_paths`) call `startListEnrichment` first and `finishListEnrichment` once, with one notice from `composeNotice` (`src/mcp-server/tools/enrichment.ts`).
@@ -92,15 +92,15 @@ export const getRecords = tool('cern_opendata_get_records', {
   description: 'Fetch full metadata for 1-20 records in one call, by recid, DOI, CMS dataset path (/Primary/Era/TIER) or documentation slug. …',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    ids: requiredListInput(20, z.string().max(500).describe('One identifier: …'), 'At least one identifier is required …')
-      .describe('Identifiers to resolve, 1-20: an array, or one comma-separated string. …'),
+    ids: requiredListInput(100, z.string().max(500).describe('One identifier: …'), 'At least one identifier is required (…, up to 100); …')
+      .describe('Identifiers to resolve: up to 100, of which the first 20 distinct are looked up and the rest returned under deferred. …'),
     body_offset: blankAsUnset(z.number().int().min(0).default(0)).describe('With exactly one documentation or news id: where its body slice starts …'),
   }),
   output: z.object({
     records: z.array(RecordSchema).describe('Resolved records, in the order of their first matching input.'),
     missing: z.array(z.object({ input: …, interpreted_as: z.enum(INTERPRETED_AS)…, guidance: … }))
       .describe('Identifiers that resolved to no record; empty when every id resolved.'),
-    deferred: z.array(z.string()…).describe('Inputs whose records were left out to hold the response to 64,000 bytes …'),
+    deferred: z.array(z.string()…).describe('Inputs left for another call, in input order: those whose records were left out to hold the response to 64,000 bytes (never the first record, …), then ids past the first 20, which were not looked up. …'),
   }),
   enrichment: { notice: z.string().optional().describe('Caveats about the returned records, …') },
   errors: [
@@ -113,14 +113,17 @@ export const getRecords = tool('cern_opendata_get_records', {
 
   async handler(input, ctx) {
     if (input.body_offset > 0 && input.ids.length > 1) throw ctx.fail('invalid_body_offset', `body_offset … takes exactly one id …`);
-    const classified = input.ids.map(classifyIdentifier);
+    // The first 20 ids are looked up; the rest go to `deferred` unread, never classified or cached.
+    const lookedUp = input.ids.slice(0, LOOKUP_CAP);
+    const unread = input.ids.slice(LOOKUP_CAP);
+    const classified = lookedUp.map(classifyIdentifier);
     const service = getCernOpenDataService();
     const { matches, missing } = await service.lookup(classified, service.startBudget(), ctx);
     const resolved = matches.map((match) => toRecord(match.hit, match.matchedInputs, input.body_offset));
     // … invalid_body_offset when the one record has no body or the offset is past body_length
     const missingOut = missing.map((id) => ({ input: id.input, interpreted_as: id.kind, guidance: missingGuidance(id) }));
-    // Records in response order while both surfaces stay within 64,000 bytes; the rest go to `deferred`.
-    const { records, deferred, notice } = withinBudget(resolved, input.ids, missingOut);
+    // Records in response order within 64,000 bytes a surface, unread ids charged; left-out records, then unread ids, go to `deferred`.
+    const { records, deferred, notice } = withinBudget(resolved, lookedUp, unread, missingOut);
     if (notice) ctx.enrich.notice(notice);
     return { records, missing: missingOut, deferred };
   },
@@ -149,7 +152,7 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   description: "One CERN Open Data Portal record's metadata by recid: … Tool coverage: cern_opendata_get_records.",
   mimeType: 'application/json',
   params: z.object({
-    recid: recidInput().describe('Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); …'),
+    recid: recidInput().describe('Record id: up to 12 digits (6004), optionally after a lowercase experiment prefix (atlas-160006). …'),
   }),
   output: RecordSchema,
   cacheHint: { ttlMs: 900_000, cacheScope: 'public' },
@@ -276,6 +279,7 @@ src/
   services/
     cern-opendata/
       cern-opendata-service.ts            # Portal client: pacer, retry, budget, accept-list, byte ceilings, caches
+      guide-markdown.ts                   # Guide body line scans: fenced code, reference definitions, bracketed labels
       identifiers.ts                      # Recid spelling reduction, get_records id classification
       normalize.ts                        # Hits and records to output shapes, license, citation
       query-syntax.ts                     # Search query delimiter scan (refused before sending)
@@ -440,7 +444,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 

@@ -551,7 +551,7 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
       {
         value: 'recid',
         meaning:
-          'Up to 12 digits (6004), or an experiment prefix and digits for newer records (atlas-160006); also recid:6004 or https://opendata.cern.ch/record/6004. Leading zeros are ignored and the prefix is read in any case. Taken by cern_opendata_get_records, cern_opendata_list_files, cern_opendata_get_analysis_env, cern_opendata_get_validated_runs and the cern-opendata://record/{recid} resource.',
+          'Up to 12 digits (6004), optionally after a lowercase experiment prefix for newer records (atlas-160006). Taken in this form by cern_opendata_list_files, cern_opendata_get_analysis_env, cern_opendata_get_validated_runs and the cern-opendata://record/{recid} resource. cern_opendata_get_records ids also take recid:6004, https://opendata.cern.ch/record/6004 and the prefix in any case.',
       },
       {
         value: 'DOI',

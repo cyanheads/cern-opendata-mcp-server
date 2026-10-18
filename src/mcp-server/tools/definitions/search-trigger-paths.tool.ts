@@ -27,13 +27,17 @@ import {
 import { parseTrigger } from '@/services/cern-opendata/trigger-parse.js';
 import type { RawHit, SearchParams } from '@/services/cern-opendata/types.js';
 import {
+  applyLimit,
   composeNotice,
   finishListEnrichment,
   lastPageNotice,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset } from '../inputs.js';
+import { blankAsUnset, LIMIT_CEILING } from '../inputs.js';
+
+/** The most path records one page returns; a larger limit is served at it. */
+const MAX_LIMIT = 50;
 
 /**
  * A path after {@link normalizePathInput}: `HLT_` and at least one name
@@ -270,7 +274,7 @@ function renderTrigger(trigger: TriggerOut): string[] {
 export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
   title: 'Search CMS Trigger Paths',
   description:
-    'Look up CMS High-Level Trigger paths by exact name (HLT_IsoMu24) or prefix pattern (HLT_IsoMu*), optionally for one data-taking year. Paths outside the HLT_ family, such as AlCa_EcalPi0, DST_ and DQM_ paths, output modules and HLTriggerFinalPath, are found by their own names, in the case given. Each match is a per-year path record parsed into the primary datasets its title names, the first and last run the path was seen online, per-version run ranges, the L1 seed, and links to the HLT menu records. Covers CMS open data from 2011-2016. Prescale tables are not published.',
+    'Look up CMS High-Level Trigger paths by exact name (HLT_IsoMu24) or prefix pattern (HLT_IsoMu*), optionally for one data-taking year. Paths outside the HLT_ family, such as AlCa_EcalPi0, DST_ and DQM_ paths, output modules and HLTriggerFinalPath, are found by their own names, in the case given. Each match is a per-year path record parsed into the primary datasets its title names, the first and last run the path was seen online, per-version run ranges, the L1 seed, and links to the HLT menu records. Covers CMS open data from 2011-2016. Prescale factors are not returned: each HLT menu record holds a configuration file (cern_opendata_list_files with a menu_recid) whose PrescaleService block lists the prescale in each column of every path it prescales (a path it leaves out has prescale 1), and the CMS luminosity records (collection CMS-Luminosity-Information) hold prescale files that log which column applied by run and luminosity section.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     path: z
@@ -285,16 +289,16 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
           ),
       )
       .describe(
-        'Trigger path name (HLT_IsoMu24, AlCa_EcalPi0) or prefix with one trailing wildcard (HLT_IsoMu*): a letter or digit, then letters, digits and underscores. Trimmed. A path starting HLT_ in any case is searched as given, with the prefix case fixed, and matches path names in any case. Any other path is matched against record path names in the case given, the whole name or, with a trailing *, its start (AlCa_EcalPi0, AlCa_*), and is also searched with HLT_ prepended (IsoMu24 finds HLT_IsoMu24, 60Jet10 finds HLT_60Jet10). A trailing version suffix (_v3 or _v*) is dropped, since records list versions as V<n>.',
+        'Trigger path name (HLT_IsoMu24, AlCa_EcalPi0) or prefix with one trailing wildcard (HLT_IsoMu*): a letter or digit, then letters, digits and underscores. A path starting HLT_ in any case is searched as given, with the prefix case fixed, and matches path names in any case. Any other path is matched against record path names in the case given, the whole name or, with a trailing *, its start (AlCa_EcalPi0, AlCa_*), and is also searched with HLT_ prepended (IsoMu24 finds HLT_IsoMu24, 60Jet10 finds HLT_60Jet10). A trailing version suffix (_v3 or _v*) is dropped, since records list versions as V<n>.',
       ),
     year: blankAsUnset(z.number().int().min(2000).max(2100).optional()).describe(
       'Data-taking year, such as 2012. Trigger records cover 2011-2016.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(50).default(10)).describe(
-      'Records per page, 1-50.',
+    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(10)).describe(
+      'Records per page, 1-50. A value above 50 is served at 50.',
     ),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
-      'Page number, from 1. page × limit may not exceed 10,000.',
+      'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
     ),
   }),
   output: SearchTriggerPathsOutput,
@@ -310,7 +314,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     {
       reason: 'page_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × limit exceeds 10,000, the deepest match the portal pages to.',
+      when: 'page × limit, the limit applied (at most 50), exceeds 10,000, the deepest match the portal pages to.',
       recovery:
         'Add year or a longer path prefix to narrow the match, then call cern_opendata_search_trigger_paths again from page 1.',
       severity: 'notice',
@@ -338,7 +342,8 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     const { path, version } = splitVersion(input.path);
     const forms = searchForms(path);
     const query = pathQuery(path);
-    startListEnrichment(ctx, input.limit);
+    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT, true);
+    startListEnrichment(ctx, limit);
     ctx.enrich.echo(query);
 
     /** With year already set, the only narrowing left to suggest is a longer prefix. */
@@ -351,11 +356,17 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
         }
       : {};
 
-    if (input.page * input.limit > PAGE_WINDOW) {
+    if (input.page * limit > PAGE_WINDOW) {
       throw ctx.fail(
         'page_window_exceeded',
-        `page ${input.page} × limit ${input.limit} reaches past match ${PAGE_WINDOW}, the deepest the portal pages to.`,
-        { page: input.page, limit: input.limit, window: PAGE_WINDOW, ...windowRecovery },
+        `page ${input.page} × limit ${limit}${limitFragment ? ` (the maximum; ${input.limit} was requested)` : ''} reaches past match ${PAGE_WINDOW}, the deepest the portal pages to.`,
+        {
+          page: input.page,
+          limit,
+          ...(limitFragment ? { requested_limit: input.limit } : {}),
+          window: PAGE_WINDOW,
+          ...windowRecovery,
+        },
       );
     }
 
@@ -366,7 +377,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
       experiment: ['CMS'],
       ...(input.year === undefined ? {} : { year: `${input.year}--${input.year}` }),
       sort: 'bestmatch',
-      size: input.limit,
+      size: limit,
       page: input.page,
       skipFiles: true,
     };
@@ -393,10 +404,10 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
 
     const { page } = outcome;
     const triggers = page.hits.map(toTrigger);
-    const truncated = page.total > input.page * input.limit;
-    const hasMore = truncated && (input.page + 1) * input.limit <= PAGE_WINDOW;
+    const truncated = page.total > input.page * limit;
+    const hasMore = truncated && (input.page + 1) * limit <= PAGE_WINDOW;
 
-    const fragments: string[] = [];
+    const fragments = limitFragment ? [limitFragment] : [];
     if (version !== undefined) {
       fragments.push(
         version === '*'
@@ -412,13 +423,13 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
         `No CMS HLT path record matches ${named}${inYear}; path records cover CMS open data from 2011-2016. Try a prefix pattern such as HLT_IsoMu*,${dropYear} or call cern_opendata_search_records with query ${formsQuery(forms)} to search other record types.`,
       );
     } else if (triggers.length === 0) {
-      const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / input.limit));
+      const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / limit));
       fragments.push(
         `Page ${input.page} is past the last page (${countOf(page.total, 'match', 'matches')}); call cern_opendata_search_trigger_paths again with page ${last}.`,
       );
     }
     if (truncated) {
-      const from = (input.page - 1) * input.limit + 1;
+      const from = (input.page - 1) * limit + 1;
       const to = from + triggers.length - 1;
       fragments.push(
         hasMore
@@ -430,7 +441,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
                 from,
                 to,
                 total: page.total,
-                limit: input.limit,
+                limit,
               },
             ),
       );
@@ -439,7 +450,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     finishListEnrichment(ctx, {
       shown: triggers.length,
       total: page.total,
-      cap: input.limit,
+      cap: limit,
       truncated,
       notice: composeNotice(fragments),
     });

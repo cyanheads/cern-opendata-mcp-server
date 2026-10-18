@@ -27,11 +27,14 @@ import {
   stripTags,
 } from '@/services/cern-opendata/text.js';
 import {
+  HLT_MENU_TABLE_1701_HTML,
+  L1_MENU_TABLE_3700_HTML,
   METHODOLOGY_5202_HTML,
   METHODOLOGY_5208_HTML,
   TRIGGER_ABSTRACT_HTML,
 } from '../../fixtures/cern-opendata-upstream.js';
-import { expectLinearTime } from '../../fixtures/cpu-time.js';
+import { expectLinearGrowth, expectLinearTime } from '../../fixtures/cpu-time.js';
+import { variablesHit12220 } from '../../fixtures/record-metadata-upstream.js';
 
 describe('decodeEntities', () => {
   it('decodes named, decimal and hex references', () => {
@@ -260,6 +263,119 @@ describe('htmlToText', () => {
     ['unclosed block openers', (n) => '<p'.repeat(n / 2)],
   ])('converts %s in time linear in its length', (_shape, make) => {
     expectLinearTime(make, htmlToText, { maxMs: 200 });
+  });
+});
+
+describe('htmlToText tables', () => {
+  const portal = (path: string) => `<${PORTAL_ORIGIN}${path}>`;
+
+  it('reads an unclosed anchor outside a table to the next </a>, as it always has', () => {
+    expect(htmlToText('<p><a href="/x">open</p><p>more <a href="/y">two</a></p>')).toBe(
+      `openmore two ${portal('/x')}`,
+    );
+  });
+
+  it('splits lines at a decoded line break, as it always has', () => {
+    expect(htmlToText('<p>a&#10;  b | c</p>')).toBe('a\nb | c');
+  });
+
+  it("renders record 1701's header and each row as one line of cells joined by |", () => {
+    expect(htmlToText(HLT_MENU_TABLE_1701_HTML).split('\n')).toEqual([
+      'The list of trigger configuration files for the CMS 2012 collision data (Run201A, Run2012B, Run2012C and Run2012D):',
+      '',
+      'Run number | Software version | Trigger configuration',
+      '',
+      '190456 - 190465 | CMSSW_5_2_3_patch1 <https://github.com/cms-sw/cmssw-cvs/tree/CMSSW_5_2_3_patch1> | ' +
+        `/cdaq/physics/Run2012/5e33/v4.4/HLT/V5 ${portal('/record/6123')}`,
+      '',
+      '190482 - 190539 | CMSSW_5_2_3_patch1 <https://github.com/cms-sw/cmssw-cvs/tree/CMSSW_5_2_3_patch1> | ' +
+        `/cdaq/physics/Run2012/5e33/v4.4/HLT/V7 ${portal('/record/6134')}`,
+    ]);
+  });
+
+  it("renders every menu URL of record 3700, whose anchors end at their cell's </td>", () => {
+    const rows = [
+      ['157942', '3701', 'v0', '0x101e'],
+      ['161205', '3702', 'v1', '0x101f'],
+      ['161568', '3703', 'v2', '0x1020'],
+      ['165897', '3704', 'v3', '0x1021'],
+      ['170065', '3705', 'v4', '0x1022'],
+      ['173212', '3706', 'v5', '0x1023'],
+      ['176725', '3707', 'v6', '0x1024'],
+    ].map(
+      ([run, recid, version, key]) =>
+        `${run} | L1Menu_Collisions2011_${version}_L1T_Scales_20101224_Imp0_${key} ${portal(`/record/${recid}`)}`,
+    );
+    expect(htmlToText(L1_MENU_TABLE_3700_HTML)).toBe(
+      ['Starting from run | L1 trigger information', ...rows].join('\n\n'),
+    );
+  });
+
+  it("renders record 12220's four-column table, cells spaced and wrapped in <p>", () => {
+    const html = variablesHit12220.metadata.abstract?.description ?? '';
+    const lines = htmlToText(html).split('\n');
+    expect(lines.slice(-9)).toEqual([
+      'Data set name | Description | Number of events | Number of files',
+      '',
+      'QCD300to600 | QCD, flat pT hat spectrum, 300 < pT hat < 600 GeV | 1497600 | 2496',
+      '',
+      'QCD400to600 | QCD, flat pT hat spectrum, 400 < pT hat < 600 GeV | 1989000 | 3315',
+      '',
+      'QCD600to3000 | QCD, flat pT hat spectrum, 600 < pT hat < 3000 GeV | 2974800 | 4959',
+      '',
+      'ttbar | ttbar, fully hadronic decays, pT of the top/antitop greater than 400 GeV | 2969109 | 4055',
+    ]);
+  });
+
+  it('ends an anchor at its own cell, so a later cell keeps its text and anchors', () => {
+    expect(
+      htmlToText(
+        '<table><tr><td><a href="/record/1">one</td><td>two <a href="/record/2">three</a></td></tr></table>',
+      ),
+    ).toBe(`one ${portal('/record/1')} | two three ${portal('/record/2')}`);
+  });
+
+  it.each([
+    ['the next <td', '<table><tr><td><a href="/x">a<td>b</table>', `a ${portal('/x')} | b`],
+    ['the next <th', '<table><tr><th><a href="/x">a<th>b</table>', `a ${portal('/x')} | b`],
+    ['the next <tr', '<table><tr><td><a href="/x">a<tr><td>b</table>', `a ${portal('/x')}\nb`],
+    ['</td>', '<table><tr><td><a href="/x">a</td>b</table>', `a ${portal('/x')}b`],
+    ['</th>', '<table><tr><th><a href="/x">a</th>b</table>', `a ${portal('/x')}b`],
+    ['</tr>', '<table><tr><td><a href="/x">a</tr>b</table>', `a ${portal('/x')}\nb`],
+    ['</table>', '<table><tr><td><a href="/x">a</table>b', `a ${portal('/x')}\nb`],
+  ])('ends an unclosed anchor at %s', (_tag, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it('keeps an empty cell in its place', () => {
+    expect(htmlToText('<table><tr><td></td><td>b</td><td> </td><td>d</td></tr></table>')).toBe(
+      '| b | | d',
+    );
+  });
+
+  it("keeps a row's text before its first cell as a cell, unless it is only tags and whitespace", () => {
+    expect(htmlToText('<table><tr>Run<td>a</td><td>b</td></tr></table>')).toBe('Run | a | b');
+    expect(htmlToText('<table><tr><b> </b><td>a</td><td>b</td></tr></table>')).toBe('a | b');
+  });
+
+  it.each<[string, (length: number) => string]>([
+    ['unclosed anchors', (n) => '<a href=x>'.repeat(n / 10)],
+    ['anchors each ended by </td>', (n) => '<a href=x>y</td>'.repeat(n / 16)],
+    ['anchors each ended by <td', (n) => '<a href=x>y<td>'.repeat(n / 15)],
+    ['one anchor before a run of </td>', (n) => `<a href=x>${'y</td>'.repeat(n / 6)}`],
+    ['cell openers with no >', (n) => '<td'.repeat(n / 3)],
+    ['cell openers', (n) => '<td>x'.repeat(n / 5)],
+    ['nested openers before a </td>', (n) => `${'<a'.repeat(n / 4)}${'>'.repeat(n / 2)}</td>`],
+    [
+      'nested anchors before a </td>',
+      (n) => `${'<a href=x'.repeat(n / 18)}${'>'.repeat(n / 2)}</td>`,
+    ],
+    ['an unclosed quoted href before a </td>', (n) => `<a href="${'x>y'.repeat(n / 3)}</td>`],
+    ['quoted hrefs each ended by </tr>', (n) => '<a href="u">t</tr>'.repeat(n / 18)],
+    ['cell openers interleaved with line breaks', (n) => '<td>x<br>'.repeat(n / 9)],
+    ['a row of cells before a line break', (n) => `${'<td>x'.repeat(n / 5)}<br>y`],
+  ])('converts %s in time linear in its length', (_shape, make) => {
+    expectLinearGrowth(make, htmlToText, { maxMs: 250 });
   });
 });
 

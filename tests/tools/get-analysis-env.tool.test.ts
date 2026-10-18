@@ -3,7 +3,8 @@
  * three upstream legs and the requests they send, the assembled environment
  * (software, environment records, example software, guides, other links), guide
  * section extraction and caps, degrade-with-notice on the linked-records and
- * guide legs, the licence kept separate from the CC0 data claim, errors on the
+ * guide legs, reference definitions a quoted section uses from elsewhere in its
+ * guide, the licence kept separate from the CC0 data claim, errors on the
  * wire, upstream failure classes, and the text twin of structuredContent.
  * Upstream I/O is a strict fetch fake.
  * @module tests/tools/get-analysis-env.tool.test
@@ -41,6 +42,7 @@ import {
   SYNTAX_ERROR_BODY,
   searchBody,
   softwareHit,
+  VM_GUIDE_2011_MD,
 } from '../fixtures/cern-opendata-upstream.js';
 import { cpuTimedAsync } from '../fixtures/cpu-time.js';
 
@@ -634,6 +636,7 @@ describe('cern_opendata_get_analysis_env guides', () => {
       title: 'Docker guide',
       section: '## <a name="intro">Introduction</a>\n\nIntro text.\n\n### Sub\n\nSub text.\n',
       section_truncated: false,
+      reference_definitions: [],
       fetched: true,
     });
   });
@@ -910,6 +913,154 @@ describe('cern_opendata_get_analysis_env guides', () => {
     expect(guide).toMatchObject({ slug: 'empty', title: 'Empty page', fetched: true });
     expect(guide).not.toHaveProperty('section');
     expect(guide).not.toHaveProperty('section_truncated');
+  });
+
+  it('keeps a heading inside a ~~~~ fence until a run at least as long closes it, as it always has', async () => {
+    const body =
+      '# T\n\n~~~~\n## not a heading\n~~~\n## still fenced\n~~~~\n\n## A\n\nA text.\n\n## B\n\nB text.';
+    const record = guideRecord('9120', [{ url: '/docs/tilde' }]);
+    serve({ records: { '9120': record }, docs: { tilde: docBody('tilde', body) } });
+    const [guide] = success(await run({ recid: '9120' })).guides;
+    expect(guide?.section).toBe(
+      '# T\n\n~~~~\n## not a heading\n~~~\n## still fenced\n~~~~\n\n## A\n\nA text.\n',
+    );
+  });
+});
+
+describe('cern_opendata_get_analysis_env reference definitions', () => {
+  const VM_DEFINITIONS = [
+    '[installVB]: <https://www.virtualbox.org/wiki/Downloads>',
+    '[installVB2]: <https://www.virtualbox.org/wiki/Download_Old_Builds>',
+    '[getstartedcms]: </docs/cms-getting-started-2011>',
+  ];
+  const OPENING_SECTION = VM_GUIDE_2011_MD.split('\n').slice(0, 26).join('\n');
+  const HEADER = '**Reference definitions (elsewhere in the guide):**';
+
+  /** A guide whose opening section uses `use` and whose body ends with `definitions`. */
+  const usesBody = (use: string, definitions: string) =>
+    `# T\n\nUse ${use} here.\n\n## A\n\nA text.\n\n## B\n\n${definitions}`;
+
+  async function definitionsFor(body: string, url = '/docs/g') {
+    const record = withLinks('9200', [{ url }]);
+    serve({ records: { '9200': record }, docs: { g: docBody('g', body) } });
+    const result = await run({ recid: '9200' });
+    return { guide: success(result).guides[0], result };
+  }
+
+  it("lists the three definitions 6004's VM-guide opening section uses, and none for the Docker guide", async () => {
+    const record = withLinks('6004', [
+      { description: 'Docker guide', url: '/docs/cms-guide-docker' },
+      { description: 'VM guide', url: '/docs/cms-virtual-machine-2011' },
+    ]);
+    serve({
+      records: { '6004': record },
+      docs: {
+        ...DOCS,
+        'cms-virtual-machine-2011': docBody('cms-virtual-machine-2011', VM_GUIDE_2011_MD),
+      },
+    });
+    const result = await run({ recid: '6004' });
+    const [docker, vm] = success(result).guides;
+    expect(docker?.reference_definitions).toEqual([]);
+    expect(vm?.reference_definitions).toEqual(VM_DEFINITIONS);
+    expect(vm?.section).toBe(OPENING_SECTION);
+    expect(vm?.section).toHaveLength(2_330);
+    expect(vm?.section_truncated).toBe(false);
+    const text = textOf(result);
+    expect(text).toContain(
+      `\`\`\`\n${OPENING_SECTION}\n\`\`\`\n${HEADER}\n\`\`\`\n${VM_DEFINITIONS.join('\n')}\n\`\`\``,
+    );
+    expect(text.split(HEADER)).toHaveLength(2);
+    const outsideFences = text.replace(/(`{3,})\n[\s\S]*?\n\1/g, '');
+    expect(outsideFences).not.toMatch(/^ {0,3}\[[^\]]+\]:/m);
+  });
+
+  it.each([
+    ['a full reference', '[x][INSTALLVB]'],
+    ['a collapsed reference', '[installVB][]'],
+    ['a shortcut reference', '[installVB]'],
+  ])('matches %s to [installVB]:', async (_form, use) => {
+    const { guide } = await definitionsFor(usesBody(use, '[installVB]: <https://x.test/vb>'));
+    expect(guide?.reference_definitions).toEqual(['[installVB]: <https://x.test/vb>']);
+  });
+
+  it('matches a label case-folded with its whitespace collapsed, across a line break', async () => {
+    const { guide } = await definitionsFor(
+      usesBody('[Get\n   Started]', '[get started]: </docs/x>'),
+    );
+    expect(guide?.reference_definitions).toEqual(['[get started]: </docs/x>']);
+  });
+
+  it('lists only the first definition of a duplicate label', async () => {
+    const { guide } = await definitionsFor(usesBody('[a]', '[a]: </first>\n[A]: </second>'));
+    expect(guide?.reference_definitions).toEqual(['[a]: </first>']);
+  });
+
+  it('reads no definition inside fenced code', async () => {
+    const fenced = '```\n[a]: </fenced>\n```';
+    expect((await definitionsFor(usesBody('[a]', fenced))).guide?.reference_definitions).toEqual(
+      [],
+    );
+    expect(
+      (await definitionsFor(usesBody('[a]', `${fenced}\n[a]: </real>`))).guide
+        ?.reference_definitions,
+    ).toEqual(['[a]: </real>']);
+  });
+
+  it('lists nothing for a label the guide never defines', async () => {
+    const { guide, result } = await definitionsFor(usesBody('[nowhere]', '[a]: </a>'));
+    expect(guide?.reference_definitions).toEqual([]);
+    expect(textOf(result)).not.toContain(HEADER);
+  });
+
+  it('leaves out a definition already in the quote, and lists one before an anchored section', async () => {
+    const inside = await definitionsFor('# T\n\nUse [a].\n\n[a]: </inside>\n\n## A\n\n## B\n');
+    expect(inside.guide?.reference_definitions).toEqual([]);
+    const before = await definitionsFor(
+      '[a]: </before>\n\n## <a name="s">S</a>\n\nUse [a].\n\n## Next',
+      '/docs/g#s',
+    );
+    expect(before.guide?.section).toBe('## <a name="s">S</a>\n\nUse [a].\n');
+    expect(before.guide?.reference_definitions).toEqual(['[a]: </before>']);
+  });
+
+  it('counts a definition the 12,000-character cut splits or never reaches as elsewhere, and leaves the cut alone', async () => {
+    const head = '# Top\n\n';
+    const opening = '## <a name="big">Big</a>\n\nUse [a] and [b].\n\n';
+    const body = `${head}${opening}${'x'.repeat(12_000 - opening.length - 5)}\n[b]: </straddle>\n[a]: </past>\n`;
+    const { guide, result } = await definitionsFor(body, '/docs/g#big');
+    expect(guide?.section).toBe(body.slice(head.length, head.length + 12_000));
+    expect(guide?.section?.endsWith('\n[b]:')).toBe(true);
+    expect(guide?.section_truncated).toBe(true);
+    expect(guide?.reference_definitions).toEqual(['[b]: </straddle>', '[a]: </past>']);
+    expect(success(result).notice).toBe(
+      `Guide g was cut at 12,000 characters; call cern_opendata_get_records with ids ["g"] and body_offset ${head.length + 12_000} to read on from the cut.`,
+    );
+  });
+
+  it('carries no definitions on a guide not fetched, and an empty list on one with no body', async () => {
+    const record = withLinks('9201', [
+      { url: '/docs/empty' },
+      { url: '/docs/g' },
+      { url: '/docs/third' },
+    ]);
+    const empty = { id: 'empty', metadata: { slug: 'empty', title: 'Empty page' } };
+    serve({
+      records: { '9201': record },
+      docs: { empty, g: docBody('g', usesBody('[a]', '[a]: </a>')) },
+    });
+    const [noBody, g, third] = success(await run({ recid: '9201' })).guides;
+    expect(noBody?.reference_definitions).toEqual([]);
+    expect(g?.reference_definitions).toEqual(['[a]: </a>']);
+    expect(third?.fetched).toBe(false);
+    expect(third).not.toHaveProperty('reference_definitions');
+  });
+
+  it('fences definitions that hold backticks with a longer run, the same lines structuredContent carries', async () => {
+    const definition = '[a]: </x> "a ``` title"';
+    const { guide, result } = await definitionsFor(usesBody('[a]', definition));
+    expect(guide?.reference_definitions).toEqual([definition]);
+    expect(textOf(result)).toContain(`${HEADER}\n\`\`\`\`\n${definition}\n\`\`\`\``);
   });
 });
 

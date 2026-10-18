@@ -13,6 +13,11 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { RecordTypeSchema, renderRecordType } from '@/mcp-server/record-schema.js';
 import { getCernOpenDataService } from '@/services/cern-opendata/cern-opendata-service.js';
 import {
+  bracketLabels,
+  fencedLines,
+  referenceDefinitions,
+} from '@/services/cern-opendata/guide-markdown.js';
+import {
   definedOnly,
   pathSegment,
   portalUrlOf,
@@ -51,7 +56,6 @@ const DOC_LINK =
 /** A fragment that can name a guide section; any other fragment is read as no anchor. */
 const GUIDE_ANCHOR = /^[A-Za-z0-9_.:-]{1,100}$/;
 const HEADING = /^ {0,3}(#{1,6})(?:\s|$)/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 
 const LICENSE_NOTE =
   'Container images, software and guide code are licensed separately from the CC0 data; each software record states its own license.';
@@ -68,23 +72,12 @@ function headingLevel(line: string): number | undefined {
   return HEADING.exec(line)?.[1]?.length;
 }
 
-/** For each line of a markdown body: its heading level, ignoring lines inside fenced code blocks. */
-function headingLevels(lines: readonly string[]): (number | undefined)[] {
-  const levels: (number | undefined)[] = [];
-  let open: string | undefined;
-  for (const line of lines) {
-    const marker = FENCE_OPEN.exec(line)?.[1];
-    if (open) {
-      if (marker && marker[0] === open[0] && marker.length >= open.length) open = undefined;
-      levels.push(undefined);
-    } else if (marker) {
-      open = marker;
-      levels.push(undefined);
-    } else {
-      levels.push(headingLevel(line));
-    }
-  }
-  return levels;
+/** For each line of a markdown body: its heading level, ignoring lines `fenced` marks. */
+function headingLevels(
+  lines: readonly string[],
+  fenced: readonly boolean[],
+): (number | undefined)[] {
+  return lines.map((line, i) => (fenced[i] ? undefined : headingLevel(line)));
 }
 
 function escapeRegExp(text: string): string {
@@ -124,15 +117,22 @@ function hasAnchorTag(line: string, value: RegExp): boolean {
  * second level-2 heading. `anchored` says whether the anchor was found. Lines
  * are joined with `\n`; `bodyOffset(at)` maps a position in `text` back to the
  * body as the portal sent it, where a line may end in CRLF.
+ * `definitionsUsed(quoted)` lists the reference definitions `quoted`, a
+ * prefix of `text`, uses from elsewhere in the body.
  */
 function extractSection(body: string, anchor: string | undefined) {
   const lines = body.split(/\r?\n/);
-  const levels = headingLevels(lines);
-  const section = (from: number, to: number, anchored: boolean) => ({
-    text: lines.slice(from, to < 0 ? undefined : to).join('\n'),
-    anchored,
-    bodyOffset: (at: number) => bodyOffsetOf(body, lines, from, at),
-  });
+  const fenced = fencedLines(lines);
+  const levels = headingLevels(lines, fenced);
+  const section = (from: number, to: number, anchored: boolean) => {
+    const end = to < 0 ? lines.length : to;
+    return {
+      text: lines.slice(from, end).join('\n'),
+      anchored,
+      bodyOffset: (at: number) => bodyOffsetOf(body, lines, from, at),
+      definitionsUsed: (quoted: string) => definitionsUsed(lines, fenced, from, end, quoted),
+    };
+  };
   if (anchor) {
     const value = new RegExp(`${escapeRegExp(anchor)}(?:["'\\s/>]|$)`, 'iy');
     const start = lines.findIndex(
@@ -168,6 +168,32 @@ function bodyOffsetOf(body: string, lines: readonly string[], from: number, at: 
     source += line.length + (body[source + line.length] === '\r' ? 2 : 1);
   }
   return body.length;
+}
+
+/**
+ * The reference definition lines, verbatim and in body order, whose label a
+ * bracketed span of `quoted` names, where `quoted` is a prefix of
+ * `lines[from..to]` joined with `\n`. A definition on a line `quoted` holds
+ * whole is already in the quote and left out; one on a line the quote cuts
+ * or never reaches counts as elsewhere.
+ */
+function definitionsUsed(
+  lines: readonly string[],
+  fenced: readonly boolean[],
+  from: number,
+  to: number,
+  quoted: string,
+): string[] {
+  const used = bracketLabels(quoted);
+  let wholeTo = from;
+  for (let at = 0; wholeTo < to; wholeTo++) {
+    at += lines[wholeTo]?.length ?? 0;
+    if (at > quoted.length) break;
+    at += 1;
+  }
+  return referenceDefinitions(lines, fenced)
+    .filter(({ label, line }) => used.has(label) && (line < from || line >= wholeTo))
+    .map(({ line }) => lines[line] ?? '');
 }
 
 /**
@@ -260,6 +286,12 @@ const GuideSchema = z
       .optional()
       .describe(
         'True when the section was cut at 12,000 characters; the notice names the body_offset where the quote stops.',
+      ),
+    reference_definitions: z
+      .array(z.string().describe('One definition line, verbatim.'))
+      .optional()
+      .describe(
+        "The guide's [label]: destination lines from outside the section whose label a [...] span of the section uses: verbatim, in body order, the first per label; a definition past a cut counts as outside. Empty when the section uses none; absent when the guide was not fetched.",
       ),
     fetched: z
       .boolean()
@@ -364,6 +396,12 @@ function renderGuide(guide: GuideOut): string[] {
     `**Title:** ${inlineOrNA(guide.title)} · **Fetched:** ${guide.fetched ? 'yes' : 'no'}${guide.section_truncated === undefined ? '' : ` · **Section cut at 12,000 characters:** ${guide.section_truncated ? 'yes' : 'no'}`}`,
   ];
   if (guide.section) lines.push(fence(guide.section));
+  if (guide.reference_definitions?.length) {
+    lines.push(
+      '**Reference definitions (elsewhere in the guide):**',
+      fence(guide.reference_definitions.join('\n')),
+    );
+  }
   return lines;
 }
 
@@ -374,7 +412,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
-      'Record id: up to 12 digits (6004), optionally after an experiment prefix (cms-93956); recid:6004 or a portal record URL also work. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), optionally after a lowercase experiment prefix (cms-93956). cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
   }),
   output: GetAnalysisEnvOutput,
@@ -445,6 +483,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
             title: undefined,
             section: undefined,
             section_truncated: undefined,
+            reference_definitions: undefined,
             fetched: false,
           }),
         );
@@ -550,6 +589,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
         title: str(doc.metadata.title),
         section: capped?.text,
         section_truncated: capped?.truncated,
+        reference_definitions: extracted && capped ? extracted.definitionsUsed(capped.text) : [],
         fetched: true,
       });
     });

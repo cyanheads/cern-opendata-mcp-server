@@ -2,12 +2,13 @@
  * @fileoverview Tests for cern_opendata_search_records: registration and
  * contract, blank-as-unset and canonicalizing inputs, the request sent on the
  * wire, applied_filters and unrecognized values, required enrichment on the
- * zero-result, under-cap, truncated and past-the-end pages, the page-window
- * rejection split from an invalid query, every declared error on the wire, and
+ * zero-result, under-cap, truncated and past-the-end pages, a limit above 50
+ * served at 50, the page-window rejection split from an invalid query, every declared error on the wire, and
  * the text twin of structuredContent. Upstream I/O is a strict fetch fake.
  * @module tests/tools/search-records.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -30,6 +31,7 @@ import {
   hit,
   jsonResponse,
   licensedDatasetHit,
+  nestedOverflowAggregations,
   newsHit,
   portalRoute,
   RANGE_ERROR_BODY,
@@ -256,6 +258,40 @@ describe('cern_opendata_search_records input', () => {
     expect(searchRecords.input.parse({ collection: ['A', 'B'] }).collection).toEqual(['A', 'B']);
   });
 
+  const LIST_FILTERS: [string, unknown[]][] = [
+    ['type', ['dataset/collision', 'Software']],
+    ['experiment', ['cms', 'ATLAS']],
+    ['collision_energy', ['13TeV, 13.6TeV', '8 tev']],
+    ['collision_type', ['Pb-Pb', 'pp']],
+    ['file_type', ['NANOAOD', 'weird-format']],
+    ['availability', ['on demand', 'online']],
+    ['collection', [' CMS-Validated-Runs ', 'cms-validated-runs']],
+    ['category', ['Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos', 'susy']],
+    ['keywords', ['education', 'a,b']],
+    ['magnet_polarity', ['magdown', 'MagUp']],
+    ['stripping_stream', ['dimuon', 'charm.mdst']],
+    ['stripping_version', ['Stripping21r1', 'stripping21']],
+  ];
+
+  it.each(LIST_FILTERS)(
+    'reads a JSON-stringified %s list exactly as its array form',
+    (param, items) => {
+      const parsed = (value: unknown) => searchRecords.input.safeParse({ [param]: value });
+      expect(parsed(JSON.stringify(items))).toEqual(parsed(items));
+      expect(parsed(JSON.stringify(items)).data).toHaveProperty(param);
+    },
+  );
+
+  it.each(LIST_FILTERS)(
+    'fails a JSON-stringified %s list over its cap as its array form does',
+    (param) => {
+      const items = Array.from({ length: 21 }, (_, i) => `v${i}`);
+      const parsed = (value: unknown) => searchRecords.input.safeParse({ [param]: value });
+      expect(parsed(JSON.stringify(items)).error?.issues).toEqual(parsed(items).error?.issues);
+      expect(parsed(items).error?.issues).toHaveLength(1);
+    },
+  );
+
   it('keeps keywords as given, trimmed, case variants apart', () => {
     expect(searchRecords.input.parse({ keywords: ' education , Education' }).keywords).toEqual([
       'education',
@@ -297,7 +333,8 @@ describe('cern_opendata_search_records input', () => {
     ['negative max_events', { max_events: -1 }],
     ['an unknown sort', { sort: 'bogus' }],
     ['limit 0', { limit: 0 }],
-    ['limit 51', { limit: 51 }],
+    ['limit 10001', { limit: 10_001 }],
+    ['a fractional limit', { limit: 20.5 }],
     ['page 0', { page: 0 }],
     ['a fractional page', { page: 1.5 }],
     ['a numeric string for limit', { limit: '10' }],
@@ -493,6 +530,27 @@ describe('cern_opendata_search_records on the wire', () => {
     const result = success(await run({ collision_type: ['pp', 'pPb'] }));
     expect(paramsOf(http).getAll('collision_type')).toEqual(['pp', 'pPb']);
     expect(result.applied_filters).not.toHaveProperty('expanded');
+  });
+
+  it('sends the values of JSON-stringified lists, never their bracketed pieces', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = success(
+      await run({
+        experiment: '["CMS","ATLAS"]',
+        keywords: '["education"]',
+        collision_energy: '["13TeV, 13.6TeV","8TeV"]',
+      } as never),
+    );
+    const params = paramsOf(http);
+    expect(params.getAll('experiment')).toEqual(['CMS', 'ATLAS']);
+    expect(params.getAll('keywords')).toEqual(['education']);
+    expect(params.getAll('collision_energy')).toEqual(['13TeV, 13.6TeV', '8TeV']);
+    expect(result.applied_filters).toMatchObject({
+      experiment: ['CMS', 'ATLAS'],
+      keywords: ['education'],
+      collision_energy: ['13TeV, 13.6TeV', '8TeV'],
+    });
+    expect(result.applied_filters).not.toHaveProperty('unrecognized_values');
   });
 
   it('keeps a whole 13TeV, 13.6TeV energy as one upstream value', async () => {
@@ -985,6 +1043,31 @@ describe('cern_opendata_search_records enrichment', () => {
     );
   });
 
+  it('keeps truncated, has_more, totalCount and the notice the same with and without nested overflow', async () => {
+    const whole = structuredClone(nestedOverflowAggregations);
+    for (const bucket of whole.type.buckets) bucket.subtype.sum_other_doc_count = 0;
+    for (const bucket of whole.category.buckets) bucket.subcategory.sum_other_doc_count = 0;
+    const paging = async (aggregations: typeof whole) => {
+      disposeInstalledService();
+      serve(searchBody(syntheticHits(10), { total: 95, aggregations }));
+      const { truncated, has_more, totalCount, shown, cap, notice } = success(
+        await run({ limit: 10, page: 3 }),
+      );
+      return { truncated, has_more, totalCount, shown, cap, notice };
+    };
+    const cut = await paging(nestedOverflowAggregations);
+    expect(cut).toEqual(await paging(whole));
+    expect(cut).toEqual({
+      truncated: true,
+      has_more: true,
+      totalCount: 95,
+      shown: 10,
+      cap: 10,
+      notice:
+        'Showing 21–30 of 95; call cern_opendata_search_records again with page 4, or narrow with filters.',
+    });
+  });
+
   it('adds the window caveat when more than 10,000 matches exist', async () => {
     serve(searchBody(syntheticHits(10), { total: 35_747, hasNext: true }));
     const result = success(await run({ limit: 10 }));
@@ -1138,6 +1221,110 @@ describe('cern_opendata_search_records enrichment', () => {
   });
 });
 
+describe('cern_opendata_search_records limit above 50', () => {
+  const clamped = (requested: number) =>
+    `limit ${requested} is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50.`;
+
+  /** The trailer line that renders the notice, and the trailer's cap line. */
+  const trailerLines = (result: ContractResult) => textOf(result, 1).split('\n');
+
+  it('serves limit 60 at 50: the request, cap, shown, has_more and the notice all use 50', async () => {
+    const { http } = serve(searchBody(syntheticHits(50), { total: 95 }));
+    const result = await run({ limit: 60 });
+    const data = success(result);
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(data).toMatchObject({
+      truncated: true,
+      shown: 50,
+      cap: 50,
+      totalCount: 95,
+      has_more: true,
+      page: 1,
+    });
+    expect(data.hits).toHaveLength(50);
+    const notice = `${clamped(60)} Showing 1–50 of 95; call cern_opendata_search_records again with page 2, or narrow with filters.`;
+    expect(data.notice).toBe(notice);
+    expect(trailerLines(result)).toContain(`> ${notice}`);
+    expect(trailerLines(result)).toContain('**cap:** 50');
+  });
+
+  it('pages by the applied limit: page 200 at limit 60 returns matches 9951–10000', async () => {
+    const { http } = serve(searchBody(syntheticHits(50), { total: 35_747 }));
+    const data = success(await run({ limit: 60, page: 200 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(paramsOf(http).get('page')).toBe('200');
+    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 50, cap: 50 });
+    expect(data.notice).toBe(
+      `${clamped(60)} Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.`,
+    );
+  });
+
+  it('refuses page 201 at limit 60 before any request, naming the limit applied', async () => {
+    const { http } = serve(emptySearchBody);
+    const result = await run({ limit: 60, page: 201 });
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(
+      'page 201 × limit 50 (the maximum; 60 was requested) reaches past match 10000, the deepest the portal pages to.',
+    );
+    expect(error.data).toMatchObject({
+      reason: 'page_window_exceeded',
+      page: 201,
+      limit: 50,
+      requested_limit: 60,
+      window: 10_000,
+    });
+    expect(hintOf(error)).toContain('Narrow the search');
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('counts the last page in pages of the applied limit when the page is past the end', async () => {
+    serve(searchBody([], { total: 95 }));
+    const data = success(await run({ limit: 60, page: 3 }));
+    expect(data).toMatchObject({ hits: [], truncated: false, shown: 0, cap: 50, totalCount: 95 });
+    expect(data.notice).toBe(
+      `${clamped(60)} Page 3 is past the last page (95 matches); call cern_opendata_search_records again with page 2.`,
+    );
+  });
+
+  it('names the requested limit on a zero-result page too', async () => {
+    serve(emptySearchBody);
+    const data = success(await run({ limit: 75 }));
+    expect(data).toMatchObject({ truncated: false, shown: 0, cap: 50, totalCount: 0 });
+    expect(data.notice).toBe(clamped(75));
+  });
+
+  it('serves the 10,000 ceiling at 50', async () => {
+    const { http } = serve(searchBody(syntheticHits(5), { total: 5 }));
+    const data = success(await run({ limit: 10_000 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(data).toMatchObject({ truncated: false, shown: 5, cap: 50, totalCount: 5 });
+    expect(data.notice).toBe(clamped(10_000));
+  });
+
+  it('leaves a limit of exactly 50 as it was: no clamp fragment', async () => {
+    const { http } = serve(searchBody(syntheticHits(50), { total: 95 }));
+    const data = success(await run({ limit: 50 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(data.notice).toBe(
+      'Showing 1–50 of 95; call cern_opendata_search_records again with page 2, or narrow with filters.',
+    );
+  });
+
+  it('advertises the 10,000 ceiling and says what a value above 50 does', () => {
+    const { properties } = z.toJSONSchema(searchRecords.input, { io: 'input' }) as {
+      properties: Record<string, { description?: string; maximum?: number }>;
+    };
+    expect(properties.limit).toMatchObject({
+      maximum: 10_000,
+      description: 'Hits per page, 1-50. A value above 50 is served at 50.',
+    });
+    expect(properties.page?.description).toBe(
+      'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
+    );
+  });
+});
+
 describe('cern_opendata_search_records result', () => {
   it('maps hits compactly, omitting absent fields and never defaulting them', async () => {
     serve(searchBody([collisionDatasetHit, sparseHit, docHit, newsHit], { total: 4 }));
@@ -1230,6 +1417,43 @@ describe('cern_opendata_search_records result', () => {
     ]);
     expect(facets.stripping_version.other_count).toBe(4);
     expect(facets).not.toHaveProperty('signature');
+  });
+
+  it('relays a cut secondary list as its bucket overflow, beside the 10 listed, and none on a whole list', async () => {
+    serve(
+      searchBody([collisionDatasetHit], { total: 1, aggregations: nestedOverflowAggregations }),
+    );
+    const { facets } = success(await run({}));
+    const [dataset, supplementaries] = facets.type.buckets;
+    expect(facets.type.buckets.map((bucket) => bucket.value)).toEqual([
+      'Dataset',
+      'Supplementaries',
+    ]);
+    expect(supplementaries?.subtypes).toHaveLength(10);
+    expect(supplementaries?.subtypes_other_count).toBe(4149);
+    expect(dataset).toEqual({
+      value: 'Dataset',
+      count: 68_574,
+      subtypes: [
+        { value: 'Collision', count: 954 },
+        { value: 'Derived', count: 1236 },
+        { value: 'Simulated', count: 66_401 },
+      ],
+    });
+    expect(facets.type.other_count).toBe(0);
+    const [exotica, standardModel] = facets.category.buckets;
+    expect(exotica?.subcategories).toHaveLength(10);
+    expect(exotica).not.toHaveProperty('subcategories_other_count');
+    expect(standardModel).toEqual({
+      value: 'Standard Model Physics',
+      count: 3116,
+      subcategories: [
+        { value: 'Drell-Yan', count: 640 },
+        { value: 'QCD', count: 1210 },
+      ],
+      subcategories_other_count: 120,
+    });
+    expect(facets.category.other_count).toBe(25_724);
   });
 
   it('returns every facet, empty, when the portal sends no aggregations', async () => {
@@ -1604,7 +1828,60 @@ describe('cern_opendata_search_records format', () => {
       const bucket = facet.shape.buckets.element.shape;
       expect('subtypes' in bucket, name).toBe(name === 'type');
       expect('subcategories' in bucket, name).toBe(name === 'category');
+      expect('subtypes_other_count' in bucket, name).toBe(name === 'type');
+      expect('subcategories_other_count' in bucket, name).toBe(name === 'category');
     }
+  });
+
+  it('describes every overflow as a summed count of the values past the cap, and routes to the rest', () => {
+    const { facets } = searchRecords.output.shape;
+    expect(facets.description).toBe(
+      'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100), and type and category buckets their first 10 secondary values. other_count, subtypes_other_count and subcategories_other_count sum the counts of the values past those caps, so a record holding several of them counts once per value; other_count is 0 for year and number_events. cern_opendata_list_reference topics record_types and categories list every secondary value, and a Primary::Secondary type or category filter returns its record count as totalCount.',
+    );
+    for (const [name, facet] of Object.entries(facets.shape)) {
+      expect(facet.shape.other_count.description, name).toBe(
+        'Summed count of the values past the bucket cap, not a record count.',
+      );
+    }
+    expect(facets.shape.type.shape.buckets.element.shape.subtypes_other_count.description).toBe(
+      'Summed count of the secondary types past the 10 listed, not a record count; absent when the list is whole.',
+    );
+    expect(
+      facets.shape.category.shape.buckets.element.shape.subcategories_other_count.description,
+    ).toBe(
+      'Summed count of the secondary categories past the 10 listed, not a record count; absent when the list is whole.',
+    );
+  });
+
+  it("renders a cut secondary list's overflow inside its bucket, and a whole list without one", async () => {
+    const { text } = await rendered([], nestedOverflowAggregations);
+    const lines = text.split('\n');
+    expect(lines).toContain(
+      '- **type:** Dataset (68574: Collision 954, Derived 1236, Simulated 66401), Supplementaries (5904: Computing Note 117, Configuration 627, Configuration HLT 214, Configuration LHE 242, Configuration RECO 192, Configuration SIM 313, Correction 1, Logbook 32, Luminosity 10, Manual 7 · other values: 4149)',
+    );
+    expect(lines).toContain(
+      '- **category:** Exotica (14584: Contact Interaction 465, Dark Matter 2138, Excited Fermions 836, Extra Dimensions 666, Gravitons 2850, "Heavy Fermions, Heavy Righ-Handed Neutrinos" 2301, Heavy Gauge Bosons 1669, Leptoquarks 1483, Miscellaneous 1162, Resonances 1014), Standard Model Physics (3116: Drell-Yan 640, QCD 1210 · other values: 120) · other values: 25724',
+    );
+  });
+
+  it('renders a nested overflow beside quoted edge-whitespace values, and one with no listed values', async () => {
+    const { text } = await rendered([], {
+      type: {
+        buckets: [{ key: 'Software', doc_count: 5, subtype: { sum_other_doc_count: 3 } }],
+      },
+      category: {
+        buckets: [
+          {
+            key: ' Heavy-Ion Physics',
+            doc_count: 219,
+            subcategory: { buckets: [{ key: ' Y', doc_count: 1 }], sum_other_doc_count: 4 },
+          },
+        ],
+      },
+    });
+    const lines = text.split('\n');
+    expect(lines).toContain('- **type:** Software (5 · other values: 3)');
+    expect(lines).toContain('- **category:** " Heavy-Ion Physics" (219: " Y" 1 · other values: 4)');
   });
 
   it('renders a one-byte size in the singular', () => {

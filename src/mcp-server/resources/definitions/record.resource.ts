@@ -20,7 +20,7 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   mimeType: 'application/json',
   params: z.object({
     recid: recidInput().describe(
-      'Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); leading zeros are ignored and the prefix is read in any case. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), optionally after a lowercase experiment prefix (atlas-160006). cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
   }),
   output: RecordSchema,

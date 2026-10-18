@@ -1,10 +1,11 @@
 /**
- * @fileoverview cern_opendata_get_records — resolve 1–20 identifiers (recid,
- * DOI, CMS dataset path, documentation slug) to full record metadata with
- * license and citation, in one portal search. Each response holds to a byte
- * budget by deferring whole records, and `body_offset` reads a long doc body
- * slice by slice. File manifests are left to cern_opendata_list_files; ids
- * that do not resolve come back under `missing`.
+ * @fileoverview cern_opendata_get_records — resolve the first 20 of up to 100
+ * identifiers (recid, DOI, CMS dataset path, documentation slug) to full record
+ * metadata with license and citation, in one portal search. Each response
+ * holds to a byte budget by deferring whole records, ids past the 20th are
+ * deferred unread, and `body_offset` reads a long doc body slice by slice.
+ * File manifests are left to cern_opendata_list_files; ids that do not resolve
+ * come back under `missing`.
  * @module mcp-server/tools/definitions/get-records.tool
  */
 
@@ -31,6 +32,12 @@ import { composeNotice } from '../enrichment.js';
 import { blankAsUnset, requiredListInput } from '../inputs.js';
 
 const INTERPRETED_AS = ['recid', 'doi', 'cms_dataset_path', 'doc_slug', 'unrecognized'] as const;
+
+/** The most ids `ids` accepts, counted after exact duplicates collapse. */
+const IDS_CEILING = 100;
+
+/** The ids one call looks up; the rest are deferred unread (Decision 56). */
+const LOOKUP_CAP = 20;
 
 type RecordOut = z.infer<typeof RecordSchema>;
 
@@ -281,9 +288,34 @@ function closingBlocks(missing: readonly MissingOut[], deferred: readonly string
   return blocks;
 }
 
+/**
+ * The deferral fragment: records the budget left out, then ids past the first
+ * {@link LOOKUP_CAP} that were not looked up, joined into one sentence that
+ * names the call fetching them all.
+ */
+function deferralFragment(deferredRecords: number, unread: number): string | undefined {
+  if (deferredRecords === 0 && unread === 0) return undefined;
+  const was = (n: number) => (n === 1 ? 'was' : 'were');
+  const parts = [
+    ...(deferredRecords > 0
+      ? [
+          `The response reached its 64,000-byte budget, so ${countOf(deferredRecords, 'record')} ${was(deferredRecords)} deferred`,
+        ]
+      : []),
+    ...(unread > 0
+      ? [`${countOf(unread, 'id')} past the first ${LOOKUP_CAP} ${was(unread)} not looked up`]
+      : []),
+  ];
+  const them = deferredRecords + unread === 1 ? 'it' : 'them';
+  return `${parts.join(', and ')}; call cern_opendata_get_records with ids set to the deferred list to fetch ${them}.`;
+}
+
 /** One fragment per returned body with more to read, then the deferral, if any. */
-function responseNotice(records: readonly RecordOut[], deferredCount: number): string | undefined {
-  const one = deferredCount === 1;
+function responseNotice(
+  records: readonly RecordOut[],
+  deferredRecords: number,
+  unread: number,
+): string | undefined {
   return composeNotice([
     ...records.flatMap((record) => {
       const next = record.body_next_offset;
@@ -293,9 +325,7 @@ function responseNotice(records: readonly RecordOut[], deferredCount: number): s
         `The body of ${slug} was cut at character ${next} of ${record.body_length}; call cern_opendata_get_records with ids ["${slug}"] and body_offset ${next} to continue it.`,
       ];
     }),
-    deferredCount > 0
-      ? `The response reached its 64,000-byte budget, so ${countOf(deferredCount, 'record')} ${one ? 'was' : 'were'} deferred; call cern_opendata_get_records with ids set to the deferred list to fetch ${one ? 'it' : 'them'}.`
-      : undefined,
+    deferralFragment(deferredRecords, unread),
   ]);
 }
 
@@ -304,17 +334,24 @@ function responseNotice(records: readonly RecordOut[], deferredCount: number): s
  * stopping at the first record that would cross it; the first record is always
  * admitted whole. A record is charged the larger of its JSON and its rendered
  * text (plus its separator), and the rest of the response, the notice
- * included, is measured exactly for each prefix.
+ * included, is measured exactly for each prefix. `deferred` lists the inputs
+ * of the records left out, in input order, then the `unread` ids that were
+ * never looked up.
  */
 function withinBudget(
   records: readonly RecordOut[],
   ids: readonly string[],
+  unread: readonly string[],
   missing: readonly MissingOut[],
 ): { deferred: string[]; notice: string | undefined; records: RecordOut[] } {
   const settle = (admitted: number) => {
     const left = new Set(records.slice(admitted).flatMap((record) => record.matched_inputs));
-    const deferred = ids.filter((id) => left.has(id));
-    const notice = responseNotice(records.slice(0, admitted), records.length - admitted);
+    const deferred = [...ids.filter((id) => left.has(id)), ...unread];
+    const notice = responseNotice(
+      records.slice(0, admitted),
+      records.length - admitted,
+      unread.length,
+    );
     return { records: records.slice(0, admitted), deferred, notice };
   };
   const restBytes = ({ deferred, notice }: ReturnType<typeof settle>) =>
@@ -340,20 +377,20 @@ function withinBudget(
 export const getRecords = tool('cern_opendata_get_records', {
   title: 'Get CERN Open Data Records',
   description:
-    'Fetch full metadata for 1-20 records in one call, by recid, DOI, CMS dataset path (/Primary/Era/TIER) or documentation slug. Returns the description, run periods, collision and distribution details, related records, a software-environment summary, the license and a ready citation, plus what a record states of its variable dictionary, physics category, pile-up, keywords, and LHCb magnet polarity and stripping. Documentation and news pages include their markdown body in slices of at most 30,000 characters; body_offset with that one id reads on from where a slice stops. Each response holds to 64,000 bytes: records past it are left out whole and listed under deferred, to pass back as ids. File lists are not included; use cern_opendata_list_files. Identifiers that do not resolve come back under missing with guidance; they do not fail the call.',
+    'Fetch full metadata for 1-20 records in one call, by recid, DOI, CMS dataset path (/Primary/Era/TIER) or documentation slug. Returns the description, run periods, collision and distribution details, related records, a software-environment summary, the license and a ready citation, plus what a record states of its variable dictionary, physics category, pile-up, keywords, and LHCb magnet polarity and stripping. Documentation and news pages include their markdown body in slices of at most 30,000 characters; body_offset with that one id reads on from where a slice stops. Each response holds to 64,000 bytes, except that the first record always comes back whole: records past the budget, and ids past the first 20, are listed under deferred, to pass back as ids. File lists are not included; use cern_opendata_list_files. Identifiers that do not resolve come back under missing with guidance; they do not fail the call.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     ids: requiredListInput(
-      20,
+      IDS_CEILING,
       z
         .string()
         .max(500)
         .describe(
           'One identifier: a recid (6004 or atlas-160006, recid:6004 or a portal record URL), a DOI (10.7483/OPENDATA.CMS.YLIC.86ZZ, doi:… or a doi.org URL), a CMS dataset path (/DoubleMuParked/Run2012B-22Jan2013-v1/AOD) or a documentation slug (cms-guide-docker or its portal URL).',
         ),
-      'At least one identifier is required (a recid, DOI, CMS dataset path or documentation slug); cern_opendata_search_records finds them.',
+      'At least one identifier is required (a recid, DOI, CMS dataset path or documentation slug, up to 100); cern_opendata_search_records finds them.',
     ).describe(
-      'Identifiers to resolve, 1-20: an array, or one comma-separated string. Forms may be mixed; duplicates collapse.',
+      'Identifiers to resolve: up to 100, of which the first 20 distinct are looked up and the rest returned under deferred. Forms may be mixed; exact duplicates collapse.',
     ),
     body_offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
       "With exactly one documentation or news id: where its body slice starts, in characters (UTF-16 code units), usually the body_next_offset an earlier call returned. 0 (the default) is the body's start and is accepted with any ids; above 0 needs exactly one id.",
@@ -379,7 +416,7 @@ export const getRecords = tool('cern_opendata_get_records', {
     deferred: z
       .array(z.string().describe('One input, as given.'))
       .describe(
-        'Inputs whose records were left out to hold the response to 64,000 bytes, in input order; pass them as ids to fetch those records. Empty when every resolved record is returned.',
+        'Inputs left for another call, in input order: those whose records were left out to hold the response to 64,000 bytes (never the first record, which is returned whole even when larger), then ids past the first 20, which were not looked up. Pass them as ids to fetch them. Empty when nothing was left out.',
       ),
   }),
   enrichment: {
@@ -387,7 +424,7 @@ export const getRecords = tool('cern_opendata_get_records', {
       .string()
       .optional()
       .describe(
-        'Caveats about the returned records: a documentation body with more to read, or records deferred by the response budget, each with the call that continues it.',
+        'Caveats about the returned records: a documentation body with more to read, records deferred by the response budget, or ids past the first 20 that were not looked up, each with the call that continues it.',
       ),
   },
   errors: [
@@ -427,7 +464,9 @@ export const getRecords = tool('cern_opendata_get_records', {
         { body_offset: offset, ids: input.ids.length },
       );
     }
-    const classified = input.ids.map(classifyIdentifier);
+    const lookedUp = input.ids.slice(0, LOOKUP_CAP);
+    const unread = input.ids.slice(LOOKUP_CAP);
+    const classified = lookedUp.map(classifyIdentifier);
     const service = getCernOpenDataService();
     const { matches, missing } = await service.lookup(classified, service.startBudget(), ctx);
     const resolved = matches.map((match) => toRecord(match.hit, match.matchedInputs, offset));
@@ -456,14 +495,16 @@ export const getRecords = tool('cern_opendata_get_records', {
       interpreted_as: id.kind,
       guidance: missingGuidance(id),
     }));
-    const { records, deferred, notice } = withinBudget(resolved, input.ids, missingOut);
+    const { records, deferred, notice } = withinBudget(resolved, lookedUp, unread, missingOut);
     if (notice) ctx.enrich.notice(notice);
 
     ctx.log.info('Records resolved', {
-      requested: classified.length,
+      requested: input.ids.length,
+      looked_up: classified.length,
       resolved: resolved.length,
       returned: records.length,
       deferred: resolved.length - records.length,
+      not_looked_up: unread.length,
       missing: missing.length,
     });
     return { records, missing: missingOut, deferred };

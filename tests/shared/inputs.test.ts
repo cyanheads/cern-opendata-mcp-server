@@ -15,7 +15,7 @@ import {
   unrecognizedValues,
   vocabularyListInput,
 } from '@/mcp-server/tools/inputs.js';
-import { expectLinearTime } from '../fixtures/cpu-time.js';
+import { expectLinearGrowth, expectLinearTime } from '../fixtures/cpu-time.js';
 
 const element = z.string().max(100);
 const MEGABYTE_SIZES = [62_500, 250_000, 1_000_000] as const;
@@ -279,11 +279,8 @@ describe('vocabularyListInput', () => {
 
     it('checks every adjacent pair of a long string for a rejoin in linear time', () => {
       const make = (n: number) => 'a,'.repeat(n / 2);
-      expect(category.parse(make(200_000))).toEqual(['a']);
-      expectLinearTime(make, (value) => category.safeParse(value), {
-        sizes: [12_500, 50_000, 200_000],
-        maxMs: 250,
-      });
+      expect(category.parse(make(80_000))).toEqual(['a']);
+      expectLinearTime(make, (value) => category.safeParse(value), { maxMs: 50 });
     });
 
     it('treats the array form as separate items, so the comma value can sit beside others', () => {
@@ -316,6 +313,149 @@ describe('vocabularyListInput', () => {
 
   it('maps PbPb spellings to the canonical value', () => {
     expect(vocabularyListInput('collision_type', 5).parse('Pb-Pb, pp')).toEqual(['PbPb', 'pp']);
+  });
+});
+
+describe('a list string that is not a JSON array of strings', () => {
+  const list = listInput(5, element);
+
+  it.each([
+    ['[CMS', ['[CMS']],
+    ['[]', ['[]']],
+    ['[1,2]', ['[1', '2]']],
+    ['CMS,ATLAS', ['CMS', 'ATLAS']],
+    ['["a",1]', ['["a"', '1]']],
+    ['[["a"]]', ['[["a"]]']],
+    ['[null]', ['[null]']],
+    ['["a"', ['["a"']],
+    ['"a","b"', ['"a"', '"b"']],
+    ['{"a":"b"}', ['{"a":"b"}']],
+    ["['a','b']", ["['a'", "'b']"]],
+    ['["a\\x"]', ['["a\\x"]']],
+  ])('splits %j on its commas', (raw, expected) => {
+    expect(list.parse(raw)).toEqual(expected);
+  });
+
+  it('splits a vocabulary filter on its commas and leaves the bracketed pieces unrecognized', () => {
+    expect(vocabularyListInput('experiment', 9).parse('[cms, atlas]')).toEqual(['[cms', 'atlas]']);
+    expect(vocabularyListInput('experiment', 9).parse('[1,2]')).toEqual(['[1', '2]']);
+  });
+
+  it('keeps an empty JSON array as one identifier, so the required list still accepts it', () => {
+    expect(requiredListInput(20, z.string().max(500)).parse('[]')).toEqual(['[]']);
+  });
+});
+
+describe('a JSON-stringified list', () => {
+  const ids = requiredListInput(100, z.string().max(500));
+  const IDS_BOUND = 2 + 101 * (6 * 500 + 4);
+  const keywords = listInput(10, element);
+  const experiment = vocabularyListInput('experiment', 9);
+  const energy = vocabularyListInput('collision_energy', 15);
+  const category = vocabularyListInput('category', 20);
+  const COMMA_VALUE = 'Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos';
+
+  it('reads a JSON array of strings as that array, canonicalized', () => {
+    expect(experiment.parse('["CMS","ATLAS"]')).toEqual(['CMS', 'ATLAS']);
+    expect(experiment.parse(' [ "lhcb" , "Alice" ] ')).toEqual(['LHCb', 'ALICE']);
+    expect(ids.parse('["6004","6030"]')).toEqual(['6004', '6030']);
+    expect(keywords.parse('["education"]')).toEqual(['education']);
+  });
+
+  it('keeps an item holding a comma as one value, as the array form does', () => {
+    expect(keywords.parse('["a,b"]')).toEqual(['a,b']);
+    expect(energy.parse('["13TeV, 13.6TeV","8TeV"]')).toEqual(['13TeV, 13.6TeV', '8TeV']);
+    expect(category.parse(`[${JSON.stringify(COMMA_VALUE)}, "supersymmetry"]`)).toEqual([
+      COMMA_VALUE,
+      'Supersymmetry',
+    ]);
+  });
+
+  it('decodes JSON escapes, ASCII-only encodings included', () => {
+    expect(keywords.parse('["caf\\u00e9", "a\\"b", "x\\\\y"]')).toEqual(['café', 'a"b', 'x\\y']);
+  });
+
+  it('trims, drops blank items and dedupes after decoding', () => {
+    expect(keywords.parse('[" a ", "a", "", " ", "b"]')).toEqual(['a', 'b']);
+  });
+
+  it('reads a JSON array of blank strings as unset, and the required list fails it', () => {
+    expect(keywords.parse('["", " "]')).toBeUndefined();
+    const fromString = ids.safeParse('["", " "]');
+    expect(fromString.error?.issues.map((issue) => issue.message)).toEqual([
+      'At least one value is required.',
+    ]);
+    expect(fromString.error?.issues).toEqual(ids.safeParse(['', ' ']).error?.issues);
+  });
+
+  it.each<[string, z.ZodType, unknown[]]>([
+    ['ids over 100', ids, Array.from({ length: 101 }, (_, i) => String(i + 1))],
+    ['ids far over 100', ids, Array.from({ length: 500 }, (_, i) => `id${i}`)],
+    ['experiment over 9', experiment, Array.from({ length: 10 }, (_, i) => `e${i}`)],
+    ['keywords over 10', keywords, Array.from({ length: 11 }, (_, i) => `k${i}`)],
+    ['an id over 500 characters', ids, ['1'.repeat(501)]],
+    ['a keyword over 100 characters', keywords, ['ok', 'x'.repeat(101)]],
+  ])('fails %s with exactly the issues the array form gets', (_name, schema, items) => {
+    const fromString = schema.safeParse(JSON.stringify(items));
+    expect(fromString.success).toBe(false);
+    expect(fromString.error?.issues).toEqual(schema.safeParse(items).error?.issues);
+    expect(fromString.error?.issues).toHaveLength(1);
+  });
+
+  it('rejects Glossary given in a JSON array', () => {
+    expect(
+      vocabularyListInput('type', 7).safeParse('["Dataset","glossary"]').error?.issues[0]?.message,
+    ).toBe('Glossary entries are not served by this server.');
+  });
+
+  it('collapses duplicates before the cap, as the array form does', () => {
+    const repeated = Array.from({ length: 150 }, () => '6004');
+    expect(ids.parse(JSON.stringify(repeated))).toEqual(['6004']);
+    expect(ids.parse(repeated)).toEqual(['6004']);
+  });
+
+  it('collapses 100 distinct ids repeated in an array, a JSON string or a comma string in linear time', () => {
+    /** Ids `i00`…`i99` repeated over about `n` characters, so every item is checked against a full 100, in each form. */
+    const make = (n: number) => {
+      const items = Array.from({ length: n / 5 }, (_, i) => `i${String(i % 100).padStart(2, '0')}`);
+      return [items, JSON.stringify(items), items.join(',')] as const;
+    };
+    const distinct = Array.from({ length: 100 }, (_, i) => `i${String(i).padStart(2, '0')}`);
+    for (const form of make(100_000)) expect(ids.parse(form)).toEqual(distinct);
+    expectLinearGrowth(make, (forms) => forms.map((form) => ids.safeParse(form)), {
+      from: 2_500,
+      to: 160_000,
+      maxMs: 100,
+    });
+  });
+
+  it('parses only up to the longest JSON a list within its caps can take, and splits a longer string', () => {
+    const padded = (length: number) => `["6004",${' '.repeat(length - 15)}"6030"]`;
+    expect(padded(IDS_BOUND)).toHaveLength(IDS_BOUND);
+    expect(ids.parse(padded(IDS_BOUND))).toEqual(['6004', '6030']);
+    expect(ids.parse(`  ${padded(IDS_BOUND)}  `)).toEqual(['6004', '6030']);
+    expect(ids.parse(padded(IDS_BOUND + 1))).toEqual(['["6004"', '"6030"]']);
+  });
+
+  it.each<[string, (n: number) => string]>([
+    ['a run of [ with no closer', (n) => '['.repeat(n)],
+    ['a run of [ closed once', (n) => `${'['.repeat(n - 1)}]`],
+    ['nested arrays', (n) => `${'['.repeat(n / 2)}${']'.repeat(n / 2)}`],
+    ['one huge string item', (n) => `["${'x'.repeat(n - 4)}"]`],
+    ['many short items', (n) => `[${'"a",'.repeat(n / 4 - 1)}"a"]`],
+    ['a string of escapes', (n) => `["${'\\u00e9'.repeat(n / 6)}"]`],
+    ['items separated by line breaks', (n) => `[${'"§1 x",\n'.repeat(n / 9)}"y"]`],
+    ['an unterminated string of commas', (n) => `["${'a,'.repeat(n / 2)}]`],
+  ])('preprocesses %s in linear time, across the parse bound', (_name, make) => {
+    /**
+     * `category`'s split path looks up every adjacent pair for a rejoin, so it
+     * costs several times its parse path per character and a span across its
+     * 12,686-character bound would time that switch rather than growth; its
+     * rejoin is timed on its own above.
+     */
+    for (const schema of [ids, keywords, experiment]) {
+      expectLinearGrowth(make, (value) => schema.safeParse(value), { maxMs: 100 });
+    }
   });
 });
 
@@ -434,7 +574,7 @@ describe('preprocessing a megabyte of caller text', () => {
       (n) => `higgs physics${spaces(n)}/${spaces(n)}standard model, x`,
     ],
     ['a collection item', listInput(10, element), long],
-    ['an identifier', requiredListInput(20, z.string().max(500)), long],
+    ['an identifier', requiredListInput(100, z.string().max(500)), long],
     ['a padded recid', recidInput(), (n) => `${spaces(n)}6004x`],
     [
       'a record URL with a long recid',

@@ -42,15 +42,25 @@ import {
   type VocabularyParam,
 } from '@/services/cern-opendata/vocabulary.js';
 import {
+  applyLimit,
   composeNotice,
   finishListEnrichment,
   lastPageNotice,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, listInput, unrecognizedValues, vocabularyListInput } from '../inputs.js';
+import {
+  blankAsUnset,
+  LIMIT_CEILING,
+  listInput,
+  unrecognizedValues,
+  vocabularyListInput,
+} from '../inputs.js';
 
 const SORTS = ['bestmatch', 'mostrecent', 'title', 'title_desc'] as const;
+
+/** The most hits one page returns; a larger limit is served at it. */
+const MAX_LIMIT = 50;
 
 /** The upstream spelling of each sort: the portal takes direction only from a `-` prefix. */
 const UPSTREAM_SORT: Record<(typeof SORTS)[number], SortKey> = {
@@ -113,7 +123,7 @@ const BucketSchema = z
   })
   .describe('One facet value.');
 
-/** Only the type facet's buckets carry subtypes, so only its schema declares them. */
+/** Only the type facet's buckets carry subtypes and their overflow, so only its schema declares them. */
 const TypeBucketSchema = BucketSchema.extend({
   subtypes: z
     .array(
@@ -126,9 +136,15 @@ const TypeBucketSchema = BucketSchema.extend({
     )
     .optional()
     .describe('Secondary types of this primary type.'),
+  subtypes_other_count: z
+    .number()
+    .optional()
+    .describe(
+      'Summed count of the secondary types past the 10 listed, not a record count; absent when the list is whole.',
+    ),
 }).describe('One primary type.');
 
-/** Only the category facet's buckets carry subcategories, so only its schema declares them. */
+/** Only the category facet's buckets carry subcategories and their overflow, so only its schema declares them. */
 const CategoryBucketSchema = BucketSchema.extend({
   subcategories: z
     .array(
@@ -141,13 +157,21 @@ const CategoryBucketSchema = BucketSchema.extend({
     )
     .optional()
     .describe('Secondary categories of this primary category.'),
+  subcategories_other_count: z
+    .number()
+    .optional()
+    .describe(
+      'Summed count of the secondary categories past the 10 listed, not a record count; absent when the list is whole.',
+    ),
 }).describe('One primary category.');
 
 const facetSchema = <B extends z.ZodType>(what: string, bucket: B) =>
   z
     .object({
       buckets: z.array(bucket).describe('Values with counts.'),
-      other_count: z.number().describe('Records past the bucket cap.'),
+      other_count: z
+        .number()
+        .describe('Summed count of the values past the bucket cap, not a record count.'),
     })
     .describe(what);
 
@@ -231,7 +255,9 @@ interface FacetOut {
   buckets: {
     count: number;
     subcategories?: NestedOut[] | undefined;
+    subcategories_other_count?: number | undefined;
     subtypes?: NestedOut[] | undefined;
+    subtypes_other_count?: number | undefined;
     value: string;
   }[];
   other_count: number;
@@ -297,17 +323,26 @@ function renderHit(hit: HitOut): string[] {
   return lines;
 }
 
-/** Facet values render through `inlineSpelling`, so ` Heavy-Ion Physics` stays apart from `Heavy-Ion Physics`. */
+const otherValues = (count: number | undefined) =>
+  count !== undefined && count > 0 ? ` · other values: ${count}` : '';
+
+/**
+ * Facet values render through `inlineSpelling`, so ` Heavy-Ion Physics` stays
+ * apart from `Heavy-Ion Physics`; a cut secondary list's overflow renders
+ * inside its bucket, the facet's own after the last bucket.
+ */
 function renderFacet(name: string, facet: FacetOut): string {
   const buckets = facet.buckets.map((bucket) => {
     const nested = bucket.subtypes ?? bucket.subcategories;
     const level = nested?.length
       ? `: ${nested.map((sub) => `${inlineSpelling(sub.value)} ${sub.count}`).join(', ')}`
       : '';
-    return `${inlineSpelling(bucket.value)} (${bucket.count}${level})`;
+    const nestedOther = otherValues(
+      bucket.subtypes_other_count ?? bucket.subcategories_other_count,
+    );
+    return `${inlineSpelling(bucket.value)} (${bucket.count}${level}${nestedOther})`;
   });
-  const other = facet.other_count > 0 ? ` · other values: ${facet.other_count}` : '';
-  return `- **${name}:** ${buckets.length > 0 ? buckets.join(', ') : 'none'}${other}`;
+  return `- **${name}:** ${buckets.length > 0 ? buckets.join(', ') : 'none'}${otherValues(facet.other_count)}`;
 }
 
 function renderAppliedFilters(filters: AppliedFilters): string {
@@ -358,19 +393,19 @@ export const searchRecords = tool('cern_opendata_search_records', {
       'Full-text query, sent verbatim as an OpenSearch query_string (AND between terms; title matches weigh double). Field forms such as title:"…", recid:(1 OR 2) or run_period:("Run2012B") work; cern_opendata_list_reference with topic query_syntax lists them. Omit to browse by filters alone.',
     ),
     type: vocabularyListInput('type', 7).describe(
-      'Record types (OR): a primary (Dataset, Documentation, Environment, Software, Supplementaries, News) or Primary::Secondary such as Dataset::Collision or Dataset::Simulated. Array or comma-separated string, up to 7. Omit for every served type; Glossary is not served.',
+      'Record types (OR): a primary (Dataset, Documentation, Environment, Software, Supplementaries, News) or Primary::Secondary such as Dataset::Collision or Dataset::Simulated. Up to 7. Omit for every served type; Glossary is not served.',
     ),
     experiment: vocabularyListInput('experiment', 9).describe(
-      'Experiments (OR): ALICE, ATLAS, CMS, DELPHI, JADE, LHCb, OPERA, PHENIX, TOTEM. Array or comma-separated string, up to 9; case is normalized.',
+      'Experiments (OR): ALICE, ATLAS, CMS, DELPHI, JADE, LHCb, OPERA, PHENIX, TOTEM. Up to 9; case is normalized.',
     ),
     collision_energy: vocabularyListInput('collision_energy', 15).describe(
-      'Collision energies (OR), such as 7TeV, 8TeV, 13TeV or 5.02TeV. Array or comma-separated string, up to 15; "13TeV, 13.6TeV" is one upstream value and is kept whole.',
+      'Collision energies (OR), such as 7TeV, 8TeV, 13TeV or 5.02TeV. Up to 15; "13TeV, 13.6TeV" is one upstream value and one item.',
     ),
     collision_type: vocabularyListInput('collision_type', 6).describe(
-      'Collision types (OR): pp, PbPb, pPb, e+e-, Interfill. PbPb also matches the Pb-Pb spelling. Array or comma-separated string, up to 6.',
+      'Collision types (OR): pp, PbPb, pPb, e+e-, Interfill. PbPb also matches the Pb-Pb spelling. Up to 6.',
     ),
     file_type: vocabularyListInput('file_type', 20).describe(
-      'File formats and data tiers (OR), such as nanoaod, miniaod, aod, root, DAOD_PHYSLITE or csv. Array or comma-separated string, up to 20; case is normalized for known values.',
+      'File formats and data tiers (OR), such as nanoaod, miniaod, aod, root, DAOD_PHYSLITE or csv. Up to 20; case is normalized for known values.',
     ),
     year_from: blankAsUnset(z.number().int().min(1900).max(2100).optional()).describe(
       'Earliest data-taking year, inclusive. Alone, it means this year onward; for one year, set year_from and year_to to it.',
@@ -385,40 +420,40 @@ export const searchRecords = tool('cern_opendata_search_records', {
       'Maximum number of events, inclusive.',
     ),
     availability: vocabularyListInput('availability', 4).describe(
-      'Record availability (OR): online, partial, ondemand (on tape, requested before download) or requested. Array or comma-separated string, up to 4.',
+      'Record availability (OR): online, partial, ondemand (on tape, requested before download) or requested. Up to 4.',
     ),
     collection: listInput(
       10,
       z.string().max(100).describe('One collection name, exact and case-sensitive.'),
     ).describe(
-      "Portal collections (OR), exact and case-sensitive, such as CMS-Validated-Runs; copy spellings from a record's collections field. Array or comma-separated string, up to 10.",
+      "Portal collections (OR), exact and case-sensitive, such as CMS-Validated-Runs; copy spellings from a record's collections field. Up to 10.",
     ),
     category: vocabularyListInput('category', 20).describe(
-      'Physics categories of simulated datasets (OR): a primary such as Exotica, Higgs Physics, Standard Model Physics or Supersymmetry, or Primary::Secondary such as Higgs Physics::Standard Model. Array or comma-separated string, up to 20; case and the separator are normalized, and a known value holding a comma is kept whole. Heavy-Ion Physics also matches its leading-space spelling. cern_opendata_list_reference topic categories lists every value.',
+      'Physics categories of simulated datasets (OR): a primary such as Exotica, Higgs Physics, Standard Model Physics or Supersymmetry, or Primary::Secondary such as Higgs Physics::Standard Model. Up to 20; case and the separator are normalized, and a value holding a comma (Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos) is one item. Heavy-Ion Physics also matches its leading-space spelling. cern_opendata_list_reference topic categories lists every value.',
     ),
     keywords: listInput(
       10,
       z.string().max(100).describe('One keyword, exact and case-sensitive.'),
     ).describe(
-      'Record keywords (OR), exact and case-sensitive (Education and education differ), sent as given. Array or comma-separated string, up to 10; pass a keyword holding a comma in an array.',
+      'Record keywords (OR), exact and case-sensitive (Education and education differ), sent as given. Up to 10; a keyword holding a comma is one item.',
     ),
     magnet_polarity: vocabularyListInput('magnet_polarity', 2).describe(
-      'LHCb magnet polarities (OR): MagDown or MagUp, set on LHCb collision datasets. Array or comma-separated string, up to 2; case is normalized.',
+      'LHCb magnet polarities (OR): MagDown or MagUp, set on LHCb collision datasets. Up to 2; case is normalized.',
     ),
     stripping_stream: vocabularyListInput('stripping_stream', 11).describe(
-      'LHCb stripping streams (OR), such as BHADRON, CHARM, DIMUON, EW or LEPTONIC; they also match LHCb stripping documentation. Array or comma-separated string, up to 11; case is normalized. cern_opendata_list_reference topic lhcb lists them.',
+      'LHCb stripping streams (OR), such as BHADRON, CHARM, DIMUON, EW or LEPTONIC; they also match LHCb stripping documentation. Up to 11; case is normalized. cern_opendata_list_reference topic lhcb lists them.',
     ),
     stripping_version: vocabularyListInput('stripping_version', 12).describe(
-      'LHCb stripping versions (OR), such as stripping21 or stripping21r1p2. Array or comma-separated string, up to 12; case is normalized.',
+      'LHCb stripping versions (OR), such as stripping21 or stripping21r1p2. Up to 12; case is normalized.',
     ),
     sort: blankAsUnset(z.enum(SORTS).optional()).describe(
       'bestmatch (relevance), mostrecent (by date_published, newest first), title (A-Z) or title_desc (Z-A). Omitted: bestmatch with a query, mostrecent (newest first) without.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(50).default(10)).describe(
-      'Hits per page, 1-50.',
+    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(10)).describe(
+      'Hits per page, 1-50. A value above 50 is served at 50.',
     ),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
-      'Page number, from 1. page × limit may not exceed 10,000.',
+      'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
     ),
   }),
   output: z.object({
@@ -452,7 +487,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
         stripping_version: facetSchema('Matches by LHCb stripping version.', BucketSchema),
       })
       .describe(
-        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100). other_count is 0 for year and number_events.',
+        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100), and type and category buckets their first 10 secondary values. other_count, subtypes_other_count and subcategories_other_count sum the counts of the values past those caps, so a record holding several of them counts once per value; other_count is 0 for year and number_events. cern_opendata_list_reference topics record_types and categories list every secondary value, and a Primary::Secondary type or category filter returns its record count as totalCount.',
       ),
   }),
   enrichment: {
@@ -481,7 +516,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     {
       reason: 'page_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × limit exceeds 10,000, the deepest match the portal pages to.',
+      when: 'page × limit, the limit applied (at most 50), exceeds 10,000, the deepest match the portal pages to.',
       recovery:
         'Narrow the search with filters such as experiment, type, file_type or year_from (the facets show how matches split), then call cern_opendata_search_records again from page 1.',
       severity: 'notice',
@@ -531,7 +566,8 @@ export const searchRecords = tool('cern_opendata_search_records', {
       unrecognizedValues(param, input[param]),
     );
 
-    startListEnrichment(ctx, input.limit);
+    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT, true);
+    startListEnrichment(ctx, limit);
     ctx.enrich({
       applied_filters: definedOnly<AppliedFilters>({
         query: input.query,
@@ -580,11 +616,16 @@ export const searchRecords = tool('cern_opendata_search_records', {
         { min_events: input.min_events, max_events: input.max_events },
       );
     }
-    if (input.page * input.limit > PAGE_WINDOW) {
+    if (input.page * limit > PAGE_WINDOW) {
       throw ctx.fail(
         'page_window_exceeded',
-        `page ${input.page} × limit ${input.limit} reaches past match ${PAGE_WINDOW}, the deepest the portal pages to.`,
-        { page: input.page, limit: input.limit, window: PAGE_WINDOW },
+        `page ${input.page} × limit ${limit}${limitFragment ? ` (the maximum; ${input.limit} was requested)` : ''} reaches past match ${PAGE_WINDOW}, the deepest the portal pages to.`,
+        {
+          page: input.page,
+          limit,
+          ...(limitFragment ? { requested_limit: input.limit } : {}),
+          window: PAGE_WINDOW,
+        },
       );
     }
     const delimiter = input.query === undefined ? undefined : findUnbalancedDelimiter(input.query);
@@ -614,7 +655,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
         year,
         number_events: numberEvents,
         sort: UPSTREAM_SORT[sort],
-        size: input.limit,
+        size: limit,
         page: input.page,
         skipFiles: true,
       }),
@@ -656,8 +697,8 @@ export const searchRecords = tool('cern_opendata_search_records', {
     const { page } = outcome;
     const hits = page.hits.map(toSearchHit);
     const facets = toFacets(page.aggregations);
-    const truncated = page.total > input.page * input.limit;
-    const hasMore = truncated && (input.page + 1) * input.limit <= PAGE_WINDOW;
+    const truncated = page.total > input.page * limit;
+    const hasMore = truncated && (input.page + 1) * limit <= PAGE_WINDOW;
     const anyFilter =
       !typeDefaulted ||
       [
@@ -676,7 +717,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
         input.stripping_version,
       ].some((value) => value !== undefined);
 
-    const fragments: string[] = [];
+    const fragments = limitFragment ? [limitFragment] : [];
     if (page.total === 0) {
       for (const { param, value } of unrecognized.slice(0, 3)) {
         fragments.push(
@@ -715,13 +756,13 @@ export const searchRecords = tool('cern_opendata_search_records', {
         );
       }
     } else if (hits.length === 0) {
-      const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / input.limit));
+      const last = Math.max(1, Math.ceil(Math.min(page.total, PAGE_WINDOW) / limit));
       fragments.push(
         `Page ${input.page} is past the last page (${countOf(page.total, 'match', 'matches')}); call cern_opendata_search_records again with page ${last}.`,
       );
     }
     if (truncated) {
-      const from = (input.page - 1) * input.limit + 1;
+      const from = (input.page - 1) * limit + 1;
       const to = from + hits.length - 1;
       if (hasMore) {
         const windowNote =
@@ -737,7 +778,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
             from,
             to,
             total: page.total,
-            limit: input.limit,
+            limit,
           }),
         );
       }
@@ -746,7 +787,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     finishListEnrichment(ctx, {
       shown: hits.length,
       total: page.total,
-      cap: input.limit,
+      cap: limit,
       truncated,
       notice: composeNotice(fragments),
     });

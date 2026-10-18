@@ -329,6 +329,88 @@ export const aggregationsBody = {
   signature: { buckets: [{ key: 'Higgs', doc_count: 9 }], sum_other_doc_count: 0 },
 };
 
+/**
+ * Nested lists as the unfiltered portal search returned them on 2026-10-17:
+ * every nested aggregation states `sum_other_doc_count`, and Supplementaries'
+ * 10 secondaries leave `Trigger` (4,149 records) past the cap. Exotica's 10
+ * subcategories are its whole list. No live category list is cut, so the
+ * `Standard Model Physics` bucket's overflow is synthetic.
+ */
+export const nestedOverflowAggregations = {
+  type: {
+    buckets: [
+      {
+        key: 'Dataset',
+        doc_count: 68_574,
+        subtype: {
+          buckets: [
+            { key: 'Collision', doc_count: 954 },
+            { key: 'Derived', doc_count: 1236 },
+            { key: 'Simulated', doc_count: 66_401 },
+          ],
+          sum_other_doc_count: 0,
+        },
+      },
+      { key: 'Glossary', doc_count: 1006, subtype: { buckets: [], sum_other_doc_count: 0 } },
+      {
+        key: 'Supplementaries',
+        doc_count: 5904,
+        subtype: {
+          buckets: [
+            { key: 'Computing Note', doc_count: 117 },
+            { key: 'Configuration', doc_count: 627 },
+            { key: 'Configuration HLT', doc_count: 214 },
+            { key: 'Configuration LHE', doc_count: 242 },
+            { key: 'Configuration RECO', doc_count: 192 },
+            { key: 'Configuration SIM', doc_count: 313 },
+            { key: 'Correction', doc_count: 1 },
+            { key: 'Logbook', doc_count: 32 },
+            { key: 'Luminosity', doc_count: 10 },
+            { key: 'Manual', doc_count: 7 },
+          ],
+          sum_other_doc_count: 4149,
+        },
+      },
+    ],
+    sum_other_doc_count: 0,
+  },
+  category: {
+    buckets: [
+      {
+        key: 'Exotica',
+        doc_count: 14_584,
+        subcategory: {
+          buckets: [
+            { key: 'Contact Interaction', doc_count: 465 },
+            { key: 'Dark Matter', doc_count: 2138 },
+            { key: 'Excited Fermions', doc_count: 836 },
+            { key: 'Extra Dimensions', doc_count: 666 },
+            { key: 'Gravitons', doc_count: 2850 },
+            { key: 'Heavy Fermions, Heavy Righ-Handed Neutrinos', doc_count: 2301 },
+            { key: 'Heavy Gauge Bosons', doc_count: 1669 },
+            { key: 'Leptoquarks', doc_count: 1483 },
+            { key: 'Miscellaneous', doc_count: 1162 },
+            { key: 'Resonances', doc_count: 1014 },
+          ],
+          sum_other_doc_count: 0,
+        },
+      },
+      {
+        key: 'Standard Model Physics',
+        doc_count: 3116,
+        subcategory: {
+          buckets: [
+            { key: 'Drell-Yan', doc_count: 640 },
+            { key: 'QCD', doc_count: 1210 },
+          ],
+          sum_other_doc_count: 120,
+        },
+      },
+    ],
+    sum_other_doc_count: 25_724,
+  },
+};
+
 // Search envelopes
 
 export interface SearchBodyOptions {
@@ -702,6 +784,87 @@ export const METHODOLOGY_5202_HTML =
 /** Record 5208's methodology as the portal serves it. */
 export const METHODOLOGY_5208_HTML =
   '<p>An event was selected if there were two muons in the event with pT > 20 GeV and |eta| < 2.1 and the invariant mass of the two muons was > 60 GeV and < 120 GeV.</p>';
+
+/** Record 3700's abstract as the portal serves it: an L1-menu table whose anchors have no `</a>`. */
+export const L1_MENU_TABLE_3700_HTML =
+  '\n' +
+  '        <table class="ui table striped">\n' +
+  '        <thead>\n' +
+  '        <tr><th>Starting from run</th><th>L1 trigger information</th></tr>\n' +
+  '        </thead>\n' +
+  '        <tbody>\n' +
+  '        <tr><td>157942</td><td><a href="/record/3701">L1Menu_Collisions2011_v0_L1T_Scales_20101224_Imp0_0x101e</td></tr>\n' +
+  '        <tr><td>161205</td><td><a href="/record/3702">L1Menu_Collisions2011_v1_L1T_Scales_20101224_Imp0_0x101f</td></tr>\n' +
+  '        <tr><td>161568</td><td><a href="/record/3703">L1Menu_Collisions2011_v2_L1T_Scales_20101224_Imp0_0x1020</td></tr>\n' +
+  '        <tr><td>165897</td><td><a href="/record/3704">L1Menu_Collisions2011_v3_L1T_Scales_20101224_Imp0_0x1021</td></tr>\n' +
+  '        <tr><td>170065</td><td><a href="/record/3705">L1Menu_Collisions2011_v4_L1T_Scales_20101224_Imp0_0x1022</td></tr>\n' +
+  '        <tr><td>173212</td><td><a href="/record/3706">L1Menu_Collisions2011_v5_L1T_Scales_20101224_Imp0_0x1023</td></tr>\n' +
+  '        <tr><td>176725</td><td><a href="/record/3707">L1Menu_Collisions2011_v6_L1T_Scales_20101224_Imp0_0x1024</td></tr>\n' +
+  '        </tbody>\n' +
+  '        </table>\n' +
+  '        ';
+
+/** Record 1701's abstract, trimmed to its opening line, header and first two rows: cells holding closed anchors. */
+export const HLT_MENU_TABLE_1701_HTML =
+  '\n' +
+  '      The list of trigger configuration files for the CMS 2012 collision data (Run201A, Run2012B, Run2012C and Run2012D):\n' +
+  '      <table class="ui table striped">\n' +
+  '      <thead>\n' +
+  '      <tr><th>Run number</th><th>Software version</th><th>Trigger configuration</th></tr>\n' +
+  '      </thead>\n' +
+  '      <tbody>\n' +
+  ' <tr><td>190456 - 190465</td><td><a href="https://github.com/cms-sw/cmssw-cvs/tree/CMSSW_5_2_3_patch1">CMSSW_5_2_3_patch1</a></td><td><a href="/record/6123">/cdaq/physics/Run2012/5e33/v4.4/HLT/V5</a></td></tr>\n' +
+  '      <tr><td>190482 - 190539</td><td><a href="https://github.com/cms-sw/cmssw-cvs/tree/CMSSW_5_2_3_patch1">CMSSW_5_2_3_patch1</a></td><td><a href="/record/6134">/cdaq/physics/Run2012/5e33/v4.4/HLT/V7</a></td></tr>\n' +
+  '      </tbody>\n' +
+  '      </table>\n' +
+  '      ';
+
+/**
+ * The `cms-virtual-machine-2011` guide body as the portal serves it, trimmed to
+ * its opening section, the first paragraph of the next and the reference
+ * definitions that close the page: the opening section links through three of
+ * them.
+ */
+export const VM_GUIDE_2011_MD = [
+  'The CMS-specific VM includes the [ROOT framework](http://root.cern.ch/) and [CMSSW](http://cms-sw.github.io/). Follow the instructions below to setup a CERN Virtual Machine on your computer for 2011-2012 CMS Open Data. Then, go to [Getting Started with CMS data][getstartedcms]',
+  '',
+  '1. [How to install a CERN VM](#vbox)',
+  '2. [How to Test & Validate?](#test)',
+  '3. [Issues & Limitations](#issue)',
+  '',
+  '## <a name="vbox"> Step 1: How to install a CERN Virtual Machine</a>',
+  '',
+  '### Installing VirtualBox',
+  '',
+  'VirtualBox is a free, open source and multiplatform application to run virtual machines: you can [download][installVB] the package for your platform from the Downloads page.',
+  '',
+  'You will need administrative ("root") privileges on every platform to perform the installation of VirtualBox.',
+  '',
+  'Note: the latest tested version of VirtualBox working with this CMS-specific CernVM image is 7.0.4. If you have troubles with the latest version of VirtualBox, pick that one: the full history of VirtualBox versions is available [on a different page][installVB2].',
+  '',
+  '',
+  '### Downloading and Creating a Virtual Machine',
+  '',
+  '**Important**: Before you download the CernVM, note that the imported settings may not always work on your host machine. Please see [Issues and Limitations](#issue) or [the CMS guide to troubleshooting](/docs/cms-guide-troubleshooting) if you encounter any problems with booting the VM.',
+  '',
+  'Next download the CMS-specific CernVM image as OVA file from [CMS VM Image, for 2011, 2012 and 2015 CMS open data](/record/252). It is recommended using the version "CMS-OpenData-1.5.3". This VM Image can be used for data from 2011, 2012 and 2015 (for data from 2015 follow the instructions in [CMS 2015 Virtual Machines: How to install](/docs/cms-virtual-machine-2015) and for data from 2010 those in [CMS 2010 Virtual Machines: How to install](/docs/cms-virtual-machine-2010)).',
+  '',
+  'By double clicking the downloaded file, VirtualBox imports the image with ready-to-run settings. In VirtualBox version 6 or later, you need to unselect "import disks as VDI" on the initial import screen. Then, you launch the CMS-specific CernVM, which boots into the graphical user interface and sets up the CMS environment. You will be prompted to change the settings of the network adaptor 2: change them as instructed to "NAT". Then, be patient, the boot will take a while.',
+  '',
+  '',
+  '## <a name="test">Step 2: How to Test & Validate?</a>',
+  '',
+  'The validation procedure tests that the CMS environment is installed and operational on your virtual machine, and that you have access to the CMS Open Data files. You may skip this step if you want, and head straight to [Getting Started with CMS data][getstartedcms]. However, these steps give you a quick introduction to the CMS environment.',
+  '',
+  '',
+  '',
+  '',
+  '[installVB]: <https://www.virtualbox.org/wiki/Downloads>',
+  '[installVB2]: <https://www.virtualbox.org/wiki/Download_Old_Builds>',
+  '[cmsvmimage2011]: </record/252>',
+  '[getstartedcms]: </docs/cms-getting-started-2011>',
+  '',
+].join('\n');
 
 /** Records 5202 and 5208, trimmed to their methodology. */
 export const selectionCutHits: readonly RawHit[] = [

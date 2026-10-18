@@ -296,7 +296,8 @@ describe('cern_opendata_get_validated_runs input', () => {
     ['a fractional run_max', { run_period: 'Run2012B', run_max: 1.5 }],
     ['a negative run_max', { run_period: 'Run2012B', run_max: -3 }],
     ['limit 0', { run_period: 'Run2012B', limit: 0 }],
-    ['limit 2001', { run_period: 'Run2012B', limit: 2001 }],
+    ['limit 10001', { run_period: 'Run2012B', limit: 10_001 }],
+    ['a fractional limit', { run_period: 'Run2012B', limit: 20.5 }],
   ])('rejects %s as invalid arguments before any request', async (_name, input) => {
     const { http } = serve();
     const result = await run(input as never);
@@ -1294,6 +1295,50 @@ describe('cern_opendata_get_validated_runs runs', () => {
       expect(result.runs).toHaveLength(2000);
       expect(result).toMatchObject({ truncated: true, shown: 2000, totalCount: 2001 });
       expect(result.notice).toContain('run_min set to 3000');
+    });
+
+    it('serves limit 2001 at 2000, names it, and continues from run_min to the last run', async () => {
+      const clamped = "limit 2001 is above this tool's maximum of 2000, so 2000 was applied.";
+      const { http } = serve({ files: { '1002': syntheticRuns(2_001) } });
+      const first = await run({ recid: '1002', limit: 2001 });
+      const result = success(first);
+      expect(result.runs).toHaveLength(2000);
+      expect(result.runs.at(-1)?.run).toBe(2999);
+      expect(result).toMatchObject({ truncated: true, shown: 2000, cap: 2000, totalCount: 2001 });
+      const notice = `${clamped} Showing 2000 of 2001 runs; call cern_opendata_get_validated_runs again with run_min set to 3000, or download the whole list from list.https_url.`;
+      expect(result.notice).toBe(notice);
+      expect(textOf(first, 1).split('\n')).toContain(`> ${notice}`);
+
+      const rest = success(await run({ recid: '1002', limit: 2001, run_min: 3000 }));
+      expect(rest.runs.map((entry) => entry.run)).toEqual([3000]);
+      expect(rest).toMatchObject({ truncated: false, shown: 1, cap: 2000, totalCount: 1 });
+      expect(rest.notice).toBe(clamped);
+      expect(http.calls).toHaveLength(3);
+    });
+
+    it('serves the 10,000 ceiling at 2000 and leaves 2000 itself unnamed', async () => {
+      serve({ files });
+      const ceiling = success(await run({ recid: '1002', limit: 10_000 }));
+      expect(ceiling).toMatchObject({ truncated: false, shown: 5, cap: 2000 });
+      expect(ceiling.notice).toBe(
+        "limit 10000 is above this tool's maximum of 2000, so 2000 was applied.",
+      );
+      const atCap = success(await run({ recid: '1002', limit: 2000 }));
+      expect(atCap).toMatchObject({ shown: 5, cap: 2000 });
+      expect(atCap).not.toHaveProperty('notice');
+    });
+
+    it('names a limit above 2000 ahead of the candidates when several lists match', async () => {
+      serve({ specs: ALL_LIST_SPECS });
+      const unclamped = success(await run({ run_period: 'Run2011A' }));
+      expect(unclamped.notice).toMatch(/^3 validated-run lists match run period Run2011A /);
+      const result = success(await run({ run_period: 'Run2011A', limit: 2500 }));
+      expect(result.runs).toEqual([]);
+      expect(result.matched_lists).toEqual(unclamped.matched_lists);
+      expect(result).toMatchObject({ truncated: false, shown: 0, cap: 2000, totalCount: 0 });
+      expect(result.notice).toBe(
+        `limit 2500 is above this tool's maximum of 2000, so 2000 was applied. ${unclamped.notice}`,
+      );
     });
   });
 

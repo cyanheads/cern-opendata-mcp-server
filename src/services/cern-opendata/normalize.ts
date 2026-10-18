@@ -170,12 +170,19 @@ const FACET_KINDS: Record<keyof Facets, FacetKind> = {
 /** Every facet search returns, in the order `cern_opendata_search_records` lists them. */
 export const FACET_KEYS = Object.keys(FACET_KINDS) as (keyof Facets)[];
 
-/** The facets whose buckets nest a second level: the raw sub-aggregation and the field it becomes. */
+/**
+ * The facets whose buckets nest a second level: the raw sub-aggregation, the
+ * field it becomes, and the field its `sum_other_doc_count` becomes.
+ */
 const NESTED_LEVELS: Partial<
-  Record<keyof Facets, readonly ['subtype', 'subtypes'] | readonly ['subcategory', 'subcategories']>
+  Record<
+    keyof Facets,
+    | readonly ['subtype', 'subtypes', 'subtypes_other_count']
+    | readonly ['subcategory', 'subcategories', 'subcategories_other_count']
+  >
 > = {
-  type: ['subtype', 'subtypes'],
-  category: ['subcategory', 'subcategories'],
+  type: ['subtype', 'subtypes', 'subtypes_other_count'],
+  category: ['subcategory', 'subcategories', 'subcategories_other_count'],
 };
 
 function toFacet(agg: RawAggregation | undefined, key: keyof Facets): Facet {
@@ -187,17 +194,18 @@ function toFacet(agg: RawAggregation | undefined, key: keyof Facets): Facet {
         ? (str(bucket.key_as_string) ?? str(String(bucket.key ?? '')))
         : str(String(bucket.key ?? ''));
     if (value === undefined || (key === 'type' && value === 'Glossary')) return [];
-    const level =
-      nested &&
-      bucket[nested[0]]?.buckets?.flatMap((sub) => {
-        const subValue = str(String(sub.key ?? ''));
-        return subValue === undefined ? [] : [{ value: subValue, count: num(sub.doc_count) ?? 0 }];
-      });
+    const sub = nested && bucket[nested[0]];
+    const level = sub?.buckets?.flatMap((entry) => {
+      const subValue = str(String(entry.key ?? ''));
+      return subValue === undefined ? [] : [{ value: subValue, count: num(entry.doc_count) ?? 0 }];
+    });
+    const overflow = num(sub?.sum_other_doc_count) ?? 0;
     return [
       {
         value,
         count: num(bucket.doc_count) ?? 0,
         ...(nested && level ? { [nested[1]]: level } : {}),
+        ...(nested && overflow > 0 ? { [nested[2]]: overflow } : {}),
       },
     ];
   });
@@ -207,9 +215,11 @@ function toFacet(agg: RawAggregation | undefined, key: keyof Facets): Facet {
 /**
  * The thirteen facets search exposes. `year` buckets use `key_as_string`; range
  * and histogram facets report `other_count: 0`; `type` buckets nest `subtypes`
- * and `category` buckets `subcategories`; the Glossary bucket is dropped from
- * `type`. Values are kept as received, a leading space included. A facet the
- * portal omitted comes back with no buckets.
+ * and `category` buckets `subcategories`, with `subtypes_other_count` and
+ * `subcategories_other_count` relayed from a cut list's `sum_other_doc_count`
+ * (present only above 0, never derived from the bucket count); the Glossary
+ * bucket is dropped from `type`. Values are kept as received, a leading space
+ * included. A facet the portal omitted comes back with no buckets.
  */
 export function toFacets(aggregations: Record<string, RawAggregation>): Facets {
   return Object.fromEntries(

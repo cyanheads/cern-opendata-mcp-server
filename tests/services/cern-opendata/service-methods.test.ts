@@ -7,15 +7,18 @@
  * @module tests/services/cern-opendata/service-methods.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CernOpenDataService,
+  type CernOpenDataServiceOptions,
   isPageWindowRejection,
 } from '@/services/cern-opendata/cern-opendata-service.js';
 import { classifyIdentifier } from '@/services/cern-opendata/identifiers.js';
 import { toManifest, twinOf } from '@/services/cern-opendata/normalize.js';
+import type { RawHit } from '@/services/cern-opendata/types.js';
 import {
   failureOf,
   fakeClock,
@@ -27,6 +30,7 @@ import {
   aggregationsBody,
   collisionDatasetHit,
   docHit,
+  docHitWithBody,
   emptySearchBody,
   fileIndexRoute,
   filesRecordBody,
@@ -48,6 +52,7 @@ import {
   SYNTAX_ERROR_BODY,
   searchBody,
   softwareHit,
+  sparseHit,
   umbrellaRecordBody,
   validatedListHit,
   validatedRunsSearchBody,
@@ -451,6 +456,427 @@ describe('lookup', () => {
       await settle(() => service.lookup(ids('6004'), service.startBudget(), ctx)),
     );
     expect(unreadable.data).toMatchObject({ reason: 'upstream_unreadable' });
+  });
+});
+
+describe('lookup cache', () => {
+  const doiUpper = '10.7483/OPENDATA.CMS.YLIC.86ZZ';
+  const lower = doiUpper.toLowerCase();
+  const path = '/DoubleMuParked/Run2012B-22Jan2013-v1/AOD';
+  const pool = [collisionDatasetHit, softwareHit, licensedDatasetHit, sparseHit, docHit];
+  const servePool = (hits: readonly RawHit[], options: CernOpenDataServiceOptions = {}) =>
+    makeService([searchRoute(() => jsonResponse(searchBody(hits)))], options);
+  const lookupOf = (service: CernOpenDataService, ctx: Context, ...inputs: string[]) =>
+    service.lookup(ids(...inputs), service.startBudget(), ctx);
+  const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  /** A doc hit whose JSON is exactly `bytes` long; slugs of one length share the overhead. */
+  const docOfBytes = (slug: string, bytes: number) =>
+    docHitWithBody(slug, bytes - jsonBytes(docHitWithBody(slug, 0)));
+  /** How the lookup settled, without leaving a rejection unhandled. */
+  const outcome = <T>(promise: Promise<T>) =>
+    promise.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+  it('answers a repeat lookup with no request, with the matches the portal gave', async () => {
+    const { service, http, ctx } = servePool(pool);
+    const first = await lookupOf(service, ctx, '6004', path, '101');
+    const second = await lookupOf(service, ctx, '6004', path, '101');
+    expect(http.calls).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(second.matches.map((m) => [m.hit.id, m.matchedInputs])).toEqual([
+      [6004, ['6004', path]],
+      [101, ['101']],
+    ]);
+  });
+
+  it('searches only the uncached ids, and assembles the same result as an uncached lookup', async () => {
+    const { service, http, ctx } = servePool(pool);
+    await lookupOf(service, ctx, '6004', '101', 'recid:30517');
+    const inputs = ['6004', 'cms-guide-docker', '101', '1120', '30517'];
+    const mixed = await lookupOf(service, ctx, ...inputs);
+    expect(requestedUrls(http).map(q)).toEqual([
+      'recid:(6004 OR 101 OR 30517)',
+      'recid:(1120) OR slug:("cms-guide-docker")',
+    ]);
+    const fresh = servePool(pool);
+    expect(mixed).toEqual(await lookupOf(fresh.service, fresh.ctx, ...inputs));
+    expect(mixed.matches.map((m) => [m.hit.id, m.matchedInputs])).toEqual([
+      [6004, ['6004']],
+      ['cms-guide-docker', ['cms-guide-docker']],
+      [101, ['101']],
+      [1120, ['1120']],
+      [30517, ['30517']],
+    ]);
+  });
+
+  it('searches an id that resolved to nothing again on the next lookup', async () => {
+    const { service, http, ctx } = servePool([collisionDatasetHit]);
+    const first = await lookupOf(service, ctx, '999', '6004');
+    const second = await lookupOf(service, ctx, '999', '6004');
+    expect(requestedUrls(http).map(q)).toEqual(['recid:(999 OR 6004)', 'recid:(999)']);
+    expect(second).toEqual(first);
+    expect(second.missing.map((id) => id.input)).toEqual(['999']);
+  });
+
+  it('caches only hits that resolve an input', async () => {
+    const { service, http, ctx } = servePool([collisionDatasetHit, softwareHit]);
+    await lookupOf(service, ctx, '6004');
+    const result = await lookupOf(service, ctx, '101');
+    expect(requestedUrls(http).map(q)).toEqual(['recid:(6004)', 'recid:(101)']);
+    expect(result.matches.map((m) => m.hit.id)).toEqual([101]);
+  });
+
+  it('sends no uppercase retry for a lowercase DOI an earlier retry resolved', async () => {
+    const { service, http, ctx } = makeService([
+      searchRoute(
+        answerByQuery((query) =>
+          query.includes(`"${doiUpper}"`) ? searchBody([collisionDatasetHit]) : searchBody([]),
+        ),
+      ),
+    ]);
+    await lookupOf(service, ctx, lower);
+    const again = await lookupOf(service, ctx, lower, `doi:${lower}`);
+    expect(http.calls).toHaveLength(2);
+    expect(again.missing).toEqual([]);
+    expect(again.matches[0]?.matchedInputs).toEqual([lower, `doi:${lower}`]);
+  });
+
+  it('sends no uppercase retry for a lowercase DOI whose record another cached id resolves', async () => {
+    const { service, http, ctx } = makeService([
+      searchRoute(
+        answerByQuery((query) =>
+          query.includes('recid:(6004)') || query.includes(`"${doiUpper}"`)
+            ? searchBody([collisionDatasetHit])
+            : searchBody([]),
+        ),
+      ),
+    ]);
+    await lookupOf(service, ctx, '6004');
+    const result = await lookupOf(service, ctx, '6004', lower);
+    expect(requestedUrls(http).map(q)).toEqual(['recid:(6004)', `doi:("${lower}")`]);
+    expect(result.matches.map((m) => m.matchedInputs)).toEqual([['6004', lower]]);
+    const cold = makeService([searchRoute(answerByQuery(() => searchBody([collisionDatasetHit])))]);
+    expect(result).toEqual(await lookupOf(cold.service, cold.ctx, '6004', lower));
+    const alone = await lookupOf(service, ctx, lower);
+    expect(requestedUrls(http).map(q)).toEqual(['recid:(6004)', `doi:("${lower}")`]);
+    expect(alone.matches.map((m) => m.matchedInputs)).toEqual([[lower]]);
+  });
+
+  it('keys a DOI in the case it was given, as the uncached lookup reads it', async () => {
+    const { service, http, ctx } = makeService([
+      searchRoute(
+        answerByQuery((query) =>
+          query.includes(`"${doiUpper}"`) ? searchBody([collisionDatasetHit]) : searchBody([]),
+        ),
+      ),
+    ]);
+    await lookupOf(service, ctx, doiUpper);
+    await lookupOf(service, ctx, lower);
+    await lookupOf(service, ctx, lower);
+    await lookupOf(service, ctx, doiUpper);
+    expect(requestedUrls(http).map(q)).toEqual([
+      `doi:("${doiUpper}")`,
+      `doi:("${lower}")`,
+      `doi:("${doiUpper}")`,
+    ]);
+  });
+
+  it('stores a hit once however many inputs resolve to it', async () => {
+    const { service, http, ctx } = servePool(pool, {
+      lookupCache: { maxBytes: 2 * jsonBytes(collisionDatasetHit) - 1 },
+    });
+    await lookupOf(service, ctx, '6004', doiUpper, path);
+    const again = await lookupOf(service, ctx, path, '6004', doiUpper);
+    expect(http.calls).toHaveLength(1);
+    expect(again.matches.map((m) => m.matchedInputs)).toEqual([[path, '6004', doiUpper]]);
+  });
+
+  it('serves a hit over the cap uncached, the same as a cached one', async () => {
+    const { service, http, ctx } = servePool(pool, {
+      lookupCache: { maxBytes: jsonBytes(collisionDatasetHit) - 1 },
+    });
+    const first = await lookupOf(service, ctx, '6004');
+    const second = await lookupOf(service, ctx, '6004');
+    expect(http.calls).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
+
+  it('evicts the least recently used hits until the charged bytes fit, not by entry count', async () => {
+    const small = (slug: string) => docHitWithBody(slug, 100);
+    const smallBytes = jsonBytes(small('sm-a'));
+    const big = docOfBytes('bg-a', 2 * smallBytes);
+    const hits = [small('sm-a'), small('sm-b'), small('sm-c'), small('sm-d'), big];
+    // Three small hits and their keys fit; a fourth, or the big one beside two, does not.
+    const { service, http, ctx } = servePool(hits, {
+      lookupCache: { maxBytes: 3 * smallBytes + 60 },
+    });
+    const requested = () => requestedUrls(http).map(q);
+    for (const slug of ['sm-a', 'sm-b', 'sm-c', 'sm-a', 'sm-d']) await lookupOf(service, ctx, slug);
+    expect(requested()).toEqual([
+      'slug:("sm-a")',
+      'slug:("sm-b")',
+      'slug:("sm-c")',
+      'slug:("sm-d")',
+    ]);
+    // sm-b was the least recently used: one eviction made room for sm-d.
+    await lookupOf(service, ctx, 'sm-c');
+    await lookupOf(service, ctx, 'sm-a');
+    await lookupOf(service, ctx, 'sm-d');
+    expect(requested()).toHaveLength(4);
+    // The big hit costs two small ones, so sm-c and then sm-a, the two least recent, make room.
+    await lookupOf(service, ctx, 'bg-a');
+    await lookupOf(service, ctx, 'sm-d');
+    await lookupOf(service, ctx, 'bg-a');
+    expect(requested()).toHaveLength(5);
+    await lookupOf(service, ctx, 'sm-a');
+    expect(requested().slice(5)).toEqual(['slug:("sm-a")']);
+  });
+
+  it('holds 20 hits of 252,275 bytes in one lookup, and evicts by bytes past 8 MiB by default', async () => {
+    const pages = Array.from({ length: 34 }, (_, i) =>
+      docOfBytes(`stripping-page-${String(i).padStart(2, '0')}`, 252_275),
+    );
+    const slugs = pages.map((page) => String(page.id));
+    expect(pages.every((page) => jsonBytes(page) === 252_275)).toBe(true);
+    // Each search answers with the pages it names: all 34 would pass the 8 MiB search ceiling.
+    const { service, http, ctx } = makeService([
+      searchRoute(
+        answerByQuery((query) =>
+          searchBody(pages.filter((page) => query.includes(`"${String(page.id)}"`))),
+        ),
+      ),
+    ]);
+    await lookupOf(service, ctx, ...slugs.slice(0, 20));
+    await lookupOf(service, ctx, ...slugs.slice(0, 20));
+    expect(http.calls).toHaveLength(1);
+    // 33 hits (8,325,075 bytes of JSON) stay under 8 MiB (8,388,608)…
+    await lookupOf(service, ctx, ...slugs.slice(20, 33));
+    const all = await lookupOf(service, ctx, ...slugs.slice(0, 33));
+    expect(http.calls).toHaveLength(2);
+    expect(all.matches).toHaveLength(33);
+    // …and a 34th evicts the least recently used.
+    await lookupOf(service, ctx, slugs[33] as string);
+    await lookupOf(service, ctx, ...slugs.slice(1, 34));
+    expect(http.calls).toHaveLength(3);
+    await lookupOf(service, ctx, slugs[0] as string);
+    expect(requestedUrls(http).map(q).slice(3)).toEqual([`slug:("${slugs[0]}")`]);
+  });
+
+  describe('lifetime', () => {
+    it('expires an entry ttlMs after its read; a cached read does not extend it', async () => {
+      const clock = fakeClock();
+      const { service, http, ctx } = servePool(pool, {
+        now: clock.now,
+        lookupCache: { ttlMs: 1_000 },
+      });
+      await lookupOf(service, ctx, '6004');
+      clock.advance(999);
+      await lookupOf(service, ctx, '6004');
+      expect(http.calls).toHaveLength(1);
+      clock.advance(1);
+      await lookupOf(service, ctx, '6004');
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it('defaults to a 15 minute TTL', async () => {
+      const clock = fakeClock();
+      const { service, http, ctx } = servePool(pool, { now: clock.now });
+      await lookupOf(service, ctx, '6004', 'cms-guide-docker');
+      clock.advance(15 * 60_000 - 1);
+      await lookupOf(service, ctx, '6004', 'cms-guide-docker');
+      expect(http.calls).toHaveLength(1);
+      clock.advance(1);
+      await lookupOf(service, ctx, '6004', 'cms-guide-docker');
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it('is cleared by dispose', async () => {
+      const { service, ctx } = servePool(pool);
+      await lookupOf(service, ctx, '6004');
+      service.dispose();
+      await expect(lookupOf(service, ctx, '6004')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+      });
+    });
+  });
+
+  describe('isolation between calls', () => {
+    it('hands out cached hits frozen, so a caller cannot change what a later lookup returns', async () => {
+      const { service, http, ctx } = servePool(pool);
+      const first = await lookupOf(service, ctx, '6004');
+      const [match] = first.matches;
+      if (!match) throw new Error('Expected a match.');
+      const meta = match.hit.metadata;
+      expect(() => {
+        meta.title = 'changed';
+      }).toThrow(TypeError);
+      expect(() => (meta.experiment as string[]).push('ATLAS')).toThrow(TypeError);
+      expect(() => {
+        (meta.distribution as { size?: number }).size = 0;
+      }).toThrow(TypeError);
+      expect(() => {
+        (meta.abstract?.links as { recid?: string }[])[0] = { recid: '1' };
+      }).toThrow(TypeError);
+      expect(() => {
+        delete meta.doi;
+      }).toThrow(TypeError);
+      match.matchedInputs.push('not an input');
+      const second = await lookupOf(service, ctx, '6004');
+      expect(http.calls).toHaveLength(1);
+      expect(second.matches).toEqual([
+        { hit: JSON.parse(JSON.stringify(collisionDatasetHit)), matchedInputs: ['6004'] },
+      ]);
+    });
+
+    it('writes nothing when the uppercase retry fails', async () => {
+      let call = 0;
+      const { service, http, ctx } = makeService([
+        searchRoute(() =>
+          ++call === 1 || call > 4
+            ? jsonResponse(searchBody([collisionDatasetHit]))
+            : new Response('down', { status: 503 }),
+        ),
+      ]);
+      const failed = await settle(() =>
+        lookupOf(service, ctx, '6004', '10.7483/opendata.cms.other.0001'),
+      );
+      expect(failed.ok).toBe(false);
+      expect(http.calls).toHaveLength(4);
+      await lookupOf(service, ctx, '6004');
+      expect(requestedUrls(http).map(q).slice(4)).toEqual(['recid:(6004)']);
+    });
+
+    it('writes nothing for a cancelled lookup', async () => {
+      const left = new AbortController();
+      let held = true;
+      const { service, http, ctx } = makeService([
+        searchRoute((request) =>
+          held
+            ? new Promise<Response>((_resolve, reject) => {
+                request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                  once: true,
+                });
+              })
+            : jsonResponse(searchBody([collisionDatasetHit])),
+        ),
+      ]);
+      const cancelled = outcome(
+        service.lookup(
+          ids('6004'),
+          service.startBudget(),
+          createMockContext({ signal: left.signal }),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      left.abort(new Error('caller left'));
+      expect(await cancelled).toMatchObject({ ok: false, error: { message: 'caller left' } });
+      held = false;
+      await lookupOf(service, ctx, '6004');
+      expect(http.calls).toHaveLength(2);
+    });
+
+    it.each([
+      ['while the other is in flight', false],
+      ['after the other finished', true],
+    ])(
+      'cancelling one of two concurrent identical lookups %s leaves the other and the cache intact',
+      async (_when, otherFirst) => {
+        const answers: (() => void)[] = [];
+        const answer = () => jsonResponse(searchBody([collisionDatasetHit]));
+        // The two concurrent searches wait to be answered; any later one is answered at once.
+        const { service, http, ctx } = makeService([
+          searchRoute((request) =>
+            answers.length === 2
+              ? answer()
+              : new Promise<Response>((resolve, reject) => {
+                  request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                    once: true,
+                  });
+                  answers.push(() => resolve(answer()));
+                }),
+          ),
+        ]);
+        const left = new AbortController();
+        const cancelled = outcome(
+          service.lookup(
+            ids('6004'),
+            service.startBudget(),
+            createMockContext({ signal: left.signal }),
+          ),
+        );
+        const kept = outcome(
+          service.lookup(ids('6004'), service.startBudget(), createMockContext()),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        expect(http.calls).toHaveLength(2);
+        if (otherFirst) {
+          answers[1]?.();
+          expect((await kept).ok).toBe(true);
+        }
+        left.abort(new Error('caller left'));
+        for (const answer of answers) answer();
+        expect(await cancelled).toMatchObject({ ok: false, error: { message: 'caller left' } });
+        const settled = await kept;
+        if (!settled.ok) throw settled.error;
+        expect(settled.value.matches.map((m) => [m.hit.id, m.matchedInputs])).toEqual([
+          [6004, ['6004']],
+        ]);
+        const later = await lookupOf(service, ctx, '6004');
+        expect(http.calls).toHaveLength(2);
+        expect(later).toEqual(settled.value);
+      },
+    );
+
+    it('serves a hit nested too deeply to measure uncached, never failing the lookup', async () => {
+      const depth = 200_000;
+      const body = `{"hits":{"total":1,"hits":[{"id":"7","metadata":{"recid":"7","title":"Deep","nested":${'['.repeat(depth)}${']'.repeat(depth)}}}]}}`;
+      const { service, http, ctx } = makeService([
+        searchRoute(() => new Response(body, { headers: { 'content-type': 'application/json' } })),
+      ]);
+      const result = await lookupOf(service, ctx, '7');
+      expect(result.matches.map((m) => [m.hit.id, m.hit.metadata.title])).toEqual([['7', 'Deep']]);
+      // Stored only where the runtime can measure the parsed hit: Node can, Bun's JSON.stringify overflows.
+      const measurable = (() => {
+        try {
+          JSON.stringify(JSON.parse(body));
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      await lookupOf(service, ctx, '7');
+      expect(http.calls).toHaveLength(measurable ? 1 : 2);
+    });
+
+    it('serves a hit uncached when serializing it throws RangeError, on any runtime', async () => {
+      const { service, http, ctx } = servePool([collisionDatasetHit]);
+      const stringify = JSON.stringify.bind(JSON);
+      const spy = vi
+        .spyOn(JSON, 'stringify')
+        .mockImplementation(
+          (value: unknown, replacer?: (number | string)[] | null, space?: string | number) => {
+            if (
+              value !== null &&
+              typeof value === 'object' &&
+              'metadata' in value &&
+              !('hits' in value)
+            ) {
+              throw new RangeError('Maximum call stack size exceeded.');
+            }
+            return stringify(value, replacer, space);
+          },
+        );
+      try {
+        const result = await lookupOf(service, ctx, '6004');
+        expect(result.matches.map((m) => m.hit.id)).toEqual([6004]);
+        await lookupOf(service, ctx, '6004');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(http.calls).toHaveLength(2);
+    });
   });
 });
 

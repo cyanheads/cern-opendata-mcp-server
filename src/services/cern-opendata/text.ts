@@ -163,6 +163,16 @@ export function stripTags(text: string): string {
 /** Opens a block element; {@link splitTags} runs the tag to its `>`. */
 const BLOCK_TAG = /<\/?(?:p|div|li|ul|ol|h[1-6]|blockquote|tr|table|pre|dt|dd|dl|hr)\b/gi;
 
+/** Opens a table cell; {@link splitTags} runs the tag to its `>`. */
+const CELL_TAG = /<t[dh]\b/gi;
+
+/**
+ * Ends an anchor: its `</a>`, or the table-structure tag where the HTML parser
+ * closes the cell the anchor sits in (`<td`, `<th`, `<tr`, `</td`, `</th`,
+ * `</tr`, `</table`).
+ */
+const ANCHOR_END = /<\/a\s*>|<\/?t[dhr]\b|<\/table\b/gi;
+
 /** `html` without comments; a `<!--` with no `-->` after it stays, and so does the rest. */
 function dropComments(html: string): string {
   let out = '';
@@ -217,18 +227,21 @@ function renderAnchor(value: string, inner: string): string {
 }
 
 /**
- * Replace each `<a … href=…>…</a>` with {@link renderAnchor}, reading what
- * `/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi`
- * matches in one pass. The first `href` in the tag wins: a quoted value when
- * its closing quote has a `>` after it and before the last `</a>`, otherwise
- * the bare run of characters up to a space or `>`. An anchor needs a `</a>`
- * after its tag, so none can match once the tag's first `>` is at or past the
- * last `</a>`.
+ * Replace each `<a … href=…>` and its label with {@link renderAnchor}, reading
+ * what
+ * `/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)(?:<\/a\s*>|(?=<\/?t[dhr]\b|<\/table\b))/gi`
+ * matches in one pass. The label runs to the first {@link ANCHOR_END} after
+ * the tag: a `</a>` is replaced with the anchor, and a table tag stays to end
+ * the cell. The first `href` in the tag wins: a quoted value when its closing
+ * quote has a `>` after it and before the last anchor end, otherwise the bare
+ * run of characters up to a space or `>`. An anchor needs an end after its
+ * tag, so none can match once the tag's first `>` is at or past the last one.
  */
 function replaceAnchors(text: string): string {
-  let lastClose = -1;
-  for (const close of text.matchAll(/<\/a\s*>/gi)) lastClose = close.index;
-  const lastGt = text.lastIndexOf('>', lastClose - 1);
+  let lastEnd = -1;
+  for (const end of text.matchAll(ANCHOR_END)) lastEnd = end.index;
+  const lastGt = text.lastIndexOf('>', lastEnd - 1);
+  const ender = new RegExp(ANCHOR_END);
   let out = '';
   let from = 0;
   let resume = 0;
@@ -236,7 +249,7 @@ function replaceAnchors(text: string): string {
     if (open.index < resume) continue;
     const tagStart = open.index + 2;
     const firstGt = text.indexOf('>', tagStart);
-    if (firstGt < 0 || firstGt >= lastClose) break;
+    if (firstGt < 0 || firstGt >= lastEnd) break;
     const href = /\bhref\s*=\s*/i.exec(text.slice(tagStart, firstGt));
     const valueStart = href ? tagStart + href.index + href[0].length : firstGt;
     if (valueStart === firstGt) {
@@ -255,29 +268,43 @@ function replaceAnchors(text: string): string {
       value = text.slice(valueStart, space < 0 ? firstGt : valueStart + space);
       tagEnd = firstGt;
     }
-    const closer = /<\/a\s*>/gi;
-    closer.lastIndex = tagEnd + 1;
-    const close = closer.exec(text);
-    if (!close) break;
-    out += text.slice(from, open.index) + renderAnchor(value, text.slice(tagEnd + 1, close.index));
-    from = resume = close.index + close[0].length;
+    ender.lastIndex = tagEnd + 1;
+    const end = ender.exec(text);
+    if (!end) break;
+    out += text.slice(from, open.index) + renderAnchor(value, text.slice(tagEnd + 1, end.index));
+    from = resume = /^<\/a/i.test(end[0]) ? end.index + end[0].length : end.index;
   }
   return out + text.slice(from);
 }
 
 /**
+ * `line` with its table cells joined by ` | `: each `<td>` or `<th>` tag,
+ * dropped to its `>`, starts a cell, and the text before a line's first cell
+ * tag is kept as a cell only when more than tags or whitespace. A line with no
+ * cell tag comes back unchanged.
+ */
+function joinCells(line: string): string {
+  const cells = splitTags(line, CELL_TAG);
+  if (cells.length === 1) return line;
+  if (stripTags(cells[0] ?? '').trim() === '') cells.shift();
+  return cells.join(' | ');
+}
+
+/**
  * Convert portal HTML to plain text: tags dropped; `<p>`, `<br>`, `<li>`,
- * headings and `<blockquote>` become line breaks; `<a href>` becomes
- * `text <url>`; entities decoded; blank-line runs collapsed. A bare `<` is
- * encoded as `&lt;` before the first pass: removing a comment, a script or
- * style element, an anchor's tags, or a tag inside an anchor label after a
- * bare `<` can leave it before a letter, where the tag strip would open a tag.
- * Each step is a single pass, so the time is linear in the length of the HTML.
+ * headings, `<blockquote>` and table rows become line breaks; a row's cells
+ * are joined by ` | `; `<a href>` becomes `text <url>`; entities decoded;
+ * blank-line runs collapsed. A bare `<` is encoded as `&lt;` before the first
+ * pass: removing a comment, a script or style element, an anchor's tags, or a
+ * tag inside an anchor label after a bare `<` can leave it before a letter,
+ * where the tag strip would open a tag. Each step is a single pass, so the
+ * time is linear in the length of the HTML.
  */
 export function htmlToText(html: string): string {
   const encoded = html.replace(BARE_LT, '&lt;');
   const anchored = replaceAnchors(dropScripts(dropComments(encoded)).replace(/\s+/g, ' '));
-  const text = stripTags(splitTags(anchored.replace(/<br\s*\/?>/gi, '\n'), BLOCK_TAG).join('\n'));
+  const lines = splitTags(anchored.replace(/<br\s*\/?>/gi, '\n'), BLOCK_TAG).join('\n');
+  const text = stripTags(lines.split('\n').map(joinCells).join('\n'));
   return decodeEntities(text)
     .split('\n')
     .map((line) => line.replace(/[ \t]+/g, ' ').trim())

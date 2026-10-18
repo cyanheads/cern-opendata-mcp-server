@@ -29,15 +29,19 @@ import type {
   RecordHead,
 } from '@/services/cern-opendata/types.js';
 import {
+  applyLimit,
   composeNotice,
   finishListEnrichment,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, recidInput } from '../inputs.js';
+import { blankAsUnset, LIMIT_CEILING, recidInput } from '../inputs.js';
 
 /** Child recids named in the umbrella-record notice. */
 const CHILDREN_NAMED = 5;
+
+/** The most files one page returns; a larger limit is served at it. */
+const MAX_LIMIT = 500;
 
 /** The decoded `cursor`: recid, index key (`null` in record scope) and offset. */
 const CursorSchema = z.object({
@@ -232,7 +236,7 @@ export const listFiles = tool('cern_opendata_list_files', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
-      'Record id: up to 12 digits (6004), optionally after an experiment prefix (atlas-160006); recid:6004 or a portal record URL also work. cern_opendata_search_records and cern_opendata_get_records return it.',
+      'Record id: up to 12 digits (6004), optionally after a lowercase experiment prefix (atlas-160006). cern_opendata_search_records and cern_opendata_get_records return it.',
     ),
     index: blankAsUnset(
       z.preprocess(
@@ -245,8 +249,8 @@ export const listFiles = tool('cern_opendata_list_files', {
     cursor: blankAsUnset(z.string().max(500).optional()).describe(
       'next_cursor from the previous page, unchanged, with the same recid and index. Omit for the first page.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(500).default(50)).describe(
-      'Files per page, 1-500.',
+    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(50)).describe(
+      'Files per page, 1-500. A value above 500 is served at 500.',
     ),
   }),
   output: ListFilesOutput,
@@ -298,7 +302,8 @@ export const listFiles = tool('cern_opendata_list_files', {
   ],
 
   async handler(input, ctx) {
-    startListEnrichment(ctx, input.limit);
+    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT);
+    startListEnrichment(ctx, limit);
     const indexKey = input.index ?? null;
 
     let offset = 0;
@@ -356,11 +361,11 @@ export const listFiles = tool('cern_opendata_list_files', {
       );
     }
 
-    const page = scopeFiles.slice(offset, offset + input.limit);
+    const page = scopeFiles.slice(offset, offset + limit);
     const hasMore = offset + page.length < total;
     const portalUrl = recordUrl(record.recid);
 
-    const fragments: string[] = [];
+    const fragments = limitFragment ? [limitFragment] : [];
     if (manifest && manifest.files.length === 0 && indexes.length > 0) {
       const indexed = indexes.reduce((sum, index) => sum + index.number_files, 0);
       fragments.push(
@@ -408,7 +413,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     finishListEnrichment(ctx, {
       shown: page.length,
       total,
-      cap: input.limit,
+      cap: limit,
       truncated: hasMore,
       notice: composeNotice(fragments),
     });

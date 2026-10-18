@@ -361,11 +361,17 @@ export interface SearchHit {
   type: RecordType;
 }
 
-/** One facet bucket; `type` buckets carry their `subtypes`, `category` buckets their `subcategories`. */
+/**
+ * One facet bucket; `type` buckets carry their `subtypes`, `category` buckets
+ * their `subcategories`, each with the nested `sum_other_doc_count` when the
+ * portal cut that list.
+ */
 export interface FacetBucket {
   count: number;
   subcategories?: { count: number; value: string }[];
+  subcategories_other_count?: number;
   subtypes?: { count: number; value: string }[];
+  subtypes_other_count?: number;
   value: string;
 }
 

@@ -139,6 +139,11 @@ export interface CernOpenDataServiceOptions {
   indexCache?: { size?: number; ttlMs?: number };
   /** Validated-run collection TTL (default 15 min). */
   listCacheTtlMs?: number;
+  /**
+   * Lookup-hit LRU: the bytes it may charge (default 8 MiB: each hit's UTF-8
+   * JSON length plus its keys') and its TTL (default 15 min).
+   */
+  lookupCache?: { maxBytes?: number; ttlMs?: number };
   /** Compact-manifest LRU: entry count (default 8) and TTL (default 15 min). */
   manifestCache?: { size?: number; ttlMs?: number };
   /** Clock in epoch ms (budget, header gate, caches). */
@@ -207,6 +212,131 @@ class TtlLru<V> {
   clear(): void {
     this.#entries.clear();
   }
+}
+
+/**
+ * The UTF-8 length of a parsed value's JSON text, or `undefined` when the
+ * runtime cannot serialize it: Bun's `JSON.stringify` overflows its stack past
+ * about 40,000 nesting levels, which its `JSON.parse` accepts.
+ */
+function jsonByteLength(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch (error) {
+    if (error instanceof RangeError) return;
+    throw error;
+  }
+}
+
+/** Freeze a parsed JSON value and everything inside it, iteratively, whatever its depth. */
+function deepFreeze(value: unknown): void {
+  const pending = [value];
+  while (pending.length > 0) {
+    const next = pending.pop();
+    if (typeof next !== 'object' || next === null || Object.isFrozen(next)) continue;
+    Object.freeze(next);
+    for (const child of Object.values(next)) pending.push(child);
+  }
+}
+
+interface HitEntry {
+  /** What the entry is charged: the hit's UTF-8 JSON length plus its keys'. */
+  bytes: number;
+  expiresAt: number;
+  hit: RawHit;
+  /** `String(hit.id)`. */
+  id: string;
+  /** The lookup keys (`kind:value`) that resolved to the hit. */
+  keys: string[];
+}
+
+/**
+ * Lookup hits, each stored once by hit id however many lookup keys resolved
+ * to it, LRU-evicted by charged bytes and expiring a fixed time after the read
+ * that stored them (a cached read does not extend it). A hit is frozen as it
+ * is stored, so no caller of a later lookup sees another caller's change; one
+ * whose charge passes the cap, or that cannot be measured, is not stored.
+ */
+class HitCache {
+  readonly #entries = new Map<string, HitEntry>();
+  readonly #keys = new Map<string, HitEntry>();
+  #bytes = 0;
+
+  constructor(
+    private readonly maxBytes: number,
+    private readonly ttlMs: number,
+    private readonly now: () => number,
+  ) {}
+
+  get(key: string): RawHit | undefined {
+    const entry = this.#keys.get(key);
+    if (!entry) return;
+    if (entry.expiresAt <= this.now()) {
+      this.#drop(entry);
+      return;
+    }
+    this.#entries.delete(entry.id);
+    this.#entries.set(entry.id, entry);
+    return entry.hit;
+  }
+
+  /** Store `hit` under `keys`, keeping the keys a live entry for the same id already had. */
+  set(keys: readonly string[], hit: RawHit): void {
+    const id = String(hit.id);
+    const previous = this.#entries.get(id);
+    const held = previous && previous.expiresAt > this.now() ? previous.keys : [];
+    if (previous) this.#drop(previous);
+    const allKeys = [...new Set([...held, ...keys])];
+    const hitBytes = jsonByteLength(hit);
+    if (hitBytes === undefined) return;
+    const bytes = allKeys.reduce((sum, key) => sum + Buffer.byteLength(key, 'utf8'), hitBytes);
+    if (bytes > this.maxBytes) return;
+    deepFreeze(hit);
+    const entry: HitEntry = { id, hit, keys: allKeys, bytes, expiresAt: this.now() + this.ttlMs };
+    this.#entries.set(id, entry);
+    for (const key of allKeys) this.#keys.set(key, entry);
+    this.#bytes += bytes;
+    for (const oldest of this.#entries.values()) {
+      if (this.#bytes <= this.maxBytes) break;
+      this.#drop(oldest);
+    }
+  }
+
+  /**
+   * Map one more key to the live entry for hit id `id`, charging the key's
+   * bytes and keeping the entry's expiry; nothing when no live entry holds it.
+   */
+  alias(key: string, id: string): void {
+    const entry = this.#entries.get(id);
+    if (!entry || entry.expiresAt <= this.now() || entry.keys.includes(key)) return;
+    const bytes = Buffer.byteLength(key, 'utf8');
+    entry.keys.push(key);
+    entry.bytes += bytes;
+    this.#bytes += bytes;
+    this.#keys.set(key, entry);
+    for (const oldest of this.#entries.values()) {
+      if (this.#bytes <= this.maxBytes) break;
+      this.#drop(oldest);
+    }
+  }
+
+  clear(): void {
+    this.#entries.clear();
+    this.#keys.clear();
+    this.#bytes = 0;
+  }
+
+  /** Remove an entry, and each of its keys a newer entry has not taken over. */
+  #drop(entry: HitEntry): void {
+    this.#entries.delete(entry.id);
+    this.#bytes -= entry.bytes;
+    for (const key of entry.keys) if (this.#keys.get(key) === entry) this.#keys.delete(key);
+  }
+}
+
+/** A lookup's cache key: the classified kind and value, a DOI in the case it was given. */
+function lookupKey(id: ClassifiedId): string {
+  return `${id.kind}:${id.value}`;
 }
 
 const RunListSchema = z.record(
@@ -433,6 +563,8 @@ export class CernOpenDataService {
   readonly #indexes: TtlLru<IndexListing>;
   /** Record heads from index reads' searches, by recid, so another key of the record skips the search. */
   readonly #heads: TtlLru<RecordHead>;
+  /** Hits that resolved lookup inputs, by hit id, reachable from each input's `kind:value`. */
+  readonly #hits: HitCache;
   /** Counts manifests cached; an index read that saw it change while in flight is not cached. */
   #manifestEpoch = 0;
   readonly #listCacheTtlMs: number;
@@ -454,6 +586,11 @@ export class CernOpenDataService {
     const indexCacheTtlMs = options.indexCache?.ttlMs ?? CACHE_TTL_MS;
     this.#indexes = new TtlLru(indexCacheSize, indexCacheTtlMs, this.#now);
     this.#heads = new TtlLru(indexCacheSize, indexCacheTtlMs, this.#now);
+    this.#hits = new HitCache(
+      options.lookupCache?.maxBytes ?? 8 * MiB,
+      options.lookupCache?.ttlMs ?? CACHE_TTL_MS,
+      this.#now,
+    );
     this.#listCacheTtlMs = options.listCacheTtlMs ?? CACHE_TTL_MS;
     this.#pacer = createPacer({
       name: 'cern-opendata',
@@ -530,12 +667,17 @@ export class CernOpenDataService {
   }
 
   /**
-   * Resolve classified ids in one search (`q` of OR-joined clauses,
-   * `size=100`, `sort=bestmatch`), plus at most one retry with uppercased DOIs
-   * that missed. Ids resolving to one record collapse into one match, ordered
-   * by first matching input; `missing` keeps input order and includes every
-   * `unrecognized` id. No request is made when no id is recognized. A failed
-   * retry fails the call (Decision 23).
+   * Resolve classified ids: those whose `kind:value` resolved within the last
+   * 15 minutes come from the lookup cache, and the rest in one search (`q` of
+   * OR-joined clauses, `size=100`, `sort=bestmatch`), plus at most one retry
+   * with uppercased DOIs that neither that search nor a cached hit in the call
+   * matched. Ids resolving to one record collapse into
+   * one match, ordered by first matching input; `missing` keeps input order
+   * and includes every `unrecognized` id. No request is made when no
+   * uncached id is recognized. A failed retry fails the call (Decision 23).
+   * Only a lookup whose searches all succeeded stores its hits, and only the
+   * hits that resolved an input; misses are searched again every time
+   * (Decision 52).
    */
   async lookup(
     ids: readonly ClassifiedId[],
@@ -543,13 +685,25 @@ export class CernOpenDataService {
     ctx: Context,
   ): Promise<{ matches: LookupMatch[]; missing: ClassifiedId[] }> {
     const recognized = ids.filter((id) => id.kind !== 'unrecognized');
-    const hits = await this.#lookupHits(recognized, budget, ctx);
+    const cached = new Map<string, RawHit>();
+    for (const id of recognized) {
+      const key = lookupKey(id);
+      if (cached.has(key)) continue;
+      const hit = this.#hits.get(key);
+      if (hit) cached.set(key, hit);
+    }
+    const uncached = recognized.filter((id) => !cached.has(lookupKey(id)));
+    const hits = await this.#lookupHits(uncached, budget, ctx);
+    const cachedHits = [...cached.values()];
+    const cachedDoiMatch = (id: ClassifiedId) =>
+      id.kind === 'doi' ? cachedHits.find((hit) => hitMatches(hit, id)) : undefined;
 
-    const missedDois = recognized.filter(
+    const missedDois = uncached.filter(
       (id) =>
         id.kind === 'doi' &&
         id.value !== id.value.toUpperCase() &&
-        !hits.some((hit) => hitMatches(hit, id)),
+        !hits.some((hit) => hitMatches(hit, id)) &&
+        !cachedDoiMatch(id),
     );
     if (missedDois.length > 0) {
       const upper = missedDois.map((id) => ({ ...id, value: id.value.toUpperCase() }));
@@ -558,17 +712,29 @@ export class CernOpenDataService {
 
     const matches = new Map<string, LookupMatch>();
     const missing: ClassifiedId[] = [];
+    const fresh = new Map<RawHit, string[]>();
+    const aliases: [key: string, id: string][] = [];
     for (const id of ids) {
-      const hit = id.kind === 'unrecognized' ? undefined : hits.find((h) => hitMatches(h, id));
+      const key = lookupKey(id);
+      const searched = id.kind === 'unrecognized' ? undefined : hits.find((h) => hitMatches(h, id));
+      const hit =
+        id.kind === 'unrecognized'
+          ? undefined
+          : (cached.get(key) ?? searched ?? cachedDoiMatch(id));
       if (!hit) {
         missing.push(id);
         continue;
       }
-      const key = String(hit.id);
-      const existing = matches.get(key);
+      if (!cached.has(key)) {
+        if (hit === searched) fresh.set(hit, [...(fresh.get(hit) ?? []), key]);
+        else aliases.push([key, String(hit.id)]);
+      }
+      const existing = matches.get(String(hit.id));
       if (existing) existing.matchedInputs.push(id.input);
-      else matches.set(key, { hit, matchedInputs: [id.input] });
+      else matches.set(String(hit.id), { hit, matchedInputs: [id.input] });
     }
+    for (const [hit, keys] of fresh) this.#hits.set(keys, hit);
+    for (const [key, id] of aliases) this.#hits.alias(key, id);
     return { matches: [...matches.values()], missing };
   }
 
@@ -737,6 +903,7 @@ export class CernOpenDataService {
   /** Dispose the pacer (queued waiters are cancelled) and clear the caches. */
   dispose(): void {
     this.#pacer.dispose();
+    this.#hits.clear();
     this.#manifests.clear();
     this.#indexes.clear();
     this.#heads.clear();

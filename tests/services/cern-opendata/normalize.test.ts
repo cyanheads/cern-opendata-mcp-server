@@ -318,6 +318,154 @@ describe('toFacets', () => {
     expect(crossed.experiment.buckets).toEqual([{ value: 'CMS', count: 2 }]);
   });
 
+  it("relays a cut secondary list's overflow on that bucket alone, and none for a complete list", () => {
+    const supplementaries = Array.from({ length: 10 }, (_, i) => ({
+      key: `Note ${i}`,
+      doc_count: 10 + i,
+    }));
+    const cut = toFacets({
+      type: {
+        buckets: [
+          {
+            key: 'Dataset',
+            doc_count: 68_574,
+            subtype: {
+              buckets: [
+                { key: 'Collision', doc_count: 900 },
+                { key: 'Derived', doc_count: 91 },
+                { key: 'Simulated', doc_count: 67_600 },
+              ],
+              sum_other_doc_count: 0,
+            },
+          },
+          { key: 'News', doc_count: 32, subtype: { buckets: [], sum_other_doc_count: 0 } },
+          {
+            key: 'Supplementaries',
+            doc_count: 5904,
+            subtype: { buckets: supplementaries, sum_other_doc_count: 4149 },
+          },
+        ],
+        sum_other_doc_count: 0,
+      },
+      category: {
+        buckets: [
+          {
+            key: 'Exotica',
+            doc_count: 14_584,
+            subcategory: {
+              buckets: [{ key: 'Dark Matter', doc_count: 2138 }],
+              sum_other_doc_count: 0,
+            },
+          },
+          {
+            key: 'Standard Model Physics',
+            doc_count: 3116,
+            subcategory: { buckets: [{ key: 'QCD', doc_count: 900 }], sum_other_doc_count: 37 },
+          },
+        ],
+      },
+    });
+    expect(cut.type.buckets).toEqual([
+      {
+        value: 'Dataset',
+        count: 68_574,
+        subtypes: [
+          { value: 'Collision', count: 900 },
+          { value: 'Derived', count: 91 },
+          { value: 'Simulated', count: 67_600 },
+        ],
+      },
+      { value: 'News', count: 32, subtypes: [] },
+      {
+        value: 'Supplementaries',
+        count: 5904,
+        subtypes: supplementaries.map(({ key, doc_count }) => ({ value: key, count: doc_count })),
+        subtypes_other_count: 4149,
+      },
+    ]);
+    expect(cut.type.other_count).toBe(0);
+    expect(cut.category.buckets).toEqual([
+      { value: 'Exotica', count: 14_584, subcategories: [{ value: 'Dark Matter', count: 2138 }] },
+      {
+        value: 'Standard Model Physics',
+        count: 3116,
+        subcategories: [{ value: 'QCD', count: 900 }],
+        subcategories_other_count: 37,
+      },
+    ]);
+  });
+
+  it('relays the nested overflow as received, never derived from the bucket count', () => {
+    const relayed = toFacets({
+      type: {
+        buckets: [
+          // 100 records, 60 in the listed secondaries: a record can hold several, so the
+          // remainder is not the overflow, which the portal states as 25.
+          {
+            key: 'Software',
+            doc_count: 100,
+            subtype: { buckets: [{ key: 'Analysis', doc_count: 60 }], sum_other_doc_count: 25 },
+          },
+          {
+            key: 'Environment',
+            doc_count: 64,
+            subtype: { buckets: [{ key: 'VM', doc_count: 20 }] },
+          },
+          {
+            key: 'Documentation',
+            doc_count: 9,
+            subtype: { buckets: [{ key: 'Guide', doc_count: 9 }], sum_other_doc_count: '4' },
+          },
+        ],
+      },
+    } as never);
+    expect(relayed.type.buckets).toEqual([
+      {
+        value: 'Software',
+        count: 100,
+        subtypes: [{ value: 'Analysis', count: 60 }],
+        subtypes_other_count: 25,
+      },
+      { value: 'Environment', count: 64, subtypes: [{ value: 'VM', count: 20 }] },
+      { value: 'Documentation', count: 9, subtypes: [{ value: 'Guide', count: 9 }] },
+    ]);
+  });
+
+  it('reads each nested overflow only on its own facet', () => {
+    const crossed = toFacets({
+      type: {
+        buckets: [
+          {
+            key: 'Dataset',
+            doc_count: 2,
+            subcategory: { buckets: [{ key: 'x' }], sum_other_doc_count: 5 },
+          },
+        ],
+      },
+      category: {
+        buckets: [
+          {
+            key: 'Exotica',
+            doc_count: 2,
+            subtype: { buckets: [{ key: 'y' }], sum_other_doc_count: 6 },
+          },
+        ],
+      },
+      experiment: {
+        buckets: [
+          {
+            key: 'CMS',
+            doc_count: 2,
+            subtype: { buckets: [{ key: 'z' }], sum_other_doc_count: 7 },
+          },
+        ],
+      },
+    });
+    expect(crossed.type.buckets).toEqual([{ value: 'Dataset', count: 2 }]);
+    expect(crossed.category.buckets).toEqual([{ value: 'Exotica', count: 2 }]);
+    expect(crossed.experiment.buckets).toEqual([{ value: 'CMS', count: 2 }]);
+  });
+
   it('keeps the Glossary bucket on every facet but type', () => {
     const glossary = toFacets({ keywords: { buckets: [{ key: 'Glossary', doc_count: 1 }] } });
     expect(glossary.keywords.buckets).toEqual([{ value: 'Glossary', count: 1 }]);

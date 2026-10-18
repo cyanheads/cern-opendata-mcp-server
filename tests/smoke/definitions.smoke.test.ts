@@ -1,13 +1,14 @@
 /**
  * @fileoverview Smoke coverage for every definition the server registers: all
  * seven tools and the record resource are present, carry a description, an
- * output schema and a `format()`, serialize to JSON Schema, and declare the
- * shared error contract and list enrichment the design requires. The reference
+ * output schema and a `format()`, serialize to JSON Schema, advertise the
+ * `limit` and `ids` ceilings, and declare the shared error contract and list
+ * enrichment the design requires. The reference
  * tool runs end to end (it needs no upstream).
  * @module tests/smoke/definitions.smoke.test
  */
 
-import { z } from '@cyanheads/mcp-ts-core';
+import { tool, z } from '@cyanheads/mcp-ts-core';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
@@ -33,6 +34,28 @@ const LIST_TOOLS = [
 ];
 
 const UPSTREAM_TOOLS = allToolDefinitions.filter((tool) => tool.name !== listReference.name);
+
+/** Wording that offers a spelling only an input's preprocess accepts, never its advertised schema. */
+const PREPROCESS_ONLY_WORDING = /comma-separated|recid:|record URL|Trimmed/;
+
+type AdvertisedProperty = { type?: string; pattern?: string; description?: string };
+
+/** `tool.field` for every input property whose advertised schema is an array or a pattern and whose description offers a form that schema refuses. */
+function offeredButRefused(tools: typeof allToolDefinitions): string[] {
+  return tools.flatMap((tool) => {
+    const { properties = {} } = z.toJSONSchema(tool.input, {
+      io: 'input',
+      unrepresentable: 'any',
+    }) as { properties?: Record<string, AdvertisedProperty> };
+    return Object.entries(properties)
+      .filter(
+        ([, property]) =>
+          (property.type === 'array' || property.pattern !== undefined) &&
+          PREPROCESS_ONLY_WORDING.test(property.description ?? ''),
+      )
+      .map(([field]) => `${tool.name}.${field}`);
+  });
+}
 
 describe('definition smoke test', () => {
   it('registers all seven tools, once each, in the documented order', () => {
@@ -66,6 +89,56 @@ describe('definition smoke test', () => {
       expect(() => z.toJSONSchema(tool.output, { unrepresentable: 'any' })).not.toThrow();
     },
   );
+
+  it('advertises the 10,000 ceiling on every limit and the 100 ceiling on ids, so a value past a cap reaches the tool', () => {
+    const ceilings = allToolDefinitions.flatMap((tool) => {
+      const { properties = {} } = z.toJSONSchema(tool.input, {
+        io: 'input',
+        unrepresentable: 'any',
+      }) as { properties?: Record<string, { maximum?: number; maxItems?: number }> };
+      return [
+        ...(properties.limit ? [[`${tool.name}.limit`, properties.limit.maximum]] : []),
+        ...(properties.ids ? [[`${tool.name}.ids`, properties.ids.maxItems]] : []),
+      ];
+    });
+    expect(Object.fromEntries(ceilings)).toEqual({
+      'cern_opendata_search_records.limit': 10_000,
+      'cern_opendata_get_records.ids': 100,
+      'cern_opendata_list_files.limit': 10_000,
+      'cern_opendata_get_validated_runs.limit': 10_000,
+      'cern_opendata_search_trigger_paths.limit': 10_000,
+    });
+  });
+
+  it('offers no input form the advertised schema refuses on an array or pattern field', () => {
+    expect(offeredButRefused(allToolDefinitions)).toEqual([]);
+  });
+
+  it('flags an array or pattern field described with a preprocess-only spelling, and nothing else', () => {
+    const probe = tool('probe_tool', {
+      description: 'A probe definition for the description guard, never registered.',
+      input: z.object({
+        list: z.array(z.string()).describe('An array, or one comma-separated string.'),
+        id: z
+          .string()
+          .regex(/^\d+$/)
+          .describe('Digits; recid:6004 or a portal record URL also work.'),
+        path: z
+          .string()
+          .regex(/^[A-Z]+$/)
+          .describe('Letters. Trimmed.'),
+        query: z.string().describe('Full text; recid:(1 OR 2) works.'),
+        ids: z.array(z.string()).describe('Up to 20 identifiers.'),
+      }),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+    expect(offeredButRefused([probe] as never)).toEqual([
+      'probe_tool.list',
+      'probe_tool.id',
+      'probe_tool.path',
+    ]);
+  });
 
   it.each(UPSTREAM_TOOLS.map((tool) => [tool.name, tool] as const))(
     '%s declares the shared upstream errors, service-thrown, with recoveries naming itself',

@@ -148,6 +148,13 @@ describe('cern_opendata_search_trigger_paths registration', () => {
     );
   });
 
+  it('says where prescale factors are published, the rest of the description as it was', () => {
+    expect(searchTriggerPaths.description).toBe(
+      'Look up CMS High-Level Trigger paths by exact name (HLT_IsoMu24) or prefix pattern (HLT_IsoMu*), optionally for one data-taking year. Paths outside the HLT_ family, such as AlCa_EcalPi0, DST_ and DQM_ paths, output modules and HLTriggerFinalPath, are found by their own names, in the case given. Each match is a per-year path record parsed into the primary datasets its title names, the first and last run the path was seen online, per-version run ranges, the L1 seed, and links to the HLT menu records. Covers CMS open data from 2011-2016. ' +
+        'Prescale factors are not returned: each HLT menu record holds a configuration file (cern_opendata_list_files with a menu_recid) whose PrescaleService block lists the prescale in each column of every path it prescales (a path it leaves out has prescale 1), and the CMS luminosity records (collection CMS-Luminosity-Information) hold prescale files that log which column applied by run and luminosity section.',
+    );
+  });
+
   it('describes each datasets item and the effectiveQuery echo as built', () => {
     const output = z.toJSONSchema(searchTriggerPaths.output, { unrepresentable: 'any' });
     const triggers = output.properties?.triggers;
@@ -268,7 +275,7 @@ describe('cern_opendata_search_trigger_paths path input', () => {
     ['year 2101', { year: 2101 }],
     ['a fractional year', { year: 2012.5 }],
     ['limit 0', { limit: 0 }],
-    ['limit 51', { limit: 51 }],
+    ['limit 10001', { limit: 10_001 }],
     ['a fractional limit', { limit: 2.5 }],
     ['page 0', { page: 0 }],
     ['a negative page', { page: -1 }],
@@ -1004,6 +1011,31 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
     );
   });
 
+  it('serves limit 60 at 50, naming the requested limit before the version note and the paging', async () => {
+    const { http } = serve(searchBody(triggerHits(50), { total: 95 }));
+    const result = await run({ path: 'HLT_Mu_v*', limit: 60 });
+    const data = success(result);
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(data).toMatchObject({ truncated: true, has_more: true, shown: 50, cap: 50 });
+    const notice =
+      "limit 60 is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50. Path versions are listed per record as V<n>; HLT_Mu_v* names every version of HLT_Mu. Showing 1–50 of 95; call cern_opendata_search_trigger_paths again with page 2, or add year.";
+    expect(data.notice).toBe(notice);
+    const trailer = textOf(result, 1).split('\n');
+    expect(trailer).toContain(`> ${notice}`);
+    expect(trailer).toContain('**cap:** 50');
+  });
+
+  it('pages by the applied limit: page 200 at the 10,000 ceiling returns matches 9951–10000', async () => {
+    const { http } = serve(searchBody(triggerHits(50), { total: 35_747 }));
+    const data = success(await run({ path: 'HLT_Mu*', limit: 10_000, page: 200 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(paramsOf(http).get('page')).toBe('200');
+    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 50, cap: 50 });
+    expect(data.notice).toBe(
+      "limit 10000 is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50. Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.",
+    );
+  });
+
   it('writes the same fields into the text trailer', async () => {
     serve(searchBody(triggerHits(10), { total: 95, hasNext: true }));
     const trailer = textOf(await run({ path: 'HLT_Mu*', limit: 10 }), 1);
@@ -1141,6 +1173,22 @@ describe('cern_opendata_search_trigger_paths errors on the wire', () => {
     const result = await run({ path: 'HLT_Mu*', page, limit });
     expect(result.isError).toBeFalsy();
     expect(paramsOf(http).get('page')).toBe(String(page));
+  });
+
+  it('refuses page 201 at limit 60 before any request, naming the limit applied', async () => {
+    const { http } = serve(emptySearchBody);
+    const error = await failure({ path: 'HLT_Mu*', page: 201, limit: 60 });
+    expect(error.message).toBe(
+      'page 201 × limit 50 (the maximum; 60 was requested) reaches past match 10000, the deepest the portal pages to.',
+    );
+    expect(error.data).toMatchObject({
+      reason: 'page_window_exceeded',
+      page: 201,
+      limit: 50,
+      requested_limit: 60,
+      window: 10_000,
+    });
+    expect(http.calls).toHaveLength(0);
   });
 
   it('writes no enrichment that could pass for a result on a refused window', async () => {

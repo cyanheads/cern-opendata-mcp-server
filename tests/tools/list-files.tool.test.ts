@@ -291,7 +291,7 @@ describe('cern_opendata_list_files input', () => {
 
   it.each([
     ['limit 0', { limit: 0 }],
-    ['limit 501', { limit: 501 }],
+    ['limit 10001', { limit: 10_001 }],
     ['a fractional limit', { limit: 1.5 }],
     ['an index over 300 characters', { index: 'x'.repeat(301) }],
     ['a cursor over 500 characters', { cursor: 'x'.repeat(501) }],
@@ -1373,6 +1373,66 @@ describe('cern_opendata_list_files paging', () => {
     expect(sizes).toEqual([50, 50, 20]);
     expect(keys).toEqual(Array.from({ length: 120 }, (_, i) => `file_${i}.root`));
     expect(http.calls).toHaveLength(1);
+  });
+
+  describe('a limit above 500', () => {
+    const clamped = (requested: number) =>
+      `limit ${requested} is above this tool's maximum of 500, so 500 was applied.`;
+
+    it('serves limit 501 at 500, and its cursor continues at file 501 to the end', async () => {
+      const { http } = serve({
+        '5000': recordBody({ recid: '5000', _files: regularFiles(1_200) }),
+      });
+      const first = await run({ recid: '5000', limit: 501 });
+      const page = success(first);
+      expect(page).toMatchObject({ truncated: true, shown: 500, cap: 500, totalCount: 1_200 });
+      expect(page.files.map((file) => file.key)).toEqual(
+        Array.from({ length: 500 }, (_, i) => `file_${i}.root`),
+      );
+      const notice = `${clamped(501)} Showing files 1–500 of 1200; call cern_opendata_list_files again with cursor set to next_cursor.`;
+      expect(page.notice).toBe(notice);
+      expect(textOf(first, 1).split('\n')).toContain(`> ${notice}`);
+      expect(JSON.parse(Buffer.from(String(page.next_cursor), 'base64url').toString())).toEqual({
+        r: '5000',
+        i: null,
+        o: 500,
+      });
+
+      const second = success(await run({ recid: '5000', limit: 501, cursor: page.next_cursor }));
+      expect(second.files[0]?.key).toBe('file_500.root');
+      expect(second).toMatchObject({ shown: 500, cap: 500, has_more: true });
+      const last = success(await run({ recid: '5000', limit: 501, cursor: second.next_cursor }));
+      expect(last.files.map((file) => file.key)).toEqual(
+        Array.from({ length: 200 }, (_, i) => `file_${1_000 + i}.root`),
+      );
+      expect(last).toMatchObject({ shown: 200, cap: 500, has_more: false, truncated: false });
+      expect(last).not.toHaveProperty('next_cursor');
+      expect(last.notice).toBe(clamped(501));
+      expect(http.calls).toHaveLength(1);
+    });
+
+    it('serves the 10,000 ceiling at 500 on an index whose files all fit, with the clamp fragment as the whole notice', async () => {
+      serve({
+        '6001': recordBody({
+          recid: '6001',
+          _file_indices: [fileIndex('big_file_index.json', 130)],
+        }),
+      });
+      const page = success(
+        await run({ recid: '6001', index: 'big_file_index.json', limit: 10_000 }),
+      );
+      expect(page).toMatchObject({ truncated: false, shown: 130, cap: 500, totalCount: 130 });
+      expect(page.notice).toBe(clamped(10_000));
+    });
+
+    it('leaves a limit of exactly 500 as it was: no clamp fragment', async () => {
+      serve({ '5000': recordBody({ recid: '5000', _files: regularFiles(1_200) }) });
+      const page = success(await run({ recid: '5000', limit: 500 }));
+      expect(page).toMatchObject({ shown: 500, cap: 500 });
+      expect(page.notice).toBe(
+        'Showing files 1–500 of 1200; call cern_opendata_list_files again with cursor set to next_cursor.',
+      );
+    });
   });
 
   it('issues cursors that carry the recid, the index and the next offset', async () => {

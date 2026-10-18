@@ -232,6 +232,22 @@ describe('cern-opendata://record/{recid} read', () => {
     expect(recordResource.output?.parse(await read('12220'))).toBeDefined();
   });
 
+  it('shares the lookup cache with cern_opendata_get_records both ways, and a mutated read changes nothing later', async () => {
+    const { http } = servePool([collisionDatasetHit, licensedDatasetHit]);
+    const fromResource = await read('6004');
+    const snapshot = JSON.stringify(fromResource);
+    const viaTool = await runToolContract(getRecords, { ids: ['6004'] });
+    expect((viaTool.structuredContent as { records: unknown[] }).records).toEqual([fromResource]);
+    await runToolContract(getRecords, { ids: ['30517'] });
+    expect((await read('30517')).id).toBe('30517');
+    expect(http.calls).toHaveLength(2);
+    (fromResource.experiment as string[]).push('ATLAS');
+    fromResource.title = 'changed';
+    fromResource.license.statement = 'changed';
+    expect(JSON.stringify(await read('6004'))).toBe(snapshot);
+    expect(http.calls).toHaveLength(2);
+  });
+
   it('keeps a sparse record sparse', async () => {
     servePool([sparseHit]);
     const record = await read('1120');

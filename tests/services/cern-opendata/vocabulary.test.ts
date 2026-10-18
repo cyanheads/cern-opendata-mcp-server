@@ -372,6 +372,13 @@ describe('REFERENCE_TABLES', () => {
     }
   });
 
+  it('gives the recid form the recid fields advertise, and the extra spellings to get_records ids alone', () => {
+    const recid = tableOf('identifiers').entries.find((entry) => entry.value === 'recid');
+    expect(recid?.meaning).toBe(
+      'Up to 12 digits (6004), optionally after a lowercase experiment prefix for newer records (atlas-160006). Taken in this form by cern_opendata_list_files, cern_opendata_get_analysis_env, cern_opendata_get_validated_runs and the cern-opendata://record/{recid} resource. cern_opendata_get_records ids also take recid:6004, https://opendata.cern.ch/record/6004 and the prefix in any case.',
+    );
+  });
+
   it('describes a file-index key as matched exactly, not only the _file_index.json form', () => {
     const key = tableOf('identifiers').entries.find((entry) => entry.value === 'file-index key');
     expect(key?.meaning).toBe(

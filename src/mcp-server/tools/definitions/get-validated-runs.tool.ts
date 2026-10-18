@@ -35,12 +35,16 @@ import type {
   ValidatedRunList,
 } from '@/services/cern-opendata/types.js';
 import {
+  applyLimit,
   composeNotice,
   finishListEnrichment,
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, recidInput } from '../inputs.js';
+import { blankAsUnset, LIMIT_CEILING, recidInput } from '../inputs.js';
+
+/** The most runs one call returns; a larger limit is served at it. */
+const MAX_LIMIT = 2000;
 
 const OTHER_VARIANT: Record<RunListVariant, RunListVariant> = {
   full: 'muons_only',
@@ -306,7 +310,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: blankAsUnset(recidInput().optional()).describe(
-      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): up to 12 digits, optionally after an experiment prefix (cms-93956); recid:N or a portal record URL also work. Give this or run_period.',
+      'A CMS collision dataset recid (its linked list is used) or a validated-run list recid (used as named): up to 12 digits, optionally after a lowercase experiment prefix (cms-93956). Give this or run_period.',
     ),
     run_period: blankAsUnset(
       z.preprocess(
@@ -325,8 +329,8 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     run_max: blankAsUnset(z.number().int().min(1).optional()).describe(
       'Highest run to return, inclusive. Defaults with run_min for a dataset recid.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(2000).default(200)).describe(
-      'Runs to return, 1-2000.',
+    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(200)).describe(
+      'Runs to return, 1-2000. A value above 2000 is served at 2000.',
     ),
   }),
   output: GetValidatedRunsOutput,
@@ -392,7 +396,8 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   ],
 
   async handler(input, ctx) {
-    startListEnrichment(ctx, input.limit);
+    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT);
+    startListEnrichment(ctx, limit);
     const { recid, run_period: runPeriod, run_min: runMin, run_max: runMax } = input;
     const selection = selectionOf(recid, runPeriod);
     if (selection === 'missing') {
@@ -419,7 +424,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     const budget = service.startBudget();
     const lists = await service.getValidatedRunLists(budget, ctx);
     const variant = input.variant ?? 'full';
-    const fragments: string[] = [];
+    const fragments = limitFragment ? [limitFragment] : [];
     let candidates: ValidatedRunList[];
     let selector: string;
     let dataset: DatasetOut | undefined;
@@ -521,7 +526,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
       finishListEnrichment(ctx, {
         shown: 0,
         total: 0,
-        cap: input.limit,
+        cap: limit,
         truncated: false,
         notice: composeNotice(fragments),
       });
@@ -549,8 +554,8 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
         (boundMin === undefined || run.run >= boundMin) &&
         (boundMax === undefined || run.run <= boundMax),
     );
-    const runs = inRange.slice(0, input.limit);
-    const next = inRange[input.limit];
+    const runs = inRange.slice(0, limit);
+    const next = inRange[limit];
 
     const listRecid = noticeValue(selected.recid);
     if (dataset && defaulted) {
@@ -581,7 +586,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     finishListEnrichment(ctx, {
       shown: runs.length,
       total: inRange.length,
-      cap: input.limit,
+      cap: limit,
       truncated: next !== undefined,
       notice: composeNotice(fragments),
     });

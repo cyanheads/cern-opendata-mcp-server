@@ -3,7 +3,7 @@
  * cern_opendata tools (search_records, list_files, get_validated_runs,
  * search_trigger_paths): the required `truncated` / `shown` / `cap` /
  * `totalCount` fields, written at handler entry and updated once results
- * arrive, plus one composed `notice` per call.
+ * arrive, the limit a call serves, plus one composed `notice` per call.
  * @module mcp-server/tools/enrichment
  */
 
@@ -39,6 +39,25 @@ export function listEnrichment(totalDescription: string) {
  */
 export function startListEnrichment(ctx: Context, cap: number): void {
   ctx.enrich({ truncated: false, shown: 0, cap, totalCount: 0 });
+}
+
+/**
+ * The limit a list tool serves: the requested one, or the tool's maximum when
+ * the request is above it (Decision 56). Above the maximum, `fragment` names
+ * the requested value for the notice; `paged` adds that page numbers count
+ * pages of the applied limit, for the tools that page by number.
+ */
+export function applyLimit(
+  requested: number,
+  max: number,
+  paged = false,
+): { fragment: string | undefined; limit: number } {
+  if (requested <= max) return { limit: requested, fragment: undefined };
+  const pages = paged ? `, and page numbers count pages of ${max}` : '';
+  return {
+    limit: max,
+    fragment: `limit ${requested} is above this tool's maximum of ${max}, so ${max} was applied${pages}.`,
+  };
 }
 
 /**

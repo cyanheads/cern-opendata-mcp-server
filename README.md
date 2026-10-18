@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-opendata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-opendata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-opendata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-opendata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-opendata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-opendata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,14 +29,14 @@
 
 ## Overview
 
-Particle-physics data from the CERN Open Data Portal: collision, simulated and derived datasets, analysis software, environments and documentation from ALICE, ATLAS, CMS, LHCb and other experiments. Search with exact-vocabulary filters and live facet counts, open records with license and citation, list data files, assemble a record's analysis environment, and look up CMS good-run lists and trigger paths. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Particle-physics data from the CERN Open Data Portal: collision and simulated datasets, analysis software, and documentation from ALICE, ATLAS, CMS, LHCb, and more. Search with live facet counts, open records with license and citation, list data files, assemble a record's analysis environment, and look up CMS good-run lists and trigger paths. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
 | `cern_opendata_search_records` | Search datasets, software, environments, documentation and supplementary records with exact-vocabulary filters and live facet counts |
-| `cern_opendata_get_records` | Fetch full metadata for 1–20 records by recid, DOI, CMS dataset path or documentation slug, with license and citation |
+| `cern_opendata_get_records` | Fetch full metadata for up to 20 records a call by recid, DOI, CMS dataset path or documentation slug, with license and citation |
 | `cern_opendata_list_files` | Page through a record's file indexes and files: XRootD URIs, HTTPS URLs, sizes, checksums, tape availability |
 | `cern_opendata_get_analysis_env` | Assemble a record's analysis environment: container images, CMSSW release, global tag, linked environment and software records, guide sections |
 | `cern_opendata_get_validated_runs` | Get a CMS validated-run (good-run) list for a dataset, a list or a run period, with luminosity-section ranges |
@@ -55,18 +55,18 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern_opendata_search_records` <sub>tool</sub>
 
-- Optional `query` (an OpenSearch `query_string`, up to 500 characters) plus OR-list filters `type`, `experiment`, `category` (physics category, `Higgs Physics::Standard Model`), `keywords`, `collision_energy`, `collision_type`, `file_type`, `availability`, `collection`, and the LHCb `magnet_polarity`, `stripping_stream` and `stripping_version`, each an array or a comma-separated string; `year_from`/`year_to` and `min_events`/`max_events` bound the data-taking year and event count
-- `sort` (`bestmatch`, `mostrecent` for newest `date_published` first, `title`, `title_desc`), `limit` 1–50 (default 10) and `page` from 1; `page × limit` past 10,000 fails as `page_window_exceeded`
-- Compact `hits` with recids, plus thirteen live `facets` that each ignore their own filter (`type` and `category` with their secondary values); `applied_filters` echoes what ran, and values outside the verified vocabulary appear under `unrecognized_values`
+- Optional `query` (an OpenSearch `query_string`, up to 500 characters) plus OR-list filters `type`, `experiment`, `category` (physics category, `Higgs Physics::Standard Model`), `keywords`, `collision_energy`, `collision_type`, `file_type`, `availability`, `collection`, and the LHCb `magnet_polarity`, `stripping_stream` and `stripping_version`, each an array of values; `year_from`/`year_to` and `min_events`/`max_events` bound the data-taking year and event count
+- `sort` (`bestmatch`, `mostrecent` for newest `date_published` first, `title`, `title_desc`), `limit` 1–50 (default 10; a larger value, up to 10,000, is served at 50 with a notice) and `page` from 1, counting pages of the limit applied; `page × limit` past 10,000 fails as `page_window_exceeded`
+- Compact `hits` with recids, plus thirteen live `facets` that each ignore their own filter (`type` and `category` with up to 10 secondary values each, and `subtypes_other_count` or `subcategories_other_count` when the portal cuts that list); `applied_filters` echoes what ran, and values outside the verified vocabulary appear under `unrecognized_values`
 
 ---
 
 ### `cern_opendata_get_records` <sub>tool</sub>
 
-- `ids`: 1–20 recids, DOIs, CMS dataset paths (`/Primary/Era/TIER`) or documentation slugs, mixed in one array or comma-separated string
+- `ids`: up to 100 recids, DOIs, CMS dataset paths (`/Primary/Era/TIER`) or documentation slugs, mixed in one array; the first 20 distinct are looked up and the rest returned in `deferred`
 - Each record carries a `license` with its `basis` (`record`, `cern_terms_default`, `not_stated`) and, when it has a DOI, a ready `citation`
 - Documentation and news bodies come in slices of up to 30,000 characters: `body_offset` with that one id reads on from the `body_next_offset` the last slice returned
-- Each response stays within 64,000 bytes: records past the budget are left out whole and listed in `deferred`, to pass back as `ids` (the first record always comes back whole)
+- Each response stays within 64,000 bytes, except that the first record always comes back whole: records past the budget are left out and listed in `deferred`, ahead of any ids past the first 20, to pass back as `ids`
 - Records also return what they state of a `variables` dictionary (name, type, unit, description), a physics `category`, pile-up (`pileup_html`, with the pile-up datasets under `links`), `keywords`, and the LHCb `magnet_polarity` and `stripping` stream and version
 - Unresolved identifiers land in `missing` with `interpreted_as` and guidance instead of failing the call; file lists come from `cern_opendata_list_files`
 
@@ -75,7 +75,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 ### `cern_opendata_list_files` <sub>tool</sub>
 
 - `recid` required; without `index`, returns the record's file indexes and regular files, and with an index key, that index's files, read without the rest of the record
-- `limit` 1–500 (default 50), continued with `next_cursor`; each file carries `xrootd_uri`, `size_in_bytes`, `checksum` and `availability`, an `https_url` when one can be built from its key or EOS path, and `key` or `filename` as the portal states them, and each index a `uri_list_url` listing every XRootD URI in it
+- `limit` 1–500 (default 50; a larger value, up to 10,000, is served at 500 with a notice), continued with `next_cursor`; each file carries `xrootd_uri`, `size_in_bytes`, `checksum` and `availability`, an `https_url` when one can be built from its key or EOS path, and `key` or `filename` as the portal states them, and each index a `uri_list_url` listing every XRootD URI in it
 - Files marked `on demand` sit on tape and must be requested on the record's portal page first; an umbrella record with no files of its own returns its child recids under `children`
 
 ---
@@ -83,14 +83,14 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 ### `cern_opendata_get_analysis_env` <sub>tool</sub>
 
 - `recid` required; `software` carries the record's own container images, CMSSW release, global tag and environment recid
-- `environment_records` (condition, VM, validation) for the record's run periods and `example_software` that declares it works with the record, up to 50 between them; `guides` quotes the linked section of the first two portal guides, each capped at 12,000 characters, and a cut names the `cern_opendata_get_records` `body_offset` that reads on from it
+- `environment_records` (condition, VM, validation) for the record's run periods and `example_software` that declares it works with the record, up to 50 between them; `guides` quotes the linked section of the first two portal guides, each capped at 12,000 characters, with the `[label]: url` reference definitions the quote links through from elsewhere in the guide, and a cut names the `cern_opendata_get_records` `body_offset` that reads on from it
 - Always `separately_licensed: true`; linked records or guides that can't be read leave a `notice` instead of failing the call
 
 ---
 
 ### `cern_opendata_get_validated_runs` <sub>tool</sub>
 
-- Exactly one of `recid` (a CMS collision dataset or a validated-run list) or `run_period` (`Run2012B`; `2012B` also matches); `variant` `full` or `muons_only`; `run_min`/`run_max`; `limit` 1–2000 (default 200)
+- Exactly one of `recid` (a CMS collision dataset or a validated-run list) or `run_period` (`Run2012B`; `2012B` also matches); `variant` `full` or `muons_only`; `run_min`/`run_max`; `limit` 1–2000 (default 200; a larger value, up to 10,000, is served at 2000 with a notice)
 - A dataset `recid` bounds the runs to the dataset's first and last listed run, echoed in `run_bounds`; when several lists match, `matched_lists` names them and no runs are read
 - Each run carries `lumi_sections` and `lumi_ranges`; `list.https_url` downloads the whole list file. CMS only: other records fail as `no_validated_runs`
 
@@ -98,7 +98,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern_opendata_search_trigger_paths` <sub>tool</sub>
 
-- `path`: an exact name (`HLT_IsoMu24`, `AlCa_EcalPi0`) or a prefix with one trailing `*` (`HLT_IsoMu*`); a name without the `HLT_` prefix is matched against record path names in the case given and also searched with `HLT_` added, and a `_v<n>` version suffix is dropped; optional `year`, `limit` 1–50 (default 10) and `page`
+- `path`: an exact name (`HLT_IsoMu24`, `AlCa_EcalPi0`) or a prefix with one trailing `*` (`HLT_IsoMu*`); a name without the `HLT_` prefix is matched against record path names in the case given and also searched with `HLT_` added, and a `_v<n>` version suffix is dropped; optional `year`, `limit` 1–50 (default 10; a larger value, up to 10,000, is served at 50 with a notice) and `page`
 - Each per-year record is parsed into the primary `datasets` its title names, `first_seen`, `last_seen`, per-version run ranges with their `l1_seed`, and HLT menu record links; `parsed: false` marks a record to read from its `abstract_html`
 - CMS open data from 2011–2016 only
 
@@ -127,6 +127,7 @@ CERN Open Data-specific:
 - Filter values canonicalized against the portal's verified vocabulary (`13 tev` → `13TeV`, `lhcb` → `LHCb`, `Pb-Pb` → `PbPb`, `dataset/collision` → `Dataset::Collision`); unknown values are sent as given and flagged
 - Tape-resident (`ondemand`) records are included in every search and lookup, where the portal otherwise drops them silently
 - File manifests, and file indexes read on their own, are cached for 15 minutes, so paging through a record's or an index's files costs one read
+- Records `cern_opendata_get_records` and the record resource resolved are cached for 15 minutes (up to 8 MiB), so fetching a budget-deferred record or following `body_next_offset` costs no further portal request
 
 Agent-friendly output:
 
@@ -147,9 +148,9 @@ This server is an independent project and is not affiliated with or endorsed by 
 
 - **60 requests a minute per client IP.** The portal publishes this limit; the server paces itself to 50 a minute, and a call that cannot start within its deadline fails as `rate_limited` with `retryAfter`. A hosted deployment shares one budget across every user behind its egress IP. `cern_opendata_get_analysis_env` and `cern_opendata_get_validated_runs` cost 2–4 requests each.
 - **10,000-result window.** Search and trigger-path paging reach only the first 10,000 matches; narrow deeper result sets with filters.
-- **Facet lists are partial.** Terms facets return the first 10 values alphabetically (`file_type` up to 100), with the rest counted in `other_count`.
+- **Facet lists are partial.** Terms facets return the first 10 values alphabetically (`file_type` up to 100), with the rest counted in `other_count`, and each `type` and `category` bucket its first 10 secondary values, with the rest counted in `subtypes_other_count` or `subcategories_other_count` (an unfiltered search hides `Supplementaries::Trigger` this way). These are summed counts of values, not record counts; `cern_opendata_list_reference` lists every value, and a `Primary::Secondary` filter's `totalCount` counts its records.
 - **Tape-resident files.** Files with availability `on demand` must be requested on the record's portal page before download; staging them is a write and out of scope. A record whose availability is `ondemand` lists none of its files through the API, so `cern_opendata_list_files` reports only the count and size its metadata states.
-- **CMS-only run lists and triggers.** Trigger records cover 2011–2016, and no prescale tables are published, so trigger detail is limited to what each record's abstract states. Muons-only run lists do not exist for Commissioning2010, Run2010B or the 2011 ReReco list.
+- **CMS-only run lists and triggers.** Trigger records cover 2011–2016, and trigger detail is limited to what each record's abstract states. `cern_opendata_search_trigger_paths` returns no prescale factors: they are in each HLT menu record's configuration file (its `PrescaleService` block, listed by `cern_opendata_list_files` with the `menu_recid`), and the CMS luminosity records (collection `CMS-Luminosity-Information`) log which prescale column applied by run and luminosity section. Muons-only run lists do not exist for Commissioning2010, Run2010B or the 2011 ReReco list.
 - **Glossary entries are not served.** The portal's glossary links answer 404, so search excludes them.
 
 ## Getting started
