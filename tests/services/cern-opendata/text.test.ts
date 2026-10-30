@@ -96,6 +96,144 @@ describe('printUrl', () => {
 });
 
 describe('htmlToText', () => {
+  it.each([
+    [
+      '12210',
+      '<img alt="Production workflow" src="/eos/opendata/cms/software/TrackerRecHitProducerTool/production-workflow.png"  width="85%">',
+      '![Production workflow](https://opendata.cern.ch/eos/opendata/cms/software/TrackerRecHitProducerTool/production-workflow.png)',
+    ],
+    [
+      '22350',
+      '<img src="https://cds.cern.ch/record/1456510/files/pictures_samples_dimuonSpectrum_40pb-1_mod-combined.png" width=50% align="middle">',
+      '![](https://cds.cern.ch/record/1456510/files/pictures_samples_dimuonSpectrum_40pb-1_mod-combined.png)',
+    ],
+  ])('keeps the source image reference from record %s', (_id, html, expected) => {
+    expect(html).toContain('<img ');
+    expect(htmlToText(html)).toBe(expected);
+    expect(fenceHtml(html)).toBe(`\`\`\`\n${expected}\n\`\`\``);
+  });
+
+  it('characterizes image-free composition beside an escaped image example', () => {
+    expect(htmlToText('<table><tr><td><a href="/x">x < 2<td>&lt;img src=/y&gt;</table>')).toBe(
+      'x < 2 <https://opendata.cern.ch/x> | <img src=/y>',
+    );
+  });
+
+  it('does not interpret image syntax inside another tag attribute', () => {
+    expect(htmlToText('<span title="<img src=/hidden>">text</span>')).toBe('">text');
+  });
+
+  it.each([
+    [
+      'double quotes',
+      '<img alt="Production workflow" src="/workflow.png">',
+      '![Production workflow](https://opendata.cern.ch/workflow.png)',
+    ],
+    [
+      'single quotes',
+      "<IMG SRC='/plot.png' ALT='Plot'>",
+      '![Plot](https://opendata.cern.ch/plot.png)',
+    ],
+    [
+      'unquoted attributes',
+      '<img src=/plot.png alt=Plot>',
+      '![Plot](https://opendata.cern.ch/plot.png)',
+    ],
+    ['no alt', '<img src="https://cds.cern.ch/plot.png"/>', '![](https://cds.cern.ch/plot.png)'],
+    ['missing src', '<img alt="Plot">', 'Plot'],
+    ['empty src', '<img src="" alt="Plot">', 'Plot'],
+    ['no attributes', '<img>', ''],
+    [
+      'data-src before src',
+      '<img data-src="/wrong" src="/right" alt="A">',
+      '![A](https://opendata.cern.ch/right)',
+    ],
+    ['data-src alone', '<img data-src="/wrong" alt="A">', 'A'],
+    [
+      'quoted attribute contents',
+      '<img title="src=/wrong > alt=wrong" src="/right" alt="A">',
+      '![A](https://opendata.cern.ch/right)',
+    ],
+    [
+      'first duplicate attribute',
+      '<img src="/first" src="/second" alt="A">',
+      '![A](https://opendata.cern.ch/first)',
+    ],
+    [
+      'an image anchor',
+      '<a href="/x"><img alt="a" src="/y"></a>',
+      '![a](https://opendata.cern.ch/y) <https://opendata.cern.ch/x>',
+    ],
+    [
+      'an image anchor ended by its cell',
+      '<table><td><a href="/x"><img alt="a" src="/y"><td>b</table>',
+      '![a](https://opendata.cern.ch/y) <https://opendata.cern.ch/x> | b',
+    ],
+    [
+      'entities decoded once',
+      '<img alt="&amp;lt;b&amp;gt; &lt;c&gt;" src="/x?a=1&amp;amp;b=2">',
+      '![&lt;b&gt; <c>](https://opendata.cern.ch/x?a=1&amp;b=2)',
+    ],
+    [
+      'URL delimiters and controls',
+      '<img src="/a&#91;b&#93; (c)&lt;d&gt;&#10;e&#0;f&#x202e;" alt="A">',
+      '![A](https://opendata.cern.ch/a%5Bb%5D%20%28c%29%3Cd%3E%0Ae&#0;f%E2%80%AE)',
+    ],
+    [
+      'alt delimiters and breaks',
+      '<img src="/x" alt="a&#92;&#91;b&#93;&#10;c&#13;d&#x2028;e">',
+      '![a\\\\\\[b\\]\\nc\\rd\\u2028e](https://opendata.cern.ch/x)',
+    ],
+  ])('preserves an image reference with %s', (_shape, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it('keeps image references inert inside adaptive fences and inline slots', () => {
+    const html = '<img src="/x" alt="``` | [a]">';
+    expect(fenceHtml(html)).toBe('````\n![``` | \\[a\\]](https://opendata.cern.ch/x)\n````');
+    expect(inline(htmlToText('<img src="/x" alt="a">'))).toBe(
+      '!\\[a\\](https://opendata.cern.ch/x)',
+    );
+  });
+
+  it.each([
+    ['an unclosed tag', '<img alt="tail', '<img alt="tail'],
+    ['an unclosed quote after a tag end', '<img alt="a>tail', 'tail'],
+    [
+      'a literal backslash before a closing quote',
+      '<img alt="a\\" src=/x>',
+      '![a\\\\](https://opendata.cern.ch/x)',
+    ],
+    [
+      'quotes and tag delimiters inside a quoted alt',
+      `<img alt='a " > b' src='/x'>`,
+      '![a " > b](https://opendata.cern.ch/x)',
+    ],
+    [
+      'a control-bearing source',
+      '<img src="/a\u0000b&#1;c">',
+      '![](https://opendata.cern.ch/a%00b%01c)',
+    ],
+    ['a different element name', '<imagination src=/x>', ''],
+  ])('keeps image parsing bounded and literal for %s', (_shape, html, expected) => {
+    expect(htmlToText(html)).toBe(expected);
+  });
+
+  it.each<[string, (length: number) => string]>([
+    ['digits in an image attribute', (n) => `<img src="/${'1'.repeat(n)}">`],
+    ['image openers', (n) => '<img '.repeat(n / 5)],
+    ['nested image openers', (n) => `${'<img '.repeat(n / 10)}${'>'.repeat(n / 2)}`],
+    ['unclosed quoted attributes', (n) => `<img alt="${'x > '.repeat(n / 4)}`],
+    ['quote-heavy attributes', (n) => `<img ${'a="b" '.repeat(n / 6)}src=/x>`],
+    ['a line ending in a break', (n) => `<img alt="${'§1 x'.repeat(n / 4)}\ny" src=/x>`],
+    ['breaks throughout', (n) => `<img alt="${'  \r\n'.repeat(n / 4)}" src=/x>`],
+  ])('converts %s with bounded image scanning', (shape, make) => {
+    expectLinearGrowth(make, htmlToText, {
+      maxMs: 250,
+      to: shape === 'digits in an image attribute' ? 320_000 : 40_000,
+    });
+  });
+
   it('drops tags and turns block elements and breaks into line breaks', () => {
     expect(htmlToText('<p>one</p><p>two<br>three<br/>four</p>')).toBe('one\n\ntwo\nthree\nfour');
     expect(htmlToText('<ul><li>a</li><li>b</li></ul>')).toBe('a\n\nb');

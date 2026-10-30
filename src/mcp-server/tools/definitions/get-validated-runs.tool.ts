@@ -231,7 +231,7 @@ const GetValidatedRunsOutput = z.object({
   matched_lists: z
     .array(MatchedListSchema)
     .describe(
-      'Every list the selector matched in the requested variant. Several means none was read: call again with recid set to one of them.',
+      'All selector matches in the requested variant. If several, none was read: call again with one recid.',
     ),
   list: SelectedListSchema.optional().describe('The selected list, when exactly one matched.'),
   dataset: z
@@ -264,15 +264,15 @@ const GetValidatedRunsOutput = z.object({
       source: z
         .enum(['input', 'dataset'])
         .describe(
-          'input: run_min/run_max as given. dataset: both defaulted to the first and last run the dataset lists.',
+          'input: supplied run_min/run_max; dataset: both default to its first/last listed run.',
         ),
     })
     .optional()
-    .describe('The run range runs was filtered to; absent when no bound applies.'),
+    .describe('Run filter range; absent when unbounded.'),
   runs: z
     .array(RunSchema)
     .describe(
-      'Certified runs, ascending, inside run_bounds and cut at limit; empty when no single list was selected.',
+      'Certified runs ascending within run_bounds, capped at limit; empty unless one list was selected.',
     ),
 });
 

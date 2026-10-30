@@ -38,7 +38,7 @@ export const listReference = tool('cern_opendata_list_reference', {
                     value: z
                       .string()
                       .describe(
-                        'A value or query form, spelled exactly as the tools accept it; in the identifiers and licensing topics, the name of an identifier form or a licensing rule.',
+                        'Exact accepted value/query form; identifiers and licensing instead name identifier forms and licensing rules.',
                       ),
                     meaning: z.string().describe('What the value means and where it applies.'),
                   })

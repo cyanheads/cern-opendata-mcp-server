@@ -437,25 +437,29 @@ describe('a JSON-stringified list', () => {
     expect(ids.parse(padded(IDS_BOUND + 1))).toEqual(['["6004"', '"6030"]']);
   });
 
-  it.each<[string, (n: number) => string]>([
-    ['a run of [ with no closer', (n) => '['.repeat(n)],
-    ['a run of [ closed once', (n) => `${'['.repeat(n - 1)}]`],
-    ['nested arrays', (n) => `${'['.repeat(n / 2)}${']'.repeat(n / 2)}`],
-    ['one huge string item', (n) => `["${'x'.repeat(n - 4)}"]`],
-    ['many short items', (n) => `[${'"a",'.repeat(n / 4 - 1)}"a"]`],
-    ['a string of escapes', (n) => `["${'\\u00e9'.repeat(n / 6)}"]`],
-    ['items separated by line breaks', (n) => `[${'"§1 x",\n'.repeat(n / 9)}"y"]`],
-    ['an unterminated string of commas', (n) => `["${'a,'.repeat(n / 2)}]`],
-  ])('preprocesses %s in linear time, across the parse bound', (_name, make) => {
-    /**
-     * `category`'s split path looks up every adjacent pair for a rejoin, so it
-     * costs several times its parse path per character and a span across its
-     * 12,686-character bound would time that switch rather than growth; its
-     * rejoin is timed on its own above.
-     */
-    for (const schema of [ids, keywords, experiment]) {
+  describe.each([
+    ['ids', ids],
+    ['keywords', keywords],
+    ['experiment', experiment],
+  ] as const)('%s preprocessing', (_schemaName, schema) => {
+    it.each<[string, (n: number) => string]>([
+      ['a run of [ with no closer', (n) => '['.repeat(n)],
+      ['a run of [ closed once', (n) => `${'['.repeat(n - 1)}]`],
+      ['nested arrays', (n) => `${'['.repeat(n / 2)}${']'.repeat(n / 2)}`],
+      ['one huge string item', (n) => `["${'x'.repeat(n - 4)}"]`],
+      ['many short items', (n) => `[${'"a",'.repeat(n / 4 - 1)}"a"]`],
+      ['a string of escapes', (n) => `["${'\\u00e9'.repeat(n / 6)}"]`],
+      ['items separated by line breaks', (n) => `[${'"§1 x",\n'.repeat(n / 9)}"y"]`],
+      ['an unterminated string of commas', (n) => `["${'a,'.repeat(n / 2)}]`],
+    ])('preprocesses %s in linear time, across the parse bound', (_name, make) => {
+      /**
+       * `category`'s split path looks up every adjacent pair for a rejoin, so it
+       * costs several times its parse path per character and a span across its
+       * 12,686-character bound would time that switch rather than growth; its
+       * rejoin is timed on its own above.
+       */
       expectLinearGrowth(make, (value) => schema.safeParse(value), { maxMs: 100 });
-    }
+    });
   });
 });
 

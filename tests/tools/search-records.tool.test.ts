@@ -1835,9 +1835,15 @@ describe('cern_opendata_search_records format', () => {
 
   it('describes every overflow as a summed count of the values past the cap, and routes to the rest', () => {
     const { facets } = searchRecords.output.shape;
-    expect(facets.description).toBe(
-      'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100), and type and category buckets their first 10 secondary values. other_count, subtypes_other_count and subcategories_other_count sum the counts of the values past those caps, so a record holding several of them counts once per value; other_count is 0 for year and number_events. cern_opendata_list_reference topics record_types and categories list every secondary value, and a Primary::Secondary type or category filter returns its record count as totalCount.',
+    expect(facets.description).toMatch(/ignores its own filter/);
+    expect(facets.description).toMatch(/10 values alphabetically.*file_type.*100/);
+    expect(facets.description).toMatch(/type and category.*10 secondary values/);
+    expect(facets.description).toMatch(/sum counts past.*caps.*once per value/);
+    expect(facets.description).toMatch(/other_count is 0 for year and number_events/);
+    expect(facets.description).toMatch(
+      /cern_opendata_list_reference.*record_types.*categories.*secondary values/,
     );
+    expect(facets.description).toMatch(/Primary::Secondary.*record count.*totalCount/);
     for (const [name, facet] of Object.entries(facets.shape)) {
       expect(facet.shape.other_count.description, name).toBe(
         'Summed count of the values past the bucket cap, not a record count.',

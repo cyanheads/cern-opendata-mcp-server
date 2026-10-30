@@ -416,7 +416,7 @@ export const getRecords = tool('cern_opendata_get_records', {
     deferred: z
       .array(z.string().describe('One input, as given.'))
       .describe(
-        'Inputs left for another call, in input order: those whose records were left out to hold the response to 64,000 bytes (never the first record, which is returned whole even when larger), then ids past the first 20, which were not looked up. Pass them as ids to fetch them. Empty when nothing was left out.',
+        'Continuation ids: budget-omitted records in input order, then ids past the first 20, not looked up. The response budget is 64,000 bytes; the first record is always whole even when larger. Pass as ids to fetch them; empty when none.',
       ),
   }),
   enrichment: {
@@ -424,7 +424,7 @@ export const getRecords = tool('cern_opendata_get_records', {
       .string()
       .optional()
       .describe(
-        'Caveats about the returned records: a documentation body with more to read, records deferred by the response budget, or ids past the first 20 that were not looked up, each with the call that continues it.',
+        'Continuation calls for a cut documentation body, budget-deferred records or ids past the first 20 left unread; absent when none.',
       ),
   },
   errors: [

@@ -243,7 +243,7 @@ const EnvironmentRecordSchema = z
       .describe('Run periods the record covers.'),
     portal_url: z.string().describe('The record page on the portal.'),
   })
-  .describe('One Environment record for this record (condition data, VM, validation).');
+  .describe('Linked Environment record: condition data, VM or validation.');
 
 const ExampleSoftwareSchema = z
   .object({
@@ -255,7 +255,7 @@ const ExampleSoftwareSchema = z
     license_id: z
       .string()
       .optional()
-      .describe('License the software record states (such as GPL-3.0-only); absent when none.'),
+      .describe('Stated software license (e.g. GPL-3.0-only); absent when none.'),
     source_code_repository_url: z
       .string()
       .optional()
@@ -269,7 +269,7 @@ const GuideSchema = z
     slug: z
       .string()
       .describe(
-        'Doc slug; pass it as the one id of cern_opendata_get_records for the page body, with body_offset to read on past a cut (the notice names the offset).',
+        'Doc slug: pass as the sole cern_opendata_get_records id for its body; body_offset continues a cut at the offset in notice.',
       ),
     url: z.string().describe('The guide link, absolute.'),
     link_description: z.string().optional().describe('The link text the record gives the guide.'),
@@ -279,24 +279,24 @@ const GuideSchema = z
       .string()
       .optional()
       .describe(
-        'The linked section (or the opening section) as markdown, as the portal sent it but with LF line ends; at most 12,000 characters.',
+        'Linked or opening section: original markdown with LF line ends, up to 12,000 characters.',
       ),
     section_truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when the section was cut at 12,000 characters; the notice names the body_offset where the quote stops.',
+        'Section cut at 12,000 characters; notice gives body_offset where the quote stops.',
       ),
     reference_definitions: z
       .array(z.string().describe('One definition line, verbatim.'))
       .optional()
       .describe(
-        "The guide's [label]: destination lines from outside the section whose label a [...] span of the section uses: verbatim, in body order, the first per label; a definition past a cut counts as outside. Empty when the section uses none; absent when the guide was not fetched.",
+        'External [label]: destination definitions used by [...] spans in section: verbatim, body order, first per label. Includes definitions past a cut. Empty when unused; absent when unfetched.',
       ),
     fetched: z
       .boolean()
       .describe(
-        'False when the guide was not fetched (only the first two are) or was not found; notice says which.',
+        'False if unfetched (only the first two are fetched) or not found; notice distinguishes them.',
       ),
   })
   .describe('One portal guide the record links in its usage section.');
@@ -326,11 +326,8 @@ const GetAnalysisEnvOutput = z.object({
             })
             .describe('One container image.'),
         )
-        .describe('Container images for the environment; empty when the record lists none.'),
-      environment_recid: z
-        .string()
-        .optional()
-        .describe('Recid of the environment (VM or container) record, when stated.'),
+        .describe('Environment images; empty when none listed.'),
+      environment_recid: z.string().optional().describe('Stated VM/container environment recid.'),
       description: z
         .string()
         .optional()
@@ -353,10 +350,10 @@ const GetAnalysisEnvOutput = z.object({
         })
         .describe('One link.'),
     )
-    .describe('The other usage links (getting-started pages and the like).'),
+    .describe('Other usage links, e.g. getting-started pages.'),
   separately_licensed: z
     .literal(true)
-    .describe('Always true: images, software and guide code are licensed apart from the CC0 data.'),
+    .describe('Images, software and guide code have separate licenses from CC0 data.'),
   license_note: z.string().describe('How the environment is licensed.'),
 });
 
@@ -421,7 +418,7 @@ export const getAnalysisEnv = tool('cern_opendata_get_analysis_env', {
       .string()
       .optional()
       .describe(
-        'What could not be assembled and how to get it: an empty environment, linked records that could not be read, guides not fetched, not found or cut, a guide anchor no heading carries, or more linked records than shown.',
+        'Gaps and next steps: empty environment, unread or excess linked records, unfetched/missing/cut guides or unmatched guide anchors; absent when none.',
       ),
   },
   errors: [

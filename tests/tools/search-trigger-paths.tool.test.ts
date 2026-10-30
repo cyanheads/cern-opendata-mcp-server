@@ -1353,6 +1353,13 @@ describe('cern_opendata_search_trigger_paths format', () => {
     return { result, data: success(result), text: textOf(result) };
   }
 
+  it('keeps trigger image HTML and its fenced reference on the two surfaces', async () => {
+    const html = '<img src="/trigger.png" alt="Trigger">';
+    const { data, text } = await rendered([triggerHit('8000', 'HLT_IsoMu24', html)]);
+    expect(data.triggers[0]?.abstract_html).toBe(html);
+    expect(text).toContain('```\n![Trigger](https://opendata.cern.ch/trigger.png)\n```');
+  });
+
   it('renders the page line and every parsed field of a record', async () => {
     const { text } = await rendered([isoMu24Hit2011]);
     expect(text.split('\n')[0]).toBe(

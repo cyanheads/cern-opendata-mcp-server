@@ -213,6 +213,75 @@ function dropScripts(html: string): string {
   return out + html.slice(from);
 }
 
+/** Image references stay literal through the later tag strip and entity decode. */
+function replaceImages(html: string): string {
+  let out = '';
+  let from = 0;
+  let resume = 0;
+  for (const open of html.matchAll(/<([A-Za-z][A-Za-z0-9:-]*)(?=[\s/>])/g)) {
+    if (open.index < resume) continue;
+    let at = open.index + open[0].length;
+    let src: string | undefined;
+    let alt: string | undefined;
+    while (at < html.length && html[at] !== '>') {
+      if (/\s/.test(html[at] ?? '') || html[at] === '/') {
+        at += 1;
+        continue;
+      }
+      const start = at;
+      while (at < html.length && !/[\s=/>]/.test(html[at] ?? '')) at += 1;
+      const name = html.slice(start, at).toLowerCase();
+      while (at < html.length && /\s/.test(html[at] ?? '')) at += 1;
+      let value = '';
+      if (html[at] === '=') {
+        at += 1;
+        while (at < html.length && /\s/.test(html[at] ?? '')) at += 1;
+        const quote = html[at] === '"' || html[at] === "'" ? html[at] : '';
+        if (quote) {
+          const end = html.indexOf(quote, at + 1);
+          if (end < 0) return out + html.slice(from);
+          value = html.slice(at + 1, end);
+          at = end + 1;
+        } else {
+          const valueStart = at;
+          while (at < html.length && !/[\s>]/.test(html[at] ?? '')) at += 1;
+          value = html.slice(valueStart, at);
+        }
+      }
+      if (name === 'src' && src === undefined) src = value;
+      if (name === 'alt' && alt === undefined) alt = value;
+    }
+    if (at === html.length) break;
+    resume = at + 1;
+    if (open[1]?.toLowerCase() !== 'img') continue;
+    const label = decodeEntities(alt ?? '').replace(/[\\[\]\r\n\u0085\u2028\u2029]/g, (char) => {
+      switch (char) {
+        case '\r':
+          return '\\r';
+        case '\n':
+          return '\\n';
+        case '\u0085':
+          return '\\u0085';
+        case '\u2028':
+          return '\\u2028';
+        case '\u2029':
+          return '\\u2029';
+        default:
+          return `\\${char}`;
+      }
+    });
+    const url = printUrl(decodeEntities(src ?? ''));
+    const reference = url ? `![${label}](${url})` : label;
+    const protectedReference = reference
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    out += html.slice(from, open.index) + protectedReference;
+    from = at + 1;
+  }
+  return out + html.slice(from);
+}
+
 /**
  * An anchor as `label <url>`, entity-encoded (`&lt;url&gt;`, `&` as `&amp;`)
  * so the tag strip after it cannot remove the autolink; the final decode
@@ -293,7 +362,8 @@ function joinCells(line: string): string {
 /**
  * Convert portal HTML to plain text: tags dropped; `<p>`, `<br>`, `<li>`,
  * headings, `<blockquote>` and table rows become line breaks; a row's cells
- * are joined by ` | `; `<a href>` becomes `text <url>`; entities decoded;
+ * are joined by ` | `; `<a href>` becomes `text <url>`; images become literal
+ * `![alt](url)` references (alt alone without a source); entities decoded;
  * blank-line runs collapsed. A bare `<` is encoded as `&lt;` before the first
  * pass: removing a comment, a script or style element, an anchor's tags, or a
  * tag inside an anchor label after a bare `<` can leave it before a letter,
@@ -302,7 +372,9 @@ function joinCells(line: string): string {
  */
 export function htmlToText(html: string): string {
   const encoded = html.replace(BARE_LT, '&lt;');
-  const anchored = replaceAnchors(dropScripts(dropComments(encoded)).replace(/\s+/g, ' '));
+  const anchored = replaceAnchors(
+    replaceImages(dropScripts(dropComments(encoded))).replace(/\s+/g, ' '),
+  );
   const lines = splitTags(anchored.replace(/<br\s*\/?>/gi, '\n'), BLOCK_TAG).join('\n');
   const text = stripTags(lines.split('\n').map(joinCells).join('\n'));
   return decodeEntities(text)

@@ -136,7 +136,7 @@ const RunSeenSchema = z
       .string()
       .optional()
       .describe(
-        'Recid of the HLT menu record (Supplementaries::Configuration HLT), when linked; cern_opendata_get_records reads it.',
+        'Linked HLT-menu recid (Supplementaries::Configuration HLT); read with cern_opendata_get_records.',
       ),
   })
   .describe('A run where the path was seen online, with the HLT menu in use.');
@@ -164,13 +164,13 @@ const TriggerSchema = z
       .string()
       .optional()
       .describe(
-        'Primary dataset named in the title, such as SingleMu, when the title names exactly one; absent when it names several (see datasets).',
+        'Title dataset (e.g. SingleMu) only if exactly one is named; absent for several (see datasets).',
       ),
     datasets: z
       .array(z.string().describe('One primary dataset name.'))
       .optional()
       .describe(
-        'Every primary dataset the title names, in order, such as ["DoubleMu", "DoubleMuParked"]; absent when it names none.',
+        'All title datasets in order (e.g. ["DoubleMu", "DoubleMuParked"]); absent when none named.',
       ),
     year: z.string().optional().describe('Data-taking year the record covers.'),
     first_seen: RunSeenSchema.optional().describe('First run the path was seen online.'),
@@ -203,7 +203,7 @@ const SearchTriggerPathsOutput = z.object({
   has_more: z
     .boolean()
     .describe(
-      'True when the next page holds matches and lies within the first 10,000. False on the last reachable page even when more matches exist; truncated and notice say so.',
+      'Next page has matches within the first 10,000; false at the reachable end even if more exist (see truncated/notice).',
     ),
   triggers: z.array(TriggerSchema).describe('Matching trigger path records on this page.'),
 });

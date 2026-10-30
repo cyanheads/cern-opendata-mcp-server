@@ -20,7 +20,7 @@ export const AvailabilityCountsSchema = z
       .optional()
       .describe("Files on tape, requested on the record's portal page before download."),
   })
-  .describe('File counts by availability state, as the portal reports them.');
+  .describe('Portal-reported file availability counts.');
 
 /** A record's type: `{ primary, secondary[] }`. */
 export const RecordTypeSchema = z
@@ -28,13 +28,13 @@ export const RecordTypeSchema = z
     primary: z
       .string()
       .describe(
-        'Primary type: Dataset, Software, Environment, Documentation, Supplementaries or News. Empty when the record states none.',
+        'Dataset, Software, Environment, Documentation, Supplementaries or News; empty when unstated.',
       ),
     secondary: z
       .array(z.string().describe('One secondary type.'))
-      .describe('Secondary types, such as Collision or Simulated; empty when none.'),
+      .describe('Secondary types (Collision, Simulated, etc.); empty when none.'),
   })
-  .describe('Record type as the portal classifies it.');
+  .describe('Portal record classification.');
 
 /**
  * A record type for an inline slot, `Dataset (Collision, Derived)`: the
@@ -49,27 +49,21 @@ export function renderRecordType({ primary, secondary }: z.infer<typeof RecordTy
 /** The Record shape (one `cern_opendata_get_records` entry, or the record resource). */
 export const RecordSchema = z
   .object({
-    id: z
-      .string()
-      .describe('Portal id: the recid for records, the slug for documentation and news.'),
-    kind: z
-      .enum(['record', 'doc'])
-      .describe('doc for documentation and news pages (they carry a slug), record otherwise.'),
+    id: z.string().describe('Portal id: recid for records, slug for docs and news.'),
+    kind: z.enum(['record', 'doc']).describe('doc for docs and news (slug); record otherwise.'),
     recid: z
       .string()
       .optional()
-      .describe(
-        'Record id: digits (6004), or an experiment prefix and digits (atlas-160006); absent on docs and news.',
-      ),
+      .describe('Recid: digits (6004) or prefixed digits (atlas-160006); absent on docs and news.'),
     slug: z.string().optional().describe('Documentation or news slug; absent on records.'),
     matched_inputs: z
       .array(z.string().describe('One input id.'))
-      .describe('The requested ids that resolved to this record, as given.'),
+      .describe('Requested ids resolving here, as given.'),
     title: z.string().optional().describe('Title as the portal states it.'),
     title_additional: z
       .string()
       .optional()
-      .describe('Descriptive secondary title; used in the citation when present.'),
+      .describe('Secondary title; included in the citation when present.'),
     type: RecordTypeSchema,
     experiment: z
       .array(z.string().describe('One experiment name.'))
@@ -78,7 +72,7 @@ export const RecordSchema = z
     collections: z
       .array(z.string().describe('One collection name.'))
       .optional()
-      .describe('Portal collections, exact and case-sensitive (the search collection filter).'),
+      .describe('Exact, case-sensitive collections for the search collection filter.'),
     date_created: z
       .array(z.string().describe('One year or date.'))
       .optional()
@@ -90,7 +84,7 @@ export const RecordSchema = z
     run_numbers: z
       .array(z.string().describe('One run number.'))
       .optional()
-      .describe('Run numbers the record covers, as strings.'),
+      .describe('Covered run numbers, as strings.'),
     collaboration: z
       .object({
         name: z.string().describe('Collaboration name.'),
@@ -128,9 +122,9 @@ export const RecordSchema = z
         size_in_bytes: z.number().optional().describe('Total size in bytes.'),
       })
       .optional()
-      .describe('Distribution summary: formats, events, files and size.'),
+      .describe('Formats, event/file counts and byte size.'),
     availability_details: AvailabilityCountsSchema.optional().describe(
-      'File counts by availability state (online, on demand), as the portal reports them.',
+      'Portal-reported online/on-demand file counts.',
     ),
     abstract_html: z.string().optional().describe('Abstract, HTML as the portal sent it.'),
     methodology_html: z.string().optional().describe('Methodology, HTML as the portal sent it.'),
@@ -148,7 +142,7 @@ export const RecordSchema = z
       .string()
       .optional()
       .describe(
-        'Simulated data: how pile-up events were mixed in, HTML as the portal sent it; the pile-up datasets are in links with source pileup.',
+        'Pile-up mixing, original HTML; pile-up datasets appear in links with source pileup.',
       ),
     links: z
       .array(
@@ -168,9 +162,7 @@ export const RecordSchema = z
           })
           .describe('One link.'),
       )
-      .describe(
-        'Links from the abstract, note, usage, validation, use_with and pile-up sections and software links; empty when none.',
-      ),
+      .describe('Metadata and software links, with origin in source; empty when none.'),
     relations: z
       .array(
         z
@@ -178,7 +170,7 @@ export const RecordSchema = z
             type: z
               .string()
               .describe(
-                'Relation type as the portal states it (isParentOf, isChildOf, isRelatedTo); the portal applies it inconsistently.',
+                'Portal relation (isParentOf, isChildOf, isRelatedTo), inconsistently applied upstream.',
               ),
             recid: z.string().optional().describe('Related record id.'),
             doi: z.string().optional().describe('Related record DOI.'),
@@ -213,7 +205,7 @@ export const RecordSchema = z
           .describe('Environment description, HTML as the portal sent it.'),
       })
       .optional()
-      .describe('Software environment summary; cern_opendata_get_analysis_env expands it.'),
+      .describe('Software environment; cern_opendata_get_analysis_env expands it.'),
     source_code_repository_url: z.string().optional().describe('Source code repository URL.'),
     dataset_semantics: z
       .object({
@@ -222,7 +214,7 @@ export const RecordSchema = z
       })
       .optional()
       .describe(
-        'Pages describing the dataset variables, on the portal; a record with an inline dictionary carries variables instead.',
+        'Portal variable-description pages; inline dictionaries appear in variables instead.',
       ),
     variables: z
       .array(
@@ -239,13 +231,13 @@ export const RecordSchema = z
           .describe('One variable.'),
       )
       .optional()
-      .describe('The variable dictionary of a derived or event-level dataset, every entry.'),
+      .describe('Complete variable dictionary of a derived or event-level dataset.'),
     category: z
       .object({
         primary: z
           .string()
           .describe(
-            'Physics category, such as Standard Model Physics or Higgs, exactly as stored (the search category filter).',
+            'Exact physics category for the search category filter (Standard Model Physics, Higgs, etc.).',
           ),
         secondary: z
           .array(z.string().describe('One subcategory.'))
@@ -268,7 +260,7 @@ export const RecordSchema = z
         version: z.string().optional().describe('Stripping version, such as stripping21r1.'),
       })
       .optional()
-      .describe('LHCb datasets and stripping pages: the stripping stream and version.'),
+      .describe('LHCb dataset/stripping-page stream and version.'),
     short_description: z
       .string()
       .optional()
@@ -278,34 +270,34 @@ export const RecordSchema = z
       .string()
       .optional()
       .describe(
-        'Docs and news: the page body (markdown), at most 30,000 characters (UTF-16 code units) from body_offset.',
+        'Docs/news markdown: up to 30,000 characters (UTF-16 code units) from body_offset.',
       ),
     body_format: z.string().optional().describe('Docs and news: body format, such as md.'),
     body_length: z
       .number()
       .optional()
-      .describe('Docs and news: length of the whole body in characters (UTF-16 code units).'),
+      .describe('Whole docs/news body length in UTF-16 code units.'),
     body_offset: z
       .number()
       .optional()
-      .describe('Docs and news: where this body slice starts in the whole body; 0 for its start.'),
+      .describe('Docs/news slice start in UTF-16 code units; 0 is the body start.'),
     body_next_offset: z
       .number()
       .optional()
       .describe(
-        'Docs and news: where the rest of the body starts, present only when more follows; pass it as body_offset with this id alone to continue.',
+        'Next docs/news slice start; absent at end. Pass as body_offset with this id alone to continue.',
       ),
     body_truncated: z
       .boolean()
       .optional()
-      .describe('Docs and news: true when more body follows this slice (see body_next_offset).'),
+      .describe('More docs/news body follows; continue at body_next_offset.'),
     license: z
       .object({
         id: z.string().optional().describe('SPDX-style license id, such as CC0-1.0.'),
         basis: z
           .enum(['record', 'cern_terms_default', 'not_stated'])
           .describe(
-            'record: stated on the record; cern_terms_default: a Dataset with no license of its own, CC0 under the CERN Open Data Terms of Use; not_stated: no license stated.',
+            'record: explicit license; cern_terms_default: Dataset without its own license, CC0 under CERN Open Data Terms of Use; not_stated: unstated.',
           ),
         statement: z.string().describe('The license statement to relay.'),
       })
@@ -320,4 +312,4 @@ export const RecordSchema = z
       .describe('Citation; present only when the record has a DOI.'),
     portal_url: z.string().describe('The record or documentation page on opendata.cern.ch.'),
   })
-  .describe('One record with its metadata, license and citation; file lists are not included.');
+  .describe('Record metadata, license and citation; no file lists.');

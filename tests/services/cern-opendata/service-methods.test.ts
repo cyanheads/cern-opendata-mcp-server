@@ -832,22 +832,65 @@ describe('lookup cache', () => {
     it('serves a hit nested too deeply to measure uncached, never failing the lookup', async () => {
       const depth = 200_000;
       const body = `{"hits":{"total":1,"hits":[{"id":"7","metadata":{"recid":"7","title":"Deep","nested":${'['.repeat(depth)}${']'.repeat(depth)}}}]}}`;
+      let requests = 0;
       const { service, http, ctx } = makeService([
-        searchRoute(() => new Response(body, { headers: { 'content-type': 'application/json' } })),
+        searchRoute(
+          () =>
+            new Response(
+              ++requests === 1
+                ? body
+                : '{"hits":{"total":1,"hits":[{"id":"7","metadata":{"recid":"7","title":"Refetched"}}]}}',
+              { headers: { 'content-type': 'application/json' } },
+            ),
+        ),
       ]);
-      const result = await lookupOf(service, ctx, '7');
-      expect(result.matches.map((m) => [m.hit.id, m.hit.metadata.title])).toEqual([['7', 'Deep']]);
-      // Stored only where the runtime can measure the parsed hit: Node can, Bun's JSON.stringify overflows.
-      const measurable = (() => {
-        try {
-          JSON.stringify(JSON.parse(body));
-          return true;
-        } catch {
-          return false;
+      const stringify = JSON.stringify.bind(JSON);
+      let measured = false;
+      let overflowed = false;
+      const spy = vi
+        .spyOn(JSON, 'stringify')
+        .mockImplementation(
+          (value: unknown, replacer?: (number | string)[] | null, space?: string | number) => {
+            const deepHit =
+              value !== null &&
+              typeof value === 'object' &&
+              'metadata' in value &&
+              value.metadata !== null &&
+              typeof value.metadata === 'object' &&
+              'nested' in value.metadata;
+            if (deepHit) measured = true;
+            try {
+              return stringify(value, replacer, space);
+            } catch (error) {
+              if (deepHit && error instanceof RangeError) overflowed = true;
+              throw error;
+            }
+          },
+        );
+      try {
+        const result = await lookupOf(service, ctx, '7');
+        expect(result.matches.map((m) => [m.hit.id, m.hit.metadata.title])).toEqual([
+          ['7', 'Deep'],
+        ]);
+        const metadata = result.matches[0]?.hit.metadata;
+        if (!metadata || !('nested' in metadata)) throw new Error('Expected nested metadata.');
+        let nested: unknown = metadata.nested;
+        for (let level = 1; level < depth; level++) {
+          if (!Array.isArray(nested) || nested.length !== 1) {
+            throw new Error(`Expected nested array at level ${level}.`);
+          }
+          nested = nested[0];
         }
-      })();
-      await lookupOf(service, ctx, '7');
-      expect(http.calls).toHaveLength(measurable ? 1 : 2);
+        expect(nested).toEqual([]);
+        expect(measured).toBe(true);
+        const repeated = await lookupOf(service, ctx, '7');
+        expect(repeated.matches.map((m) => [m.hit.id, m.hit.metadata.title])).toEqual([
+          ['7', overflowed ? 'Refetched' : 'Deep'],
+        ]);
+        expect(http.calls).toHaveLength(overflowed ? 2 : 1);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('serves a hit uncached when serializing it throws RangeError, on any runtime', async () => {

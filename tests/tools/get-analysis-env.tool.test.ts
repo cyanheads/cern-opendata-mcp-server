@@ -191,9 +191,16 @@ describe('cern_opendata_get_analysis_env registration', () => {
   });
 
   it('describes every notice it writes, the anchor fallback included', () => {
-    expect(getAnalysisEnv.enrichment?.notice?.description).toBe(
-      'What could not be assembled and how to get it: an empty environment, linked records that could not be read, guides not fetched, not found or cut, a guide anchor no heading carries, or more linked records than shown.',
-    );
+    const notice = getAnalysisEnv.enrichment?.notice?.description;
+    for (const gap of [
+      /next steps/,
+      /empty environment/,
+      /unread or excess linked records/,
+      /unfetched\/missing\/cut guides/,
+      /unmatched guide anchors/,
+      /absent when none/,
+    ])
+      expect(notice).toMatch(gap);
   });
 
   it('describes a quoted section with the LF line ends it is joined with', () => {
@@ -204,9 +211,11 @@ describe('cern_opendata_get_analysis_env registration', () => {
       guide && typeof guide === 'object' && !Array.isArray(guide)
         ? guide.properties?.section
         : undefined;
-    expect(typeof section === 'object' ? section.description : undefined).toBe(
-      'The linked section (or the opening section) as markdown, as the portal sent it but with LF line ends; at most 12,000 characters.',
-    );
+    const description = typeof section === 'object' ? section.description : undefined;
+    expect(description).toMatch(/linked or opening section/i);
+    expect(description).toMatch(/original markdown/);
+    expect(description).toMatch(/LF line ends/);
+    expect(description).toMatch(/up to 12,000 characters/);
   });
 });
 
@@ -1393,6 +1402,23 @@ describe('cern_opendata_get_analysis_env errors on the wire', () => {
 });
 
 describe('cern_opendata_get_analysis_env format', () => {
+  it('keeps software description image HTML and its fenced reference on the two surfaces', async () => {
+    const html = '<img src="/environment.png" alt="Environment">';
+    serve({
+      records: {
+        '9300': hit(9300, {
+          recid: '9300',
+          title: 'Images',
+          system_details: { description: html },
+        }),
+      },
+    });
+    const result = await run({ recid: '9300' });
+    expect(success(result).software?.description).toBe(html);
+    expect(textOf(result)).toContain(
+      '**Environment description:**\n```\n![Environment](https://opendata.cern.ch/environment.png)\n```',
+    );
+  });
   it('renders every field of the result with its values', async () => {
     serve({
       docs: DOCS,

@@ -26,9 +26,7 @@ export function listEnrichment(totalDescription: string) {
     notice: z
       .string()
       .optional()
-      .describe(
-        'Guidance for the next call: how to page on, why nothing matched and what to change, or a caveat about the results.',
-      ),
+      .describe('Continuation, empty-result guidance or result caveats; absent when none.'),
   };
 }
 

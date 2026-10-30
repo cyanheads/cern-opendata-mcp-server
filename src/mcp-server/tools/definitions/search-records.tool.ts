@@ -390,28 +390,28 @@ export const searchRecords = tool('cern_opendata_search_records', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: blankAsUnset(z.string().max(500).optional()).describe(
-      'Full-text query, sent verbatim as an OpenSearch query_string (AND between terms; title matches weigh double). Field forms such as title:"…", recid:(1 OR 2) or run_period:("Run2012B") work; cern_opendata_list_reference with topic query_syntax lists them. Omit to browse by filters alone.',
+      'Verbatim OpenSearch query_string: AND between terms, double weight for title matches. Supports title:"…", recid:(1 OR 2), run_period:("Run2012B"); cern_opendata_list_reference topic query_syntax lists forms. Omit for filters alone.',
     ),
     type: vocabularyListInput('type', 7).describe(
-      'Record types (OR): a primary (Dataset, Documentation, Environment, Software, Supplementaries, News) or Primary::Secondary such as Dataset::Collision or Dataset::Simulated. Up to 7. Omit for every served type; Glossary is not served.',
+      'Up to 7 types (OR): Dataset, Documentation, Environment, Software, Supplementaries, News, or Primary::Secondary (Dataset::Collision, Dataset::Simulated). Omit for all six primaries; Glossary is excluded.',
     ),
     experiment: vocabularyListInput('experiment', 9).describe(
-      'Experiments (OR): ALICE, ATLAS, CMS, DELPHI, JADE, LHCb, OPERA, PHENIX, TOTEM. Up to 9; case is normalized.',
+      'Up to 9 experiments (OR): ALICE, ATLAS, CMS, DELPHI, JADE, LHCb, OPERA, PHENIX, TOTEM. Case normalized.',
     ),
     collision_energy: vocabularyListInput('collision_energy', 15).describe(
-      'Collision energies (OR), such as 7TeV, 8TeV, 13TeV or 5.02TeV. Up to 15; "13TeV, 13.6TeV" is one upstream value and one item.',
+      'Up to 15 energies (OR), e.g. 7TeV, 8TeV, 13TeV, 5.02TeV. "13TeV, 13.6TeV" is one value/item.',
     ),
     collision_type: vocabularyListInput('collision_type', 6).describe(
-      'Collision types (OR): pp, PbPb, pPb, e+e-, Interfill. PbPb also matches the Pb-Pb spelling. Up to 6.',
+      'Up to 6 collision types (OR): pp, PbPb, pPb, e+e-, Interfill. PbPb also matches Pb-Pb.',
     ),
     file_type: vocabularyListInput('file_type', 20).describe(
-      'File formats and data tiers (OR), such as nanoaod, miniaod, aod, root, DAOD_PHYSLITE or csv. Up to 20; case is normalized for known values.',
+      'Up to 20 formats/data tiers (OR): nanoaod, miniaod, aod, root, DAOD_PHYSLITE, csv, etc. Known-value case normalized.',
     ),
     year_from: blankAsUnset(z.number().int().min(1900).max(2100).optional()).describe(
-      'Earliest data-taking year, inclusive. Alone, it means this year onward; for one year, set year_from and year_to to it.',
+      'Inclusive earliest data-taking year; alone means onward. For one year, set both year bounds to it.',
     ),
     year_to: blankAsUnset(z.number().int().min(1900).max(2100).optional()).describe(
-      'Latest data-taking year, inclusive. Alone, it means up to this year.',
+      'Inclusive latest data-taking year; alone means through this year.',
     ),
     min_events: blankAsUnset(z.number().int().min(0).optional()).describe(
       'Minimum number of events, inclusive.',
@@ -420,31 +420,31 @@ export const searchRecords = tool('cern_opendata_search_records', {
       'Maximum number of events, inclusive.',
     ),
     availability: vocabularyListInput('availability', 4).describe(
-      'Record availability (OR): online, partial, ondemand (on tape, requested before download) or requested. Up to 4.',
+      'Up to 4 availability states (OR): online, partial, ondemand (tape; request before download), requested.',
     ),
     collection: listInput(
       10,
       z.string().max(100).describe('One collection name, exact and case-sensitive.'),
     ).describe(
-      "Portal collections (OR), exact and case-sensitive, such as CMS-Validated-Runs; copy spellings from a record's collections field. Up to 10.",
+      "Up to 10 exact, case-sensitive collections (OR), e.g. CMS-Validated-Runs; copy a record's collections spellings.",
     ),
     category: vocabularyListInput('category', 20).describe(
-      'Physics categories of simulated datasets (OR): a primary such as Exotica, Higgs Physics, Standard Model Physics or Supersymmetry, or Primary::Secondary such as Higgs Physics::Standard Model. Up to 20; case and the separator are normalized, and a value holding a comma (Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos) is one item. Heavy-Ion Physics also matches its leading-space spelling. cern_opendata_list_reference topic categories lists every value.',
+      'Up to 20 simulated-dataset categories (OR): primary (Exotica, Higgs Physics, Standard Model Physics, Supersymmetry) or Primary::Secondary (Higgs Physics::Standard Model). Case/separator normalized. Commas stay within an item (Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos). Heavy-Ion Physics also matches its leading-space spelling. cern_opendata_list_reference topic categories lists all values.',
     ),
     keywords: listInput(
       10,
       z.string().max(100).describe('One keyword, exact and case-sensitive.'),
     ).describe(
-      'Record keywords (OR), exact and case-sensitive (Education and education differ), sent as given. Up to 10; a keyword holding a comma is one item.',
+      'Up to 10 verbatim, case-sensitive keywords (OR); Education differs from education. A comma within a keyword stays in one item.',
     ),
     magnet_polarity: vocabularyListInput('magnet_polarity', 2).describe(
-      'LHCb magnet polarities (OR): MagDown or MagUp, set on LHCb collision datasets. Up to 2; case is normalized.',
+      'Up to 2 LHCb collision-dataset polarities (OR): MagDown, MagUp. Case normalized.',
     ),
     stripping_stream: vocabularyListInput('stripping_stream', 11).describe(
-      'LHCb stripping streams (OR), such as BHADRON, CHARM, DIMUON, EW or LEPTONIC; they also match LHCb stripping documentation. Up to 11; case is normalized. cern_opendata_list_reference topic lhcb lists them.',
+      'Up to 11 LHCb stripping streams (OR), e.g. BHADRON, CHARM, DIMUON, EW, LEPTONIC; also matches stripping docs. Case normalized. cern_opendata_list_reference topic lhcb lists them.',
     ),
     stripping_version: vocabularyListInput('stripping_version', 12).describe(
-      'LHCb stripping versions (OR), such as stripping21 or stripping21r1p2. Up to 12; case is normalized.',
+      'Up to 12 LHCb stripping versions (OR), e.g. stripping21, stripping21r1p2. Case normalized.',
     ),
     sort: blankAsUnset(z.enum(SORTS).optional()).describe(
       'bestmatch (relevance), mostrecent (by date_published, newest first), title (A-Z) or title_desc (Z-A). Omitted: bestmatch with a query, mostrecent (newest first) without.',
@@ -462,7 +462,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     has_more: z
       .boolean()
       .describe(
-        'True when the next page holds matches and lies within the first 10,000. False on the last reachable page even when more matches exist; truncated and notice say so.',
+        'Next page has matches within the first 10,000; false at the reachable end even if more exist (see truncated/notice).',
       ),
     facets: z
       .object({
@@ -487,7 +487,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
         stripping_version: facetSchema('Matches by LHCb stripping version.', BucketSchema),
       })
       .describe(
-        'Live facet counts. Each facet ignores its own filter, so its counts show the alternatives under the other filters. Terms facets list the first 10 values alphabetically (file_type up to 100), and type and category buckets their first 10 secondary values. other_count, subtypes_other_count and subcategories_other_count sum the counts of the values past those caps, so a record holding several of them counts once per value; other_count is 0 for year and number_events. cern_opendata_list_reference topics record_types and categories list every secondary value, and a Primary::Secondary type or category filter returns its record count as totalCount.',
+        'Live counts under all other filters: each facet ignores its own filter. Terms list 10 values alphabetically (file_type: 100); type and category buckets list 10 secondary values. Overflow fields sum counts past these caps, counting a record once per value; other_count is 0 for year and number_events. cern_opendata_list_reference topics record_types/categories list all secondary values; a Primary::Secondary filter gives its record count as totalCount.',
       ),
   }),
   enrichment: {

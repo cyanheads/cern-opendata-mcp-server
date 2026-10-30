@@ -142,9 +142,14 @@ describe('cern_opendata_get_records registration', () => {
     const output = z.toJSONSchema(getRecords.output, { unrepresentable: 'any' }) as {
       properties: Record<string, { description?: string }>;
     };
-    expect(output.properties.deferred?.description).toBe(
-      'Inputs left for another call, in input order: those whose records were left out to hold the response to 64,000 bytes (never the first record, which is returned whole even when larger), then ids past the first 20, which were not looked up. Pass them as ids to fetch them. Empty when nothing was left out.',
+    const deferred = output.properties.deferred?.description;
+    expect(deferred).toMatch(
+      /budget.*records.*input order.*then ids past the first 20.*not looked up/i,
     );
+    expect(deferred).toMatch(/64,000 bytes/);
+    expect(deferred).toMatch(/first record.*whole.*larger/i);
+    expect(deferred).toMatch(/pass.*ids.*fetch/i);
+    expect(deferred).toMatch(/empty when none/i);
     expect(getRecords.description).toContain(
       ' Each response holds to 64,000 bytes, except that the first record always comes back whole: records past the budget, and ids past the first 20, are listed under deferred, to pass back as ids. ',
     );
@@ -964,6 +969,29 @@ describe('cern_opendata_get_records format', () => {
     return { data: success(result), text: textOf(result) };
   }
 
+  it('keeps image HTML unchanged and references inert across record renderers', async () => {
+    const html = '<a href="/badge"><img alt="Plot" src="/plot.png"></a>';
+    const record = hit(9209, {
+      recid: '9209',
+      title: 'Images',
+      abstract: { description: html },
+      system_details: { description: html },
+      dataset_semantics: [{ variable: 'plot', description: html }],
+    });
+    const { data, text } = await recordText([record], '9209');
+    expect(data.records[0]).toMatchObject({
+      abstract_html: html,
+      system_details: { description: html },
+      variables: [{ variable: 'plot', description_html: html }],
+    });
+    const reference = '![Plot](https://opendata.cern.ch/plot.png) <https://opendata.cern.ch/badge>';
+    expect(text).toContain(`### Abstract\n\`\`\`\n${reference}\n\`\`\``);
+    expect(text).toContain(`Environment description:\n\`\`\`\n${reference}\n\`\`\``);
+    expect(text).toContain(
+      '| plot | !\\[Plot\\](https://opendata.cern.ch/plot.png) &lt;https://opendata.cern.ch/badge&gt; |',
+    );
+  });
+
   it('renders a one-byte size in the singular', async () => {
     const tiny = hit(9100, { recid: '9100', title: 'Tiny', distribution: { size: 1 } });
     const { text } = await recordText([tiny], '9100');
@@ -1487,6 +1515,27 @@ const runArgs = (args: { body_offset?: unknown; ids: unknown }) =>
   runToolContract(getRecords, args as never);
 
 describe('cern_opendata_get_records response budget', () => {
+  it('budgets expanded image references with an ordered continuation and a whole first record', async () => {
+    const html = '<img src=/x>'.repeat(2_400);
+    servePool([
+      hit(9300, { recid: '9300', title: 'First' }),
+      hit(9301, { recid: '9301', title: 'Images', abstract: { description: html } }),
+      hit(9302, { recid: '9302', title: 'Last' }),
+    ]);
+    const first = await run(['9300', '9301', '9302']);
+    expect(success(first).records.map((record) => record.id)).toEqual(['9300']);
+    expect(success(first).deferred).toEqual(['9301', '9302']);
+    expect(surfaces(first).text).toBeLessThanOrEqual(BUDGET);
+    const second = await run(success(first).deferred);
+    expect(success(second).records.map((record) => record.id)).toEqual(['9301']);
+    expect(success(second).records[0]?.abstract_html).toBe(html);
+    expect(textOf(second).match(/!\[\]\(https:\/\/opendata.cern.ch\/x\)/g)).toHaveLength(2_400);
+    expect(surfaces(second).text).toBeGreaterThan(BUDGET);
+    expect(success(second).deferred).toEqual(['9302']);
+    const third = success(await run(success(second).deferred));
+    expect(third.records.map((record) => record.id)).toEqual(['9302']);
+    expect(third.deferred).toEqual([]);
+  });
   const pool = [
     variablesHit12220,
     largeVariablesHit12320,

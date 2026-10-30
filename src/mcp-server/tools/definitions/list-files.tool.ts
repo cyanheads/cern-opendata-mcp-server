@@ -144,7 +144,7 @@ const FileSchema = z
       .string()
       .optional()
       .describe(
-        'File key as the portal states it; index members read <index>.json_<n>. Absent when the portal lists the file without one; filename then names it.',
+        'Portal file key; index members use <index>.json_<n>. Absent for keyless files, named by filename instead.',
       ),
     filename: z.string().optional().describe('Real file name, for index members.'),
     size_in_bytes: z.number().describe('File size in bytes.'),
@@ -168,21 +168,15 @@ const IndexSchema = z
     key: z
       .string()
       .describe(
-        'Index key (…_file_index.json, or a name such as training_files.json); pass it as index to page its files.',
+        'Index key (…_file_index.json, training_files.json, etc.); pass as index to page its files.',
       ),
     description: z.string().optional().describe('Index description as the portal states it.'),
-    number_files: z
-      .number()
-      .describe(
-        'Files in the index, as the portal states it, else the count of the files the index lists.',
-      ),
+    number_files: z.number().describe('Portal file count, else count of listed index files.'),
     size_in_bytes: z
       .number()
-      .describe(
-        "Total size of the index files in bytes, as the portal states it, else the sum of the listed files' sizes.",
-      ),
+      .describe('Index size in bytes: portal total, else sum of listed file sizes.'),
     availability: AvailabilityCountsSchema.describe(
-      'File counts by availability state, as the portal states them; empty ({}) when it states none.',
+      'Portal availability counts; {} when unstated.',
     ),
     uri_list_url: z
       .string()
@@ -209,14 +203,10 @@ const ListFilesOutput = z.object({
     .describe('Every file index in record scope; only the selected one in index scope.'),
   files: z
     .array(FileSchema)
-    .describe(
-      "This page of files: regular files in record scope, the index's files in index scope.",
-    ),
+    .describe('This page: regular files in record scope, index files in index scope.'),
   children: z
     .array(z.string().describe('One child recid.'))
-    .describe(
-      'Set only for an umbrella record holding no files itself: the child recids whose files make it up. Empty otherwise.',
-    ),
+    .describe('Child recids of a fileless umbrella record; empty otherwise.'),
   has_more: z.boolean().describe('True when more files remain past this page.'),
   next_cursor: z
     .string()

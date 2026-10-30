@@ -82,7 +82,7 @@ export function expectLinearTime<T>(
 /**
  * Asserts `run(make(size))` takes time linear in `size` from `from` to `to`
  * (default 5,000 to 320,000, a 64x span; `to` must be `from` times a power of
- * two). The size doubles, and each size's fastest per-call thread CPU time is
+ * two). The size doubles, and a warmed call's thread CPU time at each size is
  * held under `maxMs` before the next is built, so a superlinear shape fails
  * where it first overruns instead of running the largest. The smallest and
  * largest are then timed in the same rounds and their ratio held under four
@@ -95,7 +95,9 @@ export function expectLinearGrowth<T>(
   { from = 5_000, to = 320_000, maxMs }: { from?: number; to?: number; maxMs: number },
 ): void {
   for (let size = from; size <= to; size *= 2) {
-    const [ms = 0] = perCallCpuMs(run, [make(size)]);
+    const input = make(size);
+    run(input);
+    const ms = cpuMs(() => run(input));
     expect(ms, `${size}`).toBeLessThan(maxMs);
   }
   const [tSmall = 0, tLarge = 0] = perCallCpuMs(run, [make(from), make(to)]);

@@ -49,7 +49,7 @@ describe('cern_opendata_list_reference registration', () => {
   it('describes an entry value as a name, not an accepted spelling, in identifiers and licensing', () => {
     const json = JSON.stringify(z.toJSONSchema(listReference.output, { unrepresentable: 'any' }));
     expect(json).toContain(
-      'A value or query form, spelled exactly as the tools accept it; in the identifiers and licensing topics, the name of an identifier form or a licensing rule.',
+      'Exact accepted value/query form; identifiers and licensing instead name identifier forms and licensing rules.',
     );
     const valuesOf = (topic: string) =>
       REFERENCE_TABLES.find((table) => table.topic === topic)?.entries.map((entry) => entry.value);
