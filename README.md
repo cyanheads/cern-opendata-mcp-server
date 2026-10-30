@@ -1,13 +1,13 @@
 <div align="center">
-  <h1>@cyanheads/cern-opendata-mcp-server</h1>
+  <h1>cern-opendata-mcp-server</h1>
   <p><b>Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths via MCP. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 1 Resource</div>
+  <div>7 Tools • 1 Record Resource • 1 Agent Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-opendata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-opendata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-opendata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cern-opendata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cern-opendata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cern-opendata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -50,6 +50,10 @@ Particle-physics data from the CERN Open Data Portal: collision and simulated da
 | `cern-opendata://record/{recid}` | One record's metadata, license and citation, in the `cern_opendata_get_records` record shape |
 
 Tool-only clients get the same data from `cern_opendata_get_records`.
+
+### Agent skill
+
+[`cern-opendata-guide`](./skills/cern-opendata-guide/SKILL.md) connects dataset discovery, file indexes, analysis environments, CMS certification and trigger evidence. It covers identifier sources and checks to make before treating a result as complete. The guide ships with plugin installs, npm, Docker and the Claude Desktop bundle. MCP clients can discover it through the Skills extension and its SDK-generated skill resources, alongside the record resource above. No prompts are registered.
 
 ## Capability reference
 
@@ -131,6 +135,8 @@ CERN Open Data-specific:
 
 Agent-friendly output:
 
+HTML image sources and alt text survive as literal `![alt](url)` references within the existing fenced or escaped text rendering; they do not become active image embeds. Original HTML remains available in `structuredContent`.
+
 - Provenance on every response: `portal_url` on each hit and record, a `license` with its `basis`, a DOI `citation`, and `applied_filters` or `effectiveQuery` echoing what ran
 - Graceful partial results: unresolved ids land under `missing` with guidance, and unreadable linked records or guides in `cern_opendata_get_analysis_env` surface as a `notice` rather than a failure
 - Discriminated outputs: `kind`, `license.basis`, `interpreted_as`, `scope`, `variant`, `run_bounds.source` and `parsed` let callers branch on data, not string parsing
@@ -155,113 +161,34 @@ This server is an independent project and is not affiliated with or endorsed by 
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://cern-opendata.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "cern-opendata-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://cern-opendata.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http cern-opendata-mcp-server https://cern-opendata.caseyjhand.com/mcp
 ```
 
 Every caller of the hosted instance shares one portal request budget of 50 requests a minute. For sustained use, run your own instance.
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "cern-opendata-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/cern-opendata-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add cern-opendata-mcp-server -- npx -y @cyanheads/cern-opendata-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "cern-opendata-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/cern-opendata-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/cern-opendata-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "cern-opendata-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/cern-opendata-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key or account: the CERN Open Data Portal is public.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/cern-opendata-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd cern-opendata-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# optional: adjust transport, logging, or telemetry settings
-```
+No API key or account is required. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -284,6 +211,16 @@ See [`.env.example`](./.env.example) for the common framework overrides.
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+```sh
+git clone https://github.com/cyanheads/cern-opendata-mcp-server.git
+cd cern-opendata-mcp-server
+bun install
+cp .env.example .env
+# optional: adjust transport, logging, or telemetry settings
+```
+
 - **Build and run the production version**:
 
   ```sh
@@ -302,16 +239,33 @@ See [`.env.example`](./.env.example) for the common framework overrides.
   bun run test      # Runs the test suite
   ```
 
+### Streamable HTTP
+
+```sh
+MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
+# Server listens at http://localhost:3010/mcp
+```
+
+### Docker
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/cern-opendata-mcp-server:latest
+```
+
+The image defaults to HTTP transport, stateless sessions, and logs to `/var/log/cern-opendata-mcp-server`. For stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/cern-opendata-mcp-server:latest"]`. To build locally, run `docker build -t cern-opendata-mcp-server .`; OpenTelemetry peers are installed by default, and `--build-arg OTEL_ENABLED=false` omits them.
+
 ## Project structure
 
 | Directory | Purpose |
 |:---|:---|
-| `src/index.ts` | `createApp()` entry point: registers the tools and resource, sets the server instructions, starts the portal client. |
+| `src/index.ts` | `createApp()` entry point: registers tools, the record resource and published skills, sets server instructions, starts the portal client. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`), shared input helpers and list enrichment. |
 | `src/mcp-server/resources` | The `cern-opendata://record/{recid}` resource definition. |
 | `src/mcp-server/record-schema.ts` | Record output schema shared by `cern_opendata_get_records` and the resource. |
 | `src/services/cern-opendata` | Portal client (pacing, retries, deadline, caches), normalization, vocabulary tables, text rendering, trigger parsing. |
 | `tests/` | Unit and tool tests, mirroring the `src/` structure, run against fixture portal responses. |
+| `skills/` | Published `cern-opendata-guide` for agents calling the tools. |
+| `framework-skills/` | Development skills for agents maintaining the server. |
 | `docs/design.md` | Tool surface, verified portal behavior, and design decisions. |
 
 ## Development guide

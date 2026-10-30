@@ -1,6 +1,6 @@
 # cern-opendata-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 06:22:08
+Generated on: 2026-10-30 09:06:06
 
 ```text
 cern-opendata-mcp-server/
@@ -37,6 +37,8 @@ cern-opendata-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ cern-opendata-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── cern-opendata-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   ├── resources/
@@ -176,6 +181,8 @@ cern-opendata-mcp-server/
 │   ├── integration/
 │   ├── resources/
 │   │   └── record.resource.test.ts
+│   ├── scripts/
+│   │   └── packaging.test.ts
 │   ├── services/
 │   │   └── cern-opendata/
 │   │       ├── guide-markdown.test.ts
@@ -193,6 +200,7 @@ cern-opendata-mcp-server/
 │   ├── smoke/
 │   │   └── definitions.smoke.test.ts
 │   └── tools/
+│       ├── catalog-prose.test.ts
 │       ├── get-analysis-env.tool.test.ts
 │       ├── get-records.tool.test.ts
 │       ├── get-validated-runs.tool.test.ts
@@ -216,7 +224,9 @@ cern-opendata-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
