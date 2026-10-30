@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>cern-opendata-mcp-server</h1>
+  <h1>@cyanheads/cern-opendata-mcp-server</h1>
   <p><b>Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths via MCP. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 1 Record Resource • 1 Agent Skill</div>
   </p>
