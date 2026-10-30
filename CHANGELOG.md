@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-30
+
+Image references survive HTML conversion, schema descriptions are shorter, and a published guide connects the CERN Open Data analysis workflow.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-18
 
 A limit or id batch past a tool's cap is served at the cap, resolved records are cached for 15 minutes, a JSON-stringified list is read as the array, HTML tables render row by row, and guide quotes and facet buckets disclose what they cut.
