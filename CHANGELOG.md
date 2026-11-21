@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-21 · ⚠️ Breaking
+
+CERN searches and file listings return larger pages, and records include published production steps and cross sections.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-30
 
 Image references survive HTML conversion, schema descriptions are shorter, and a published guide connects the CERN Open Data analysis workflow.

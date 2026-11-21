@@ -1,6 +1,6 @@
 {
   "name": "cern-opendata-mcp-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Search CERN Open Data, fetch records, files, analysis environments, CMS good-run lists, HLT paths.",
   "author": {
     "name": "cyanheads",
