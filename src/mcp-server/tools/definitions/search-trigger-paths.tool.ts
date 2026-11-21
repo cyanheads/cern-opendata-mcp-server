@@ -34,10 +34,10 @@ import {
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, LIMIT_CEILING } from '../inputs.js';
+import { blankAsUnset, limitInput } from '../inputs.js';
 
 /** The most path records one page returns; a larger limit is served at it. */
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 625;
 
 /**
  * A path after {@link normalizePathInput}: `HLT_` and at least one name
@@ -294,9 +294,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     year: blankAsUnset(z.number().int().min(2000).max(2100).optional()).describe(
       'Data-taking year, such as 2012. Trigger records cover 2011-2016.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(10)).describe(
-      'Records per page, 1-50. A value above 50 is served at 50.',
-    ),
+    limit: limitInput(10, MAX_LIMIT, 'Records per page'),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
       'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
     ),
@@ -314,7 +312,7 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     {
       reason: 'page_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × limit, the limit applied (at most 50), exceeds 10,000, the deepest match the portal pages to.',
+      when: 'page × the applied limit exceeds 10,000, the deepest match the portal pages to.',
       recovery:
         'Add year or a longer path prefix to narrow the match, then call cern_opendata_search_trigger_paths again from page 1.',
       severity: 'notice',
@@ -342,7 +340,13 @@ export const searchTriggerPaths = tool('cern_opendata_search_trigger_paths', {
     const { path, version } = splitVersion(input.path);
     const forms = searchForms(path);
     const query = pathQuery(path);
-    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT, true);
+    const { limit, fragment: limitFragment } = applyLimit(
+      ctx,
+      'cern_opendata_search_trigger_paths',
+      input.limit,
+      MAX_LIMIT,
+      true,
+    );
     startListEnrichment(ctx, limit);
     ctx.enrich.echo(query);
 

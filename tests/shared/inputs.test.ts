@@ -15,7 +15,7 @@ import {
   unrecognizedValues,
   vocabularyListInput,
 } from '@/mcp-server/tools/inputs.js';
-import { expectLinearGrowth, expectLinearTime } from '../fixtures/cpu-time.js';
+import { cpuTimingOptions, expectLinearGrowth, expectLinearTime } from '../fixtures/cpu-time.js';
 
 const element = z.string().max(100);
 const MEGABYTE_SIZES = [62_500, 250_000, 1_000_000] as const;
@@ -277,11 +277,15 @@ describe('vocabularyListInput', () => {
       expect(category.parse(`,${COMMA_VALUE},`)).toEqual([COMMA_VALUE]);
     });
 
-    it('checks every adjacent pair of a long string for a rejoin in linear time', () => {
-      const make = (n: number) => 'a,'.repeat(n / 2);
-      expect(category.parse(make(80_000))).toEqual(['a']);
-      expectLinearTime(make, (value) => category.safeParse(value), { maxMs: 50 });
-    });
+    it(
+      'checks every adjacent pair of a long string for a rejoin in linear time',
+      cpuTimingOptions,
+      () => {
+        const make = (n: number) => 'a,'.repeat(n / 2);
+        expect(category.parse(make(80_000))).toEqual(['a']);
+        expectLinearTime(make, (value) => category.safeParse(value), { maxMs: 50 });
+      },
+    );
 
     it('treats the array form as separate items, so the comma value can sit beside others', () => {
       expect(category.parse([COMMA_VALUE, 'supersymmetry'])).toEqual([
@@ -414,20 +418,27 @@ describe('a JSON-stringified list', () => {
     expect(ids.parse(repeated)).toEqual(['6004']);
   });
 
-  it('collapses 100 distinct ids repeated in an array, a JSON string or a comma string in linear time', () => {
-    /** Ids `i00`…`i99` repeated over about `n` characters, so every item is checked against a full 100, in each form. */
-    const make = (n: number) => {
-      const items = Array.from({ length: n / 5 }, (_, i) => `i${String(i % 100).padStart(2, '0')}`);
-      return [items, JSON.stringify(items), items.join(',')] as const;
-    };
-    const distinct = Array.from({ length: 100 }, (_, i) => `i${String(i).padStart(2, '0')}`);
-    for (const form of make(100_000)) expect(ids.parse(form)).toEqual(distinct);
-    expectLinearGrowth(make, (forms) => forms.map((form) => ids.safeParse(form)), {
-      from: 2_500,
-      to: 160_000,
-      maxMs: 100,
-    });
-  });
+  it(
+    'collapses 100 distinct ids repeated in an array, a JSON string or a comma string in linear time',
+    cpuTimingOptions,
+    () => {
+      /** Ids `i00`…`i99` repeated over about `n` characters, so every item is checked against a full 100, in each form. */
+      const make = (n: number) => {
+        const items = Array.from(
+          { length: n / 5 },
+          (_, i) => `i${String(i % 100).padStart(2, '0')}`,
+        );
+        return [items, JSON.stringify(items), items.join(',')] as const;
+      };
+      const distinct = Array.from({ length: 100 }, (_, i) => `i${String(i).padStart(2, '0')}`);
+      for (const form of make(100_000)) expect(ids.parse(form)).toEqual(distinct);
+      expectLinearGrowth(make, (forms) => forms.map((form) => ids.safeParse(form)), {
+        from: 2_500,
+        to: 160_000,
+        maxMs: 100,
+      });
+    },
+  );
 
   it('parses only up to the longest JSON a list within its caps can take, and splits a longer string', () => {
     const padded = (length: number) => `["6004",${' '.repeat(length - 15)}"6030"]`;
@@ -451,15 +462,19 @@ describe('a JSON-stringified list', () => {
       ['a string of escapes', (n) => `["${'\\u00e9'.repeat(n / 6)}"]`],
       ['items separated by line breaks', (n) => `[${'"§1 x",\n'.repeat(n / 9)}"y"]`],
       ['an unterminated string of commas', (n) => `["${'a,'.repeat(n / 2)}]`],
-    ])('preprocesses %s in linear time, across the parse bound', (_name, make) => {
-      /**
-       * `category`'s split path looks up every adjacent pair for a rejoin, so it
-       * costs several times its parse path per character and a span across its
-       * 12,686-character bound would time that switch rather than growth; its
-       * rejoin is timed on its own above.
-       */
-      expectLinearGrowth(make, (value) => schema.safeParse(value), { maxMs: 100 });
-    });
+    ])(
+      'preprocesses %s in linear time, across the parse bound',
+      cpuTimingOptions,
+      (_name, make) => {
+        /**
+         * `category`'s split path looks up every adjacent pair for a rejoin, so it
+         * costs several times its parse path per character and a span across its
+         * 12,686-character bound would time that switch rather than growth; its
+         * rejoin is timed on its own above.
+         */
+        expectLinearGrowth(make, (value) => schema.safeParse(value), { maxMs: 100 });
+      },
+    );
   });
 });
 
@@ -591,7 +606,7 @@ describe('preprocessing a megabyte of caller text', () => {
       recidInput(),
       (n) => `https://opendata.cern.ch/record/${'a'.repeat(n)}-x`,
     ],
-  ])('rejects %s in linear time', (_name, schema, make) => {
+  ])('rejects %s in linear time', cpuTimingOptions, (_name, schema, make) => {
     expect(schema.safeParse(make(1_000_000)).success).toBe(false);
     expectLinearTime(make, (value) => schema.safeParse(value), {
       sizes: MEGABYTE_SIZES,

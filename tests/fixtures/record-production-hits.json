@@ -1,0 +1,421 @@
+[
+  {
+    "id": "75592",
+    "metadata": {
+      "recid": "75592",
+      "experiment": ["CMS"],
+      "type": {
+        "primary": "Dataset",
+        "secondary": ["Simulated"]
+      },
+      "title": "/ZZ_TuneCP5_13TeV-pythia8/RunIISummer20UL16MiniAODv2-106X_mcRun2_asymptotic_v17-v1/MINIAODSIM",
+      "methodology": {
+        "description": "<p>These data were generated in several steps (see also <a href=\"/docs/cms-mc-production-overview\">CMS Monte Carlo production overview</a>):</p>",
+        "steps": [
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 1\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "script": "fixture 2\n``` \nline with <tag> and | punctuation\n",
+                "title": "Generator parameters",
+                "url": "https://cms-pdmv-prod.web.cern.ch/mcm/public/restapi/requests/get_fragment/SUS-RunIISummer20UL16GEN-00021"
+              },
+              {
+                "cms_confdb_id": "3c7c6643753d478b3d448a41520e16a2",
+                "process": "GEN",
+                "title": "Configuration file"
+              }
+            ],
+            "generators": ["pythia8"],
+            "global_tag": "106X_mcRun2_asymptotic_v13",
+            "release": "CMSSW_10_6_19_patch2",
+            "type": "GEN"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 3\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "3a0d355c94411f19483a541753bfad33",
+                "process": "SIM",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "106X_mcRun2_asymptotic_v13",
+            "release": "CMSSW_10_6_17_patch1",
+            "type": "SIM"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 4\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "a9ddbd3eba50b1e59e5a776d04f23787",
+                "process": "DIGI2RAW",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "106X_mcRun2_asymptotic_v13",
+            "release": "CMSSW_10_6_17_patch1",
+            "type": "DIGI2RAW"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 5\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "9ce11276cd6c3f502dfc3079748c6539",
+                "process": "HLT",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "80X_mcRun2_asymptotic_2016_TrancheIV_v6",
+            "release": "CMSSW_8_0_33_UL",
+            "type": "HLT"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 6\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "d3562005bd1d2556b0a9e7748be6066d",
+                "process": "RECO",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "106X_mcRun2_asymptotic_v13",
+            "output_dataset": "/ZZ_TuneCP5_13TeV-pythia8/RunIISummer20UL16RECO-106X_mcRun2_asymptotic_v13-v2/AODSIM",
+            "release": "CMSSW_10_6_17_patch1",
+            "type": "RECO"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 7\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "c8dc83abb237e289eae3cfefea871409",
+                "process": "PAT",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "106X_mcRun2_asymptotic_v17",
+            "output_dataset": "/ZZ_TuneCP5_13TeV-pythia8/RunIISummer20UL16MiniAODv2-106X_mcRun2_asymptotic_v17-v1/MINIAODSIM",
+            "release": "CMSSW_10_6_25",
+            "type": "PAT"
+          },
+          {
+            "configuration_files": [
+              {
+                "script": "fixture 8\n``` \nline with <tag> and | punctuation\n",
+                "title": "Production script"
+              },
+              {
+                "cms_confdb_id": "086c69c1b826c78c43be2aa70d80e01e",
+                "process": "NANO",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "106X_mcRun2_asymptotic_v17",
+            "output_dataset": "/ZZ_TuneCP5_13TeV-pythia8/RunIISummer20UL16NanoAODv9-106X_mcRun2_asymptotic_v17-v1/NANOAODSIM",
+            "release": "CMSSW_10_6_26",
+            "type": "NANO"
+          }
+        ]
+      },
+      "cross_section": {
+        "filter_efficiency": "1.000e+00",
+        "neg_weight_fraction": "0.000e+00",
+        "total_value": "1.208e+01",
+        "total_value_uncertainty": "7.904e-02"
+      }
+    }
+  },
+  {
+    "id": "9638",
+    "metadata": {
+      "recid": "9638",
+      "experiment": ["CMS"],
+      "type": {
+        "primary": "Dataset",
+        "secondary": ["Simulated"]
+      },
+      "title": "/TToLeptons_t-channel_mass173_5_8TeV-powheg-tauola/Summer12_DR53X-PU_S10_START53_V19-v1/AODSIM",
+      "methodology": {
+        "description": "<p>These data were generated in several steps (see also <a href=\"/docs/cms-mc-production-overview\">CMS Monte Carlo production overview</a>):</p>",
+        "steps": [
+          {
+            "configuration_files": [
+              {
+                "cms_confdb_id": "50fd69070552b55d4010033587ee6bd4",
+                "process": "LHE",
+                "title": "Configuration file"
+              },
+              {
+                "cms_confdb_id": "ab2ced424e65b0878996877341308483",
+                "process": "LHE",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "START53_V7C::All",
+            "output_dataset": "/TToLeptons_t-channel_mass173_5_8TeV-powheg-tauola/Summer12-START53_V7C-v1/GEN",
+            "release": "CMSSW_5_3_7",
+            "type": "LHE LHE"
+          },
+          {
+            "configuration_files": [
+              {
+                "cms_confdb_id": "12ea463979f46b543d17190ceefc0034",
+                "process": "SIM",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "",
+            "output_dataset": "/TToLeptons_t-channel_mass173_5_8TeV-powheg-tauola/Summer12-START53_V7C-v1/GEN-SIM",
+            "release": "CMSSW_5_3_10_patch1",
+            "type": "SIM"
+          },
+          {
+            "configuration_files": [
+              {
+                "cms_confdb_id": "16f37748c2526047dfeb738193a2bbbd",
+                "process": "HLT",
+                "title": "Configuration file"
+              },
+              {
+                "cms_confdb_id": "16f37748c2526047dfeb738193a2c604",
+                "process": "RECO",
+                "title": "Configuration file"
+              }
+            ],
+            "global_tag": "",
+            "output_dataset": "/TToLeptons_t-channel_mass173_5_8TeV-powheg-tauola/Summer12_DR53X-PU_S10_START53_V19-v1/AODSIM",
+            "release": "CMSSW_5_3_11_patch1",
+            "type": "HLT RECO"
+          }
+        ]
+      },
+      "cross_section": {
+        "filter_efficiency": "1",
+        "filter_efficiency_error": "0",
+        "matching_efficiency": "1",
+        "matching_efficiency_error": "-1",
+        "total_value": "16"
+      }
+    }
+  },
+  {
+    "id": "28064",
+    "metadata": {
+      "recid": "28064",
+      "experiment": ["LHCb"],
+      "type": {
+        "primary": "Dataset",
+        "secondary": ["Collision"]
+      },
+      "title": "LHCb 2012 Beam4000GeV MagDown DIMUON Stream Stripping21r0p2",
+      "methodology": {
+        "description": "<p> This dataset was created in several production steps. These steps, software used and the configuration is provided below. </p>",
+        "steps": [
+          {
+            "configuration_files": [
+              {
+                "title": "DaVinci/DV-Stripping21r0p2-Stripping.py"
+              },
+              {
+                "title": "DaVinci/DV-RedoCaloPID-Stripping21.py"
+              },
+              {
+                "title": "DaVinci/DataType-2012.py"
+              },
+              {
+                "title": "DaVinci/InputType-DST.py"
+              },
+              {
+                "title": "Persistency/Compression-ZLIB-1.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p5 AppConfig.v3r383 Det/SQLDDDB.v7r10 TMVAWeights.v1r14",
+            "type": "Stripping21r0p2"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "Merging/DV-Stripping-Merging.py"
+              },
+              {
+                "title": "Persistency/Compression-LZMA-4.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p5 AppConfig.v3r383 Det/SQLDDDB.v7r10",
+            "type": "Stripping21r0p2-Merging"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "DaVinci/DV-Stripping21r0p2-Stripping.py"
+              },
+              {
+                "title": "DaVinci/DV-RedoCaloPID-Stripping21.py"
+              },
+              {
+                "title": "DaVinci/DataType-2012.py"
+              },
+              {
+                "title": "DaVinci/InputType-DST.py"
+              },
+              {
+                "title": "Persistency/Compression-ZLIB-1.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p5 AppConfig.v3r383 Det/SQLDDDB.v7r10 TMVAWeights.v1r14",
+            "type": "Stripping21r0p2"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "Merging/DV-Stripping-Merging.py"
+              },
+              {
+                "title": "Persistency/Compression-LZMA-4.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p5 AppConfig.v3r383 Det/SQLDDDB.v7r10",
+            "type": "Stripping21r0p2-Merging"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "DaVinci/DV-Stripping21r0p2-Stripping.py"
+              },
+              {
+                "title": "DaVinci/DV-RedoCaloPID-Stripping21.py"
+              },
+              {
+                "title": "DaVinci/DataType-2012.py"
+              },
+              {
+                "title": "DaVinci/InputType-DST.py"
+              },
+              {
+                "title": "Persistency/Compression-ZLIB-1.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10 TMVAWeights.v1r14",
+            "type": "Stripping21r0p2"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "Merging/DV-Stripping-Merging.py"
+              },
+              {
+                "title": "Persistency/Compression-LZMA-4.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10",
+            "type": "Stripping21r0p2-Merging"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "DaVinci/DV-Stripping21r0p2-Stripping.py"
+              },
+              {
+                "title": "DaVinci/DV-RedoCaloPID-Stripping21.py"
+              },
+              {
+                "title": "DaVinci/DataType-2012.py"
+              },
+              {
+                "title": "DaVinci/InputType-DST.py"
+              },
+              {
+                "title": "Persistency/Compression-ZLIB-1.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10 TMVAWeights.v1r14",
+            "type": "Stripping21r0p2"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "Merging/DV-Stripping-Merging.py"
+              },
+              {
+                "title": "Persistency/Compression-LZMA-4.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10",
+            "type": "Stripping21r0p2-Merging"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "DaVinci/DV-Stripping21r0p2-Stripping.py"
+              },
+              {
+                "title": "DaVinci/DV-RedoCaloPID-Stripping21.py"
+              },
+              {
+                "title": "DaVinci/DataType-2012.py"
+              },
+              {
+                "title": "DaVinci/InputType-DST.py"
+              },
+              {
+                "title": "Persistency/Compression-ZLIB-1.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10 TMVAWeights.v1r14",
+            "type": "Stripping21r0p2"
+          },
+          {
+            "configuration_files": [
+              {
+                "title": "Merging/DV-Stripping-Merging.py"
+              },
+              {
+                "title": "Persistency/Compression-LZMA-4.py"
+              }
+            ],
+            "release": "DaVinci.v39r1p6 AppConfig.v3r384 Det/SQLDDDB.v7r10",
+            "type": "Stripping21r0p2-Merging"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "31316",
+    "metadata": {
+      "recid": "31316",
+      "experiment": ["CMS"],
+      "type": {
+        "primary": "Dataset",
+        "secondary": ["Derived"]
+      },
+      "title": "ZeroBias dataset in NanoAOD format enhanced with Particle Flow candidates from RunG of 2016",
+      "methodology": {
+        "description": "The dataset was produced with the software available in the record linked below.",
+        "links": [
+          {
+            "recid": "12504"
+          }
+        ]
+      }
+    }
+  }
+]

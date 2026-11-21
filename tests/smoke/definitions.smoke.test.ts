@@ -2,19 +2,20 @@
  * @fileoverview Smoke coverage for every definition the server registers: all
  * seven tools and the record resource are present, carry a description, an
  * output schema and a `format()`, serialize to JSON Schema, advertise the
- * `limit` and `ids` ceilings, and declare the shared error contract and list
+ * `limit` and `ids` constraints, and declare the shared error contract and list
  * enrichment the design requires. The reference
  * tool runs end to end (it needs no upstream).
  * @module tests/smoke/definitions.smoke.test
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import { recordResource } from '@/mcp-server/resources/definitions/record.resource.js';
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listReference } from '@/mcp-server/tools/definitions/list-reference.tool.js';
+import { errorOf } from '../fixtures/cern-opendata-harness.js';
 
 const TOOL_NAMES = [
   'cern_opendata_search_records',
@@ -32,6 +33,20 @@ const LIST_TOOLS = [
   'cern_opendata_get_validated_runs',
   'cern_opendata_search_trigger_paths',
 ];
+
+const LIMIT_CAPS = {
+  cern_opendata_search_records: 1_000,
+  cern_opendata_search_trigger_paths: 625,
+  cern_opendata_list_files: 2_000,
+  cern_opendata_get_validated_runs: 2_000,
+};
+
+type AdvertisedInput = {
+  properties?: Record<
+    string,
+    { type?: string; minimum?: number; maximum?: number; maxItems?: number }
+  >;
+};
 
 const UPSTREAM_TOOLS = allToolDefinitions.filter((tool) => tool.name !== listReference.name);
 
@@ -90,24 +105,59 @@ describe('definition smoke test', () => {
     },
   );
 
-  it('advertises the 10,000 ceiling on every limit and the 100 ceiling on ids, so a value past a cap reaches the tool', () => {
-    const ceilings = allToolDefinitions.flatMap((tool) => {
+  it('advertises clamped limits as positive integers without maxima and ids with a 100-item ceiling', () => {
+    const limits = allToolDefinitions.flatMap((tool) => {
       const { properties = {} } = z.toJSONSchema(tool.input, {
         io: 'input',
         unrepresentable: 'any',
-      }) as { properties?: Record<string, { maximum?: number; maxItems?: number }> };
-      return [
-        ...(properties.limit ? [[`${tool.name}.limit`, properties.limit.maximum]] : []),
-        ...(properties.ids ? [[`${tool.name}.ids`, properties.ids.maxItems]] : []),
-      ];
+      }) as AdvertisedInput;
+      if (tool.name === 'cern_opendata_get_records') expect(properties.ids?.maxItems).toBe(100);
+      if (!properties.limit) return [];
+      expect(properties.limit).toMatchObject({ type: 'integer', minimum: 1 });
+      expect(JSON.stringify(properties.limit)).not.toContain('maximum');
+      return [tool.name];
     });
-    expect(Object.fromEntries(ceilings)).toEqual({
-      'cern_opendata_search_records.limit': 10_000,
-      'cern_opendata_get_records.ids': 100,
-      'cern_opendata_list_files.limit': 10_000,
-      'cern_opendata_get_validated_runs.limit': 10_000,
-      'cern_opendata_search_trigger_paths.limit': 10_000,
-    });
+    expect(limits).toEqual(LIST_TOOLS);
+  });
+
+  it('advertises and enforces each cap when the process starts in strict mode', async () => {
+    vi.stubEnv('CERN_OPENDATA_CLAMP_LIMITS', 'false');
+    vi.resetModules();
+    try {
+      const { allToolDefinitions: strictDefinitions } = await import(
+        '@/mcp-server/tools/definitions/index.js'
+      );
+      const selectors = {
+        cern_opendata_search_records: {},
+        cern_opendata_search_trigger_paths: { path: 'HLT_Mu*' },
+        cern_opendata_list_files: { recid: '6004' },
+        cern_opendata_get_validated_runs: { recid: '1005' },
+      };
+      const strictCaps = new Map<keyof typeof LIMIT_CAPS, number>();
+      for (const tool of strictDefinitions) {
+        const { properties = {} } = z.toJSONSchema(tool.input, {
+          io: 'input',
+          unrepresentable: 'any',
+        }) as AdvertisedInput;
+        if (!properties.limit) continue;
+        const key = tool.name as keyof typeof LIMIT_CAPS;
+        const cap = LIMIT_CAPS[key];
+        expect(properties.limit).toMatchObject({ minimum: 1, maximum: cap, type: 'integer' });
+        strictCaps.set(key, cap);
+        expect(tool.input.safeParse({ ...selectors[key], limit: cap }).success).toBe(true);
+        for (const limit of [cap + 1, 0, 1.5]) {
+          const result = await runToolContract(
+            tool as never,
+            { ...selectors[key], limit } as never,
+          );
+          expect(errorOf(result).data).toMatchObject({ reason: 'invalid_arguments' });
+        }
+      }
+      expect(Object.fromEntries(strictCaps)).toEqual(LIMIT_CAPS);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 
   it('offers no input form the advertised schema refuses on an array or pattern field', () => {

@@ -9,7 +9,9 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { productionMetadataShape } from '@/services/cern-opendata/production-metadata.js';
 import { inline, NOT_AVAILABLE } from '@/services/cern-opendata/text.js';
+import { LINK_SOURCES } from '@/services/cern-opendata/types.js';
 
 /** File counts by availability state, `{ online?, on_demand? }`. */
 export const AvailabilityCountsSchema = z
@@ -49,6 +51,7 @@ export function renderRecordType({ primary, secondary }: z.infer<typeof RecordTy
 /** The Record shape (one `cern_opendata_get_records` entry, or the record resource). */
 export const RecordSchema = z
   .object({
+    ...productionMetadataShape,
     id: z.string().describe('Portal id: recid for records, slug for docs and news.'),
     kind: z.enum(['record', 'doc']).describe('doc for docs and news (slug); record otherwise.'),
     recid: z
@@ -148,9 +151,7 @@ export const RecordSchema = z
       .array(
         z
           .object({
-            source: z
-              .enum(['abstract', 'note', 'usage', 'validation', 'use_with', 'pileup', 'software'])
-              .describe('The metadata section the link came from.'),
+            source: z.enum(LINK_SOURCES).describe('The metadata section the link came from.'),
             recid: z.string().optional().describe('Linked record id.'),
             url: z.string().optional().describe('Linked URL; portal-relative paths start with /.'),
             description: z

@@ -296,7 +296,6 @@ describe('cern_opendata_get_validated_runs input', () => {
     ['a fractional run_max', { run_period: 'Run2012B', run_max: 1.5 }],
     ['a negative run_max', { run_period: 'Run2012B', run_max: -3 }],
     ['limit 0', { run_period: 'Run2012B', limit: 0 }],
-    ['limit 10001', { run_period: 'Run2012B', limit: 10_001 }],
     ['a fractional limit', { run_period: 'Run2012B', limit: 20.5 }],
   ])('rejects %s as invalid arguments before any request', async (_name, input) => {
     const { http } = serve();
@@ -1316,12 +1315,12 @@ describe('cern_opendata_get_validated_runs runs', () => {
       expect(http.calls).toHaveLength(3);
     });
 
-    it('serves the 10,000 ceiling at 2000 and leaves 2000 itself unnamed', async () => {
+    it('serves a limit above 10,000 at 2000 and leaves 2000 itself unnamed', async () => {
       serve({ files });
-      const ceiling = success(await run({ recid: '1002', limit: 10_000 }));
+      const ceiling = success(await run({ recid: '1002', limit: 10_001 }));
       expect(ceiling).toMatchObject({ truncated: false, shown: 5, cap: 2000 });
       expect(ceiling.notice).toBe(
-        "limit 10000 is above this tool's maximum of 2000, so 2000 was applied.",
+        "limit 10001 is above this tool's maximum of 2000, so 2000 was applied.",
       );
       const atCap = success(await run({ recid: '1002', limit: 2000 }));
       expect(atCap).toMatchObject({ shown: 5, cap: 2000 });

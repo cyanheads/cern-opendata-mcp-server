@@ -8,6 +8,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from '@/config/server-config.js';
 import { reduceRecidSpelling } from '@/services/cern-opendata/identifiers.js';
 import {
   canonicalize,
@@ -173,13 +174,34 @@ export function requiredListInput(
   );
 }
 
-/**
- * The most a list tool's `limit` accepts. The portal pages no deeper than
- * match 10,000, so no search page is larger, and the local pagers share the
- * bound against absurd input. A value above a tool's own maximum is served at
- * that maximum (`applyLimit`, Decision 56).
- */
-export const LIMIT_CEILING = 10_000;
+/** A count limit that advertises and enforces the cap only in strict mode. */
+export function limitInput(defaultLimit: number, cap: number, label: string) {
+  return blankAsUnset(
+    z
+      .number()
+      .min(1)
+      .superRefine((value, ctx) => {
+        // Zod's integer check also enforces a safe-integer ceiling. The handler
+        // only uses values above the cap to report what the caller requested.
+        if (!Number.isInteger(value)) {
+          ctx.addIssue({ code: 'custom', message: 'Expected a whole number.' });
+        } else if (!getServerConfig().clampLimits && value > cap) {
+          ctx.addIssue({ code: 'too_big', origin: 'number', maximum: cap, inclusive: true });
+        }
+      })
+      .default(defaultLimit),
+  ).meta({
+    type: 'integer',
+    get maximum() {
+      return getServerConfig().clampLimits ? undefined : cap;
+    },
+    get description() {
+      return getServerConfig().clampLimits
+        ? `${label}. Values above ${cap} are served at that limit.`
+        : `${label}. Maximum ${cap}.`;
+    },
+  });
+}
 
 /** Parameters with a known value that holds a comma: `13TeV, 13.6TeV`, `Exotica::Heavy Fermions, Heavy Righ-Handed Neutrinos`. */
 const COMMA_VALUE_PARAMS: ReadonlySet<VocabularyParam> = new Set(['collision_energy', 'category']);

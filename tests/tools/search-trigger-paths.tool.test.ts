@@ -275,7 +275,6 @@ describe('cern_opendata_search_trigger_paths path input', () => {
     ['year 2101', { year: 2101 }],
     ['a fractional year', { year: 2012.5 }],
     ['limit 0', { limit: 0 }],
-    ['limit 10001', { limit: 10_001 }],
     ['a fractional limit', { limit: 2.5 }],
     ['page 0', { page: 0 }],
     ['a negative page', { page: -1 }],
@@ -1011,29 +1010,47 @@ describe('cern_opendata_search_trigger_paths enrichment and notices', () => {
     );
   });
 
-  it('serves limit 60 at 50, naming the requested limit before the version note and the paging', async () => {
-    const { http } = serve(searchBody(triggerHits(50), { total: 95 }));
-    const result = await run({ path: 'HLT_Mu_v*', limit: 60 });
+  it('clamps a limit past the window, then renders the version note and paging on both surfaces', async () => {
+    const { http } = serve(searchBody(triggerHits(625), { total: 695 }));
+    const result = await run({ path: 'HLT_Mu_v*', limit: 10_001 });
     const data = success(result);
-    expect(paramsOf(http).get('size')).toBe('50');
-    expect(data).toMatchObject({ truncated: true, has_more: true, shown: 50, cap: 50 });
+    expect(paramsOf(http).get('size')).toBe('625');
+    expect(data).toMatchObject({ truncated: true, has_more: true, shown: 625, cap: 625 });
     const notice =
-      "limit 60 is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50. Path versions are listed per record as V<n>; HLT_Mu_v* names every version of HLT_Mu. Showing 1–50 of 95; call cern_opendata_search_trigger_paths again with page 2, or add year.";
+      "limit 10001 is above this tool's maximum of 625, so 625 was applied, and page numbers count pages of 625. Path versions are listed per record as V<n>; HLT_Mu_v* names every version of HLT_Mu. Showing 1–625 of 695; call cern_opendata_search_trigger_paths again with page 2, or add year.";
     expect(data.notice).toBe(notice);
     const trailer = textOf(result, 1).split('\n');
     expect(trailer).toContain(`> ${notice}`);
-    expect(trailer).toContain('**cap:** 50');
+    expect(trailer).toContain('**cap:** 625');
   });
 
-  it('pages by the applied limit: page 200 at the 10,000 ceiling returns matches 9951–10000', async () => {
-    const { http } = serve(searchBody(triggerHits(50), { total: 35_747 }));
-    const data = success(await run({ path: 'HLT_Mu*', limit: 10_000, page: 200 }));
-    expect(paramsOf(http).get('size')).toBe('50');
-    expect(paramsOf(http).get('page')).toBe('200');
-    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 50, cap: 50 });
+  it('pages by the applied limit: page 16 at limit 626 returns matches 9376–10000', async () => {
+    const { http } = serve(searchBody(triggerHits(625), { total: 35_747 }));
+    const data = success(await run({ path: 'HLT_Mu*', limit: 626, page: 16 }));
+    expect(paramsOf(http).get('size')).toBe('625');
+    expect(paramsOf(http).get('page')).toBe('16');
+    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 625, cap: 625 });
     expect(data.notice).toBe(
-      "limit 10000 is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50. Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.",
+      "limit 626 is above this tool's maximum of 625, so 625 was applied, and page numbers count pages of 625. Showing 9376–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add year or a longer path prefix to reach the rest.",
     );
+  });
+
+  it('guides a large last page to an in-window tail and the tail call reaches the boundary', async () => {
+    const filters = { path: 'HLT_Mu*' };
+    serve(searchBody(triggerHits(601), { total: 35_747 }));
+    const result = await run({ ...filters, limit: 601, page: 16 });
+    const guidance =
+      'For matches 9617–10000, call cern_opendata_search_trigger_paths again with limit 400 and page 25; its matches 9601–9616 are already on this page.';
+    expect(success(result)).toMatchObject({ truncated: true, has_more: false });
+    expect(success(result).notice).toContain(guidance);
+    expect(textOf(result, 1)).toContain(guidance);
+
+    disposeInstalledService();
+    const { http } = serve(searchBody(triggerHits(400), { total: 35_747 }));
+    const tail = success(await run({ ...filters, limit: 400, page: 25 }));
+    expect(paramsOf(http).get('size')).toBe('400');
+    expect(paramsOf(http).get('page')).toBe('25');
+    expect(tail.notice).toContain('Showing 9601–10000');
   });
 
   it('writes the same fields into the text trailer', async () => {
@@ -1175,20 +1192,35 @@ describe('cern_opendata_search_trigger_paths errors on the wire', () => {
     expect(paramsOf(http).get('page')).toBe(String(page));
   });
 
-  it('refuses page 201 at limit 60 before any request, naming the limit applied', async () => {
+  it('refuses page 17 at limit 626 before any request, naming the limit applied', async () => {
     const { http } = serve(emptySearchBody);
-    const error = await failure({ path: 'HLT_Mu*', page: 201, limit: 60 });
+    const error = await failure({ path: 'HLT_Mu*', page: 17, limit: 626 });
     expect(error.message).toBe(
-      'page 201 × limit 50 (the maximum; 60 was requested) reaches past match 10000, the deepest the portal pages to.',
+      'page 17 × limit 625 (the maximum; 626 was requested) reaches past match 10000, the deepest the portal pages to.',
     );
     expect(error.data).toMatchObject({
       reason: 'page_window_exceeded',
-      page: 201,
-      limit: 50,
-      requested_limit: 60,
+      page: 17,
+      limit: 625,
+      requested_limit: 626,
       window: 10_000,
     });
     expect(http.calls).toHaveLength(0);
+  });
+
+  it('rejects the formerly clamped trigger page at the new cap and keeps its offsets at 50', async () => {
+    const { http } = serve(searchBody(triggerHits(50), { total: 3_810 }));
+    const filters = { path: 'H*', page: 17 };
+    expect((await failure({ ...filters, limit: 625 })).data).toMatchObject({
+      reason: 'page_window_exceeded',
+      page: 17,
+      limit: 625,
+    });
+    expect(http.calls).toHaveLength(0);
+    const data = success(await run({ ...filters, limit: 50 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(paramsOf(http).get('page')).toBe('17');
+    expect(data.notice).toContain('Showing 801–850');
   });
 
   it('writes no enrichment that could pass for a result on a refused window', async () => {
@@ -1293,8 +1325,8 @@ describe('cern_opendata_search_trigger_paths upstream failures', () => {
     expect(errorOf(await settled()).data).toMatchObject({ reason: 'upstream_unreadable' });
   });
 
-  it('maps a declared content-length over the 8 MiB ceiling to non-retryable upstream_unreadable', async () => {
-    const limitBytes = 8 * 1024 * 1024;
+  it('maps a declared content-length over the 64 MiB ceiling to non-retryable upstream_unreadable', async () => {
+    const limitBytes = 64 * 1024 * 1024;
     const { http } = installService([
       searchRoute(
         () =>

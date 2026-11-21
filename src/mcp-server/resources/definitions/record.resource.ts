@@ -16,7 +16,7 @@ export const recordResource = resource('cern-opendata://record/{recid}', {
   name: 'cern-opendata-record',
   title: 'CERN Open Data record',
   description:
-    "One CERN Open Data Portal record's metadata by recid: description, run periods, collision and distribution details, related records, software-environment summary, license and citation, plus any variable dictionary, physics category, pile-up, keywords, and LHCb magnet polarity and stripping. File lists are not included. Tool coverage: cern_opendata_get_records.",
+    'One CERN Open Data Portal record by recid with metadata, license and citation. Includes any production steps, cross section, variable dictionary, physics category, pile-up and LHCb run conditions. Use cern_opendata_get_records with include_scripts for inline configurations and cern_opendata_list_files for file lists.',
   mimeType: 'application/json',
   params: z.object({
     recid: recidInput().describe(

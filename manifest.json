@@ -33,6 +33,7 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
+        "CERN_OPENDATA_CLAMP_LIMITS": "${user_config.clamp_limits}",
         "NODE_ENV": "production"
       }
     }
@@ -42,5 +43,12 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "clamp_limits": {
+      "type": "boolean",
+      "title": "Clamp page limits",
+      "description": "Serve oversized page requests at the tool’s cap. Disable to reject them.",
+      "default": true
+    }
+  }
 }

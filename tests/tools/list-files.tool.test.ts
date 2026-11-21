@@ -291,7 +291,6 @@ describe('cern_opendata_list_files input', () => {
 
   it.each([
     ['limit 0', { limit: 0 }],
-    ['limit 10001', { limit: 10_001 }],
     ['a fractional limit', { limit: 1.5 }],
     ['an index over 300 characters', { index: 'x'.repeat(301) }],
     ['a cursor over 500 characters', { cursor: 'x'.repeat(501) }],
@@ -302,10 +301,10 @@ describe('cern_opendata_list_files input', () => {
     expect(http.calls).toHaveLength(0);
   });
 
-  it('accepts limit 1 and limit 500', async () => {
+  it('accepts limit 1 and limit 2000', async () => {
     serve();
     expect(success(await run({ recid: '6004', limit: 1 })).files).toHaveLength(1);
-    expect(success(await run({ recid: '6004', limit: 500 })).cap).toBe(500);
+    expect(success(await run({ recid: '6004', limit: 2_000 })).cap).toBe(2_000);
   });
 
   it('applies the default limit of 50', async () => {
@@ -441,7 +440,7 @@ describe('cern_opendata_list_files record scope', () => {
     const result = success(await run({ recid: '701' }));
     expect(result.files.map((file) => file.key)).toEqual(['file_0.root', 'file_1.root']);
     expect(result.indexes.map((index) => index.key)).toEqual(['both_file_index.json']);
-    expect(result.totalCount).toBe(2);
+    expect(result.totalCount).toBe(3);
     expect(result.notice).toBeUndefined();
   });
 
@@ -1239,7 +1238,7 @@ describe('cern_opendata_list_files enrichment', () => {
     );
   });
 
-  it('zero-result file page (one index of one file) agrees each count with its noun', async () => {
+  it('an index-only page with one member agrees each count with its noun', async () => {
     serve({
       '717': recordBody({ recid: '717', _file_indices: [fileIndex('x_file_index.json', 1)] }),
     });
@@ -1253,10 +1252,10 @@ describe('cern_opendata_list_files enrichment', () => {
     expect(success(await run({ recid: '714' })).notice).toBe('This record has no files.');
   });
 
-  it('zero-result file page (record scope, indexes only) groups the files under the indexes and counts tape files', async () => {
+  it('an index-only page groups the files under the indexes and counts tape files', async () => {
     serve();
     const result = success(await run({ recid: '24464' }));
-    expect(result).toMatchObject({ truncated: false, shown: 0, cap: 50, totalCount: 0 });
+    expect(result).toMatchObject({ truncated: false, shown: 2, cap: 50, totalCount: 2 });
     expect(result.notice).toBe(
       "Files are grouped into 2 file indexes (4 files); call cern_opendata_list_files with index set to one of the index keys to page its files, or fetch an index's uri_list_url for every XRootD URI at once. " +
         "1 file is on tape (availability on demand); request it on the record's portal page (https://opendata.cern.ch/record/24464) before downloading.",
@@ -1334,7 +1333,7 @@ describe('cern_opendata_list_files enrichment', () => {
     );
   });
 
-  it('totalCount is the files in scope: regular files in record scope, members in index scope', async () => {
+  it('totalCount includes indexes and files in record scope, and only members in index scope', async () => {
     serve({
       '712': recordBody({
         recid: '712',
@@ -1342,7 +1341,7 @@ describe('cern_opendata_list_files enrichment', () => {
         _file_indices: [fileIndex('i_file_index.json', 9)],
       }),
     });
-    expect(success(await run({ recid: '712' })).totalCount).toBe(3);
+    expect(success(await run({ recid: '712' })).totalCount).toBe(4);
     expect(success(await run({ recid: '712', index: 'i_file_index.json' })).totalCount).toBe(9);
   });
 
@@ -1358,6 +1357,104 @@ describe('cern_opendata_list_files enrichment', () => {
 });
 
 describe('cern_opendata_list_files paging', () => {
+  it('pages record indexes and files in one stream, crossing the boundary exactly once', async () => {
+    const { http } = serve({
+      '701': recordBody({
+        recid: '701',
+        _files: regularFiles(3),
+        _file_indices: [
+          fileIndex('first_file_index.json', 3, { availability: { 'on demand': 3 } }),
+          fileIndex('second_file_index.json', 1),
+          fileIndex('third_file_index.json', 1),
+        ],
+      }),
+    });
+    const expected = [
+      { indexes: ['first_file_index.json', 'second_file_index.json'], files: [] },
+      { indexes: ['third_file_index.json'], files: ['file_0.root'] },
+      { indexes: [], files: ['file_1.root', 'file_2.root'] },
+    ];
+    let cursor: string | undefined;
+    for (const [position, rows] of expected.entries()) {
+      const result = await run({ recid: '701', limit: 2, ...(cursor ? { cursor } : {}) });
+      const page = success(result);
+      const more = position < expected.length - 1;
+      expect(page.indexes.map((index) => index.key)).toEqual(rows.indexes);
+      expect(page.files.map((file) => file.key)).toEqual(rows.files);
+      expect(page).toMatchObject({
+        shown: 2,
+        totalCount: 6,
+        cap: 2,
+        has_more: more,
+        truncated: more,
+      });
+      expect(textOf(result).match(/^- \*\*(\S+_file_index\.json)\*\*:/gm) ?? []).toEqual(
+        rows.indexes.map((key) => `- **${key}**:`),
+      );
+      expect(textOf(result).match(/^\| (file_\d+\.root) \|/gm) ?? []).toEqual(
+        rows.files.map((key) => `| ${key} |`),
+      );
+      const trailer = textOf(result, 1);
+      expect(trailer).toContain('**shown:** 2');
+      expect(trailer).toContain('6 total');
+      expect(trailer).toContain('3 files are on tape');
+      cursor = page.next_cursor;
+      if (more) {
+        expect(cursor).toBeTypeOf('string');
+        expect(textOf(result)).toContain(`**next_cursor:** \`${cursor}\``);
+      } else {
+        expect(cursor).toBeUndefined();
+      }
+    }
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('returns a 2,000-member index in one call', async () => {
+    const index = 'large_file_index.json';
+    serve({ '701': recordBody({ recid: '701', _file_indices: [fileIndex(index, 2_000)] }) });
+    const result = await run({ recid: '701', index, limit: 2_000 });
+    const page = success(result);
+    expect(page).toMatchObject({
+      shown: 2_000,
+      totalCount: 2_000,
+      cap: 2_000,
+      has_more: false,
+      truncated: false,
+    });
+    expect(page.indexes.map((item) => item.key)).toEqual([index]);
+    expect(page.files.map((file) => file.key)).toEqual(
+      Array.from({ length: 2_000 }, (_, i) => `${index}_${i}`),
+    );
+    expect(page).not.toHaveProperty('next_cursor');
+    expect(textOf(result).match(/^\| large_file_index\.json_\d+ \|/gm)).toHaveLength(2_000);
+    expect(textOf(result, 1)).toContain('2000 total');
+  });
+
+  it('resumes a legacy mixed-record cursor at its regular-file offset', async () => {
+    serve({
+      '701': recordBody({
+        recid: '701',
+        _files: regularFiles(4),
+        _file_indices: [fileIndex('group_file_index.json', 1)],
+      }),
+    });
+    const result = await run({
+      recid: '701',
+      limit: 2,
+      cursor: cursorOf({ r: '701', i: null, o: 1 }),
+    });
+    const page = success(result);
+    expect(page.files.map((file) => file.key)).toEqual(['file_1.root', 'file_2.root']);
+    expect(page.indexes).toEqual([]);
+    expect(textOf(result)).toContain('| file_1.root |');
+    expect(textOf(result)).not.toContain('| file_0.root |');
+    expect(textOf(result)).not.toContain('group_file_index.json');
+
+    const last = success(await run({ recid: '701', limit: 2, cursor: page.next_cursor }));
+    expect(last.files.map((file) => file.key)).toEqual(['file_3.root']);
+    expect(last).not.toHaveProperty('next_cursor');
+  });
+
   it('walks a record scope with cursors: every file once, in order, from one upstream read', async () => {
     const { http } = serve({ '5000': recordBody({ recid: '5000', _files: regularFiles(120) }) });
     const keys: string[] = [];
@@ -1375,62 +1472,63 @@ describe('cern_opendata_list_files paging', () => {
     expect(http.calls).toHaveLength(1);
   });
 
-  describe('a limit above 500', () => {
+  describe('the 2,000-entry limit cap', () => {
     const clamped = (requested: number) =>
-      `limit ${requested} is above this tool's maximum of 500, so 500 was applied.`;
+      `limit ${requested} is above this tool's maximum of 2000, so 2000 was applied.`;
 
-    it('serves limit 501 at 500, and its cursor continues at file 501 to the end', async () => {
+    it('serves limit 2001 at 2000, and its cursor continues at file 2001 to the end', async () => {
       const { http } = serve({
-        '5000': recordBody({ recid: '5000', _files: regularFiles(1_200) }),
+        '5000': recordBody({ recid: '5000', _files: regularFiles(4_200) }),
       });
-      const first = await run({ recid: '5000', limit: 501 });
+      const first = await run({ recid: '5000', limit: 2_001 });
       const page = success(first);
-      expect(page).toMatchObject({ truncated: true, shown: 500, cap: 500, totalCount: 1_200 });
+      expect(page).toMatchObject({ truncated: true, shown: 2_000, cap: 2_000, totalCount: 4_200 });
       expect(page.files.map((file) => file.key)).toEqual(
-        Array.from({ length: 500 }, (_, i) => `file_${i}.root`),
+        Array.from({ length: 2_000 }, (_, i) => `file_${i}.root`),
       );
-      const notice = `${clamped(501)} Showing files 1–500 of 1200; call cern_opendata_list_files again with cursor set to next_cursor.`;
+      const notice = `${clamped(2_001)} Showing files 1–2000 of 4200; call cern_opendata_list_files again with cursor set to next_cursor.`;
       expect(page.notice).toBe(notice);
       expect(textOf(first, 1).split('\n')).toContain(`> ${notice}`);
       expect(JSON.parse(Buffer.from(String(page.next_cursor), 'base64url').toString())).toEqual({
         r: '5000',
         i: null,
-        o: 500,
+        o: 2_000,
+        v: 2,
       });
 
-      const second = success(await run({ recid: '5000', limit: 501, cursor: page.next_cursor }));
-      expect(second.files[0]?.key).toBe('file_500.root');
-      expect(second).toMatchObject({ shown: 500, cap: 500, has_more: true });
-      const last = success(await run({ recid: '5000', limit: 501, cursor: second.next_cursor }));
+      const second = success(await run({ recid: '5000', limit: 2_001, cursor: page.next_cursor }));
+      expect(second.files[0]?.key).toBe('file_2000.root');
+      expect(second).toMatchObject({ shown: 2_000, cap: 2_000, has_more: true });
+      const last = success(await run({ recid: '5000', limit: 2_001, cursor: second.next_cursor }));
       expect(last.files.map((file) => file.key)).toEqual(
-        Array.from({ length: 200 }, (_, i) => `file_${1_000 + i}.root`),
+        Array.from({ length: 200 }, (_, i) => `file_${4_000 + i}.root`),
       );
-      expect(last).toMatchObject({ shown: 200, cap: 500, has_more: false, truncated: false });
+      expect(last).toMatchObject({ shown: 200, cap: 2_000, has_more: false, truncated: false });
       expect(last).not.toHaveProperty('next_cursor');
-      expect(last.notice).toBe(clamped(501));
+      expect(last.notice).toBe(clamped(2_001));
       expect(http.calls).toHaveLength(1);
     });
 
-    it('serves the 10,000 ceiling at 500 on an index whose files all fit, with the clamp fragment as the whole notice', async () => {
+    it('serves 10,001 at 2,000 on an index whose files all fit, with the clamp fragment as the whole notice', async () => {
       serve({
         '6001': recordBody({
           recid: '6001',
           _file_indices: [fileIndex('big_file_index.json', 130)],
         }),
       });
-      const page = success(
-        await run({ recid: '6001', index: 'big_file_index.json', limit: 10_000 }),
-      );
-      expect(page).toMatchObject({ truncated: false, shown: 130, cap: 500, totalCount: 130 });
-      expect(page.notice).toBe(clamped(10_000));
+      const result = await run({ recid: '6001', index: 'big_file_index.json', limit: 10_001 });
+      const page = success(result);
+      expect(page).toMatchObject({ truncated: false, shown: 130, cap: 2_000, totalCount: 130 });
+      expect(page.notice).toBe(clamped(10_001));
+      expect(textOf(result, 1)).toContain(clamped(10_001));
     });
 
-    it('leaves a limit of exactly 500 as it was: no clamp fragment', async () => {
-      serve({ '5000': recordBody({ recid: '5000', _files: regularFiles(1_200) }) });
-      const page = success(await run({ recid: '5000', limit: 500 }));
-      expect(page).toMatchObject({ shown: 500, cap: 500 });
+    it('leaves a limit of exactly 2,000 as it was: no clamp fragment', async () => {
+      serve({ '5000': recordBody({ recid: '5000', _files: regularFiles(2_200) }) });
+      const page = success(await run({ recid: '5000', limit: 2_000 }));
+      expect(page).toMatchObject({ shown: 2_000, cap: 2_000 });
       expect(page.notice).toBe(
-        'Showing files 1–500 of 1200; call cern_opendata_list_files again with cursor set to next_cursor.',
+        'Showing files 1–2000 of 2200; call cern_opendata_list_files again with cursor set to next_cursor.',
       );
     });
   });
@@ -1443,6 +1541,7 @@ describe('cern_opendata_list_files paging', () => {
       r: '5000',
       i: null,
       o: 50,
+      v: 2,
     });
   });
 
@@ -1516,19 +1615,50 @@ describe('cern_opendata_list_files paging', () => {
     expect(seen.size).toBe(6_500);
   });
 
-  it('lists every index of a record with many indexes in one record-scope page', async () => {
+  it('pages the indexes of an index-only record and keeps full-manifest totals', async () => {
     serve({
-      '24465': recordBody({
-        recid: '24465',
-        _file_indices: Array.from({ length: 70 }, (_, i) =>
+      '80001': recordBody({
+        recid: '80001',
+        _file_indices: Array.from({ length: 186 }, (_, i) =>
           fileIndex(`idx_${i}_file_index.json`, 20),
         ),
       }),
     });
-    const result = success(await run({ recid: '24465', limit: 1 }));
-    expect(result.indexes).toHaveLength(70);
-    expect(result.files).toEqual([]);
-    expect(result.notice).toContain('Files are grouped into 70 file indexes (1400 files)');
+    const result = await run({ recid: '80001', limit: 3 });
+    const page = success(result);
+    expect(page).toMatchObject({
+      files: [],
+      shown: 3,
+      totalCount: 186,
+      has_more: true,
+      truncated: true,
+    });
+    expect(page.indexes.map((index) => index.key)).toEqual([
+      'idx_0_file_index.json',
+      'idx_1_file_index.json',
+      'idx_2_file_index.json',
+    ]);
+    expect(textOf(result)).toContain('### File indexes (3)');
+    expect(textOf(result)).toContain('idx_2_file_index.json');
+    expect(textOf(result)).not.toContain('idx_3_file_index.json');
+    expect(textOf(result, 1)).toContain('Showing entries 1–3 of 186');
+    expect(textOf(result, 1)).toContain('Files are grouped into 186 file indexes (3720 files)');
+    const next = success(await run({ recid: '80001', limit: 3, cursor: page.next_cursor }));
+    expect(next.indexes.map((index) => index.key)).toEqual([
+      'idx_3_file_index.json',
+      'idx_4_file_index.json',
+      'idx_5_file_index.json',
+    ]);
+    const last = success(
+      await run({
+        recid: '80001',
+        limit: 180,
+        cursor: next.next_cursor,
+      }),
+    );
+    expect(last).toMatchObject({ shown: 180, totalCount: 186, has_more: false, truncated: false });
+    expect(last.indexes[179]?.key).toBe('idx_185_file_index.json');
+    expect(last).not.toHaveProperty('next_cursor');
   });
 });
 
@@ -1593,6 +1723,7 @@ describe('cern_opendata_list_files errors', () => {
       ['base64url JSON of the wrong shape', cursorOf({ r: '6004' })],
       ['a negative offset', cursorOf({ r: '6004', i: null, o: -1 })],
       ['a fractional offset', cursorOf({ r: '6004', i: null, o: 1.5 })],
+      ['an unsupported version', cursorOf({ r: '6004', i: null, o: 1, v: 3 })],
       ['a numeric recid', cursorOf({ r: 6004, i: null, o: 1 })],
       ['a JSON array', cursorOf([1, 2, 3])],
       ['JSON null', cursorOf('null')],
@@ -1666,6 +1797,38 @@ describe('cern_opendata_list_files errors', () => {
       expect(error.message).toBe('The cursor points to file 3, past the 2 files in scope.');
       expect(http.calls).toHaveLength(1);
     });
+
+    it.each([
+      [{ r: '701', i: null, o: 3 }, 'The cursor points to file 4, past the 3 files in scope.'],
+      [
+        { r: '701', i: null, o: 4, v: 2 },
+        'The cursor points to entry 5, past the 4 entries in scope.',
+      ],
+    ])(
+      'rejects a mixed record offset at the end of its cursor scope: %j',
+      async (cursor, message) => {
+        serve({
+          '701': recordBody({
+            recid: '701',
+            _files: regularFiles(3),
+            _file_indices: [fileIndex('group_file_index.json', 1)],
+          }),
+        });
+        const result = await run({ recid: '701', cursor: cursorOf(cursor) });
+        const error = errorOf(result);
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toBe(message);
+        expect(error.data).toMatchObject({
+          reason: 'invalid_cursor',
+          offset: cursor.o,
+          total: cursor.o,
+          recovery: { hint: expect.stringContaining('again without cursor') },
+        });
+        expect(textOf(result)).toContain(
+          'Recovery: Call cern_opendata_list_files again without cursor',
+        );
+      },
+    );
 
     it('names a single file in scope in the singular', async () => {
       serve({ '719': recordBody({ recid: '719', _files: regularFiles(1) }) });
@@ -1831,7 +1994,7 @@ describe('cern_opendata_list_files format', () => {
     expect(text).toContain(
       '| file_b.root | Not available | 2048 | Not available | Not available | root://eospublic.cern.ch//eos/opendata/cms/file_b.root | https://opendata.cern.ch/record/6004/files/file_b.root |',
     );
-    expect(text.trimEnd().endsWith('**More files:** no')).toBe(true);
+    expect(text.trimEnd().endsWith('**More entries:** no')).toBe(true);
     expect(text).not.toContain('### File indexes');
     expect(text).not.toContain('**Child records:**');
   });
@@ -1880,7 +2043,7 @@ describe('cern_opendata_list_files format', () => {
     serve({ '5000': recordBody({ recid: '5000', _files: regularFiles(120) }) });
     const result = await run({ recid: '5000', limit: 50 });
     const cursor = success(result).next_cursor as string;
-    expect(textOf(result)).toContain(`**More files:** yes · **next_cursor:** \`${cursor}\``);
+    expect(textOf(result)).toContain(`**More entries:** yes · **next_cursor:** \`${cursor}\``);
   });
 
   it('renders one table row per file on the page', async () => {

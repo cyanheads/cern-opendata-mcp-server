@@ -33,7 +33,7 @@ import {
   METHODOLOGY_5208_HTML,
   TRIGGER_ABSTRACT_HTML,
 } from '../../fixtures/cern-opendata-upstream.js';
-import { expectLinearGrowth, expectLinearTime } from '../../fixtures/cpu-time.js';
+import { cpuTimingOptions, expectLinearGrowth, expectLinearTime } from '../../fixtures/cpu-time.js';
 import { variablesHit12220 } from '../../fixtures/record-metadata-upstream.js';
 
 describe('decodeEntities', () => {
@@ -227,7 +227,7 @@ describe('htmlToText', () => {
     ['quote-heavy attributes', (n) => `<img ${'a="b" '.repeat(n / 6)}src=/x>`],
     ['a line ending in a break', (n) => `<img alt="${'§1 x'.repeat(n / 4)}\ny" src=/x>`],
     ['breaks throughout', (n) => `<img alt="${'  \r\n'.repeat(n / 4)}" src=/x>`],
-  ])('converts %s with bounded image scanning', (shape, make) => {
+  ])('converts %s with bounded image scanning', cpuTimingOptions, (shape, make) => {
     expectLinearGrowth(make, htmlToText, {
       maxMs: 250,
       to: shape === 'digits in an image attribute' ? 320_000 : 40_000,
@@ -388,7 +388,7 @@ describe('htmlToText', () => {
     ['20,000 unclosed scripts', (n) => '<script>'.repeat(n), () => ''],
     ['20,000 block tags with no closing >', (n) => '<p'.repeat(n), (n) => '<p'.repeat(n)],
     ['20,000 tag openers with no closing >', (n) => '<'.repeat(n), (n) => '<'.repeat(n)],
-  ])('converts %s in linear time', (_shape, make, expected) => {
+  ])('converts %s in linear time', cpuTimingOptions, (_shape, make, expected) => {
     expect(htmlToText(make(20_000))).toBe(expected(20_000));
     expectLinearTime(make, htmlToText, { sizes: [1_250, 5_000, 20_000], maxMs: 250 });
   });
@@ -399,7 +399,7 @@ describe('htmlToText', () => {
     ['a bare < before an inline tag', (n) => 'm <<b>x</b> '.repeat(n / 12)],
     ['a bare < before a comment', (n) => 'x <<!-- c -->y '.repeat(n / 15)],
     ['unclosed block openers', (n) => '<p'.repeat(n / 2)],
-  ])('converts %s in time linear in its length', (_shape, make) => {
+  ])('converts %s in time linear in its length', cpuTimingOptions, (_shape, make) => {
     expectLinearTime(make, htmlToText, { maxMs: 200 });
   });
 });
@@ -512,7 +512,7 @@ describe('htmlToText tables', () => {
     ['quoted hrefs each ended by </tr>', (n) => '<a href="u">t</tr>'.repeat(n / 18)],
     ['cell openers interleaved with line breaks', (n) => '<td>x<br>'.repeat(n / 9)],
     ['a row of cells before a line break', (n) => `${'<td>x'.repeat(n / 5)}<br>y`],
-  ])('converts %s in time linear in its length', (_shape, make) => {
+  ])('converts %s in time linear in its length', cpuTimingOptions, (_shape, make) => {
     expectLinearGrowth(make, htmlToText, { maxMs: 250 });
   });
 });
@@ -532,7 +532,7 @@ describe('stripTags', () => {
     ['unclosed openers', (n) => '<a'.repeat(n / 2)],
     ['nested openers, <a<a<a…>>>', (n) => `${'<a'.repeat(n / 4)}${'>'.repeat(n / 2)}`],
     ['closed tags between bare < and >', (n) => '<b>x < y > z'.repeat(n / 12)],
-  ])('strips %s in time linear in its length', (_shape, make) => {
+  ])('strips %s in time linear in its length', cpuTimingOptions, (_shape, make) => {
     expectLinearTime(make, stripTags, { maxMs: 50 });
   });
 });
@@ -546,6 +546,12 @@ describe('fence', () => {
   it('is longer than the longest backtick run inside the text', () => {
     expect(fence('a ``` b')).toBe('````\na ``` b\n````');
     expect(fence('`` and ````` and `')).toBe('``````\n`` and ````` and `\n``````');
+  });
+
+  it('preserves a long text with many separate backtick runs', () => {
+    const text = `${'`\n'.repeat(200_000)}\`\`\`\`\n`;
+    const delimiter = '`````';
+    expect(fence(text)).toBe(`${delimiter}\n${text}\n${delimiter}`);
   });
 
   it('cannot be closed by the fenced text, whatever it contains', () => {
@@ -676,7 +682,7 @@ describe('oneLine', () => {
   it.each<[string, (count: number) => string, (count: number) => string]>([
     ['40,000 spaces', (n) => `a${' '.repeat(n)}b`, (n) => `a${' '.repeat(n)}b`],
     ['40,000 spaces before a line break', (n) => `a${' '.repeat(n)}\nb`, () => 'a b'],
-  ])('flattens %s in linear time', (_shape, make, expected) => {
+  ])('flattens %s in linear time', cpuTimingOptions, (_shape, make, expected) => {
     expect(oneLine(make(40_000))).toBe(expected(40_000));
     expectLinearTime(make, oneLine, { sizes: [2_500, 10_000, 40_000], maxMs: 250 });
   });

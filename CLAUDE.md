@@ -2,8 +2,8 @@
 
 **Server:** cern-opendata-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -15,7 +15,7 @@
 
 ## Domain
 
-Seven read-only tools and one declared record resource over the CERN Open Data Portal (`https://opendata.cern.ch`), a keyless Invenio application on OpenSearch. The published `cern-opendata-guide` also has SDK-generated skill resources. No prompts and no server-specific env vars.
+Seven read-only tools and one declared record resource over the CERN Open Data Portal (`https://opendata.cern.ch`), a keyless Invenio application on OpenSearch. The published `cern-opendata-guide` also has SDK-generated skill resources. `CERN_OPENDATA_CLAMP_LIMITS` controls oversized page requests.
 
 | Upstream route | Used by |
 |:---------------|:--------|
@@ -97,12 +97,13 @@ export const getRecords = tool('cern_opendata_get_records', {
     ids: requiredListInput(100, z.string().max(500).describe('One identifier: …'), 'At least one identifier is required (…, up to 100); …')
       .describe('Identifiers to resolve: up to 100, of which the first 20 distinct are looked up and the rest returned under deferred. …'),
     body_offset: blankAsUnset(z.number().int().min(0).default(0)).describe('With exactly one documentation or news id: where its body slice starts …'),
+    include_scripts: …, // Opt in to verbatim production scripts from methodology steps.
   }),
   output: z.object({
     records: z.array(RecordSchema).describe('Resolved records, in the order of their first matching input.'),
     missing: z.array(z.object({ input: …, interpreted_as: z.enum(INTERPRETED_AS)…, guidance: … }))
       .describe('Identifiers that resolved to no record; empty when every id resolved.'),
-    deferred: z.array(z.string()…).describe('Inputs left for another call, in input order: those whose records were left out to hold the response to 64,000 bytes (never the first record, …), then ids past the first 20, which were not looked up. …'),
+    deferred: z.array(z.string()…).describe('Ids past the first 20, in input order, not looked up. Pass as ids to fetch them; empty when none.'),
   }),
   enrichment: { notice: z.string().optional().describe('Caveats about the returned records, …') },
   errors: [
@@ -121,13 +122,12 @@ export const getRecords = tool('cern_opendata_get_records', {
     const classified = lookedUp.map(classifyIdentifier);
     const service = getCernOpenDataService();
     const { matches, missing } = await service.lookup(classified, service.startBudget(), ctx);
-    const resolved = matches.map((match) => toRecord(match.hit, match.matchedInputs, input.body_offset));
+    const resolved = matches.map((match) => toRecord(match.hit, match.matchedInputs, input.body_offset, input.include_scripts));
     // … invalid_body_offset when the one record has no body or the offset is past body_length
     const missingOut = missing.map((id) => ({ input: id.input, interpreted_as: id.kind, guidance: missingGuidance(id) }));
-    // Records in response order within 64,000 bytes a surface, unread ids charged; left-out records, then unread ids, go to `deferred`.
-    const { records, deferred, notice } = withinBudget(resolved, lookedUp, unread, missingOut);
+    const notice = responseNotice(resolved, unread.length);
     if (notice) ctx.enrich.notice(notice);
-    return { records, missing: missingOut, deferred };
+    return { records: resolved, missing: missingOut, deferred: unread };
   },
 
   // format() populates content[], the markdown twin of structuredContent; both must carry
@@ -178,7 +178,7 @@ No prompts. Server instructions carry essential routing and constraints; `skills
 
 ### Server config
 
-None. The portal is keyless, and the pacing limits, byte ceilings, the 50 s call budget and the cache sizes and lifetimes are constants in `CernOpenDataService`, overridable only through its constructor options in tests. If a setting ever needs to be configurable, add `src/config/server-config.ts` with `parseEnvConfig` (see the `api-config` skill), and list the variable in `.env.example`, the README config table, `server.json` (both package entries), `manifest.json` (`user_config` + `mcp_config.env`), and both plugin manifests.
+`CERN_OPENDATA_CLAMP_LIMITS` defaults to true. When false, each list tool advertises its page cap as the maximum and rejects larger values. The portal is keyless. Pacing, byte ceilings, call deadlines and cache limits are constants in `CernOpenDataService`.
 
 ### Server identity and instructions
 
@@ -194,6 +194,7 @@ await createApp({
   instructions: 'CERN Open Data Portal (opendata.cern.ch): collision and simulated datasets, … cern_opendata_get_records returns the citation.',
   sessionMode: 'stateless',
   setup(core) {
+    getServerConfig();
     initCernOpenDataService({ userAgent: `cern-opendata-mcp-server/${core.config.mcpServerVersion}` });
   },
   teardown() {
@@ -234,7 +235,7 @@ The rest of the Context surface (`ctx.state`, `ctx.requestInput`, `ctx.inputs`, 
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with the reason, retryability and delay when present, and the request ID. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -279,12 +280,14 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 ```text
 src/
   index.ts                                # createApp() entry point, server instructions
+  config/server-config.ts                 # Page-limit policy
   services/
     cern-opendata/
       cern-opendata-service.ts            # Portal client: pacer, retry, budget, accept-list, byte ceilings, caches
       guide-markdown.ts                   # Guide body line scans: fenced code, reference definitions, bracketed labels
       identifiers.ts                      # Recid spelling reduction, get_records id classification
       normalize.ts                        # Hits and records to output shapes, license, citation
+      production-metadata.ts              # Ordered production steps and cross-section projection
       query-syntax.ts                     # Search query delimiter scan (refused before sending)
       text.ts                             # HTML to text, inline neutralization, fences, URL printing
       trigger-parse.ts                    # Trigger path abstract parser
@@ -295,6 +298,7 @@ src/
     tools/
       inputs.ts                           # blankAsUnset, listInput, vocabularyListInput, requiredListInput, recidInput
       enrichment.ts                       # listEnrichment, start/finishListEnrichment, composeNotice
+      render-production-metadata.ts       # Production step table, scripts and cross-section text
       definitions/
         index.ts                          # allToolDefinitions barrel
         search-records.tool.ts
@@ -425,7 +429,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, so every root dev path needs a root-anchored exclusion (`/docs/`, never `docs/`, which also strips dependency paths); published root `skills/` stays included. `scripts/clean-mcpb.ts` then prunes dev dependencies and strips package-root agent docs, platform-specific native bindings, node-gyp generator output beside `binding.gyp` (compiled `*.node` addons stay), and build-only package files from the framework and `better-sqlite3`. Nested runtime paths such as the MCP SDK's `dist/ext/skills/` stay included. MCPB is stdio-only; HTTP and Workers deployments are unaffected. Consumers who do not need bundles can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips those checks.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, so every root dev path needs a root-anchored exclusion (`/docs/`, never `docs/`, which also strips dependency paths); published root `skills/` stays included. `scripts/clean-mcpb.ts` then prunes dev dependencies and strips agent docs at dependency roots and `SKILL.md` anywhere under a dependency, platform-specific native bindings, node-gyp generator output beside `binding.gyp` (compiled `*.node` addons stay), and build-only package files from the framework and `better-sqlite3`. Nested runtime paths such as the MCP SDK's `dist/ext/skills/` stay included. MCPB is stdio-only; HTTP and Workers deployments are unaffected. Consumers who do not need bundles can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips those checks.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

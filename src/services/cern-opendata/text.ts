@@ -390,7 +390,8 @@ export function htmlToText(html: string): string {
  * inside the text, so the text's own fences cannot close it.
  */
 export function fence(text: string): string {
-  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  let longestRun = 0;
+  for (const [run] of text.matchAll(/`+/g)) longestRun = Math.max(longestRun, run.length);
   const marker = '`'.repeat(Math.max(3, longestRun + 1));
   return `${marker}\n${text}\n${marker}`;
 }

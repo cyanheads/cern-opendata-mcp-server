@@ -51,7 +51,7 @@ import {
 } from '../enrichment.js';
 import {
   blankAsUnset,
-  LIMIT_CEILING,
+  limitInput,
   listInput,
   unrecognizedValues,
   vocabularyListInput,
@@ -60,7 +60,7 @@ import {
 const SORTS = ['bestmatch', 'mostrecent', 'title', 'title_desc'] as const;
 
 /** The most hits one page returns; a larger limit is served at it. */
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 1_000;
 
 /** The upstream spelling of each sort: the portal takes direction only from a `-` prefix. */
 const UPSTREAM_SORT: Record<(typeof SORTS)[number], SortKey> = {
@@ -449,9 +449,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     sort: blankAsUnset(z.enum(SORTS).optional()).describe(
       'bestmatch (relevance), mostrecent (by date_published, newest first), title (A-Z) or title_desc (Z-A). Omitted: bestmatch with a query, mostrecent (newest first) without.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(10)).describe(
-      'Hits per page, 1-50. A value above 50 is served at 50.',
-    ),
+    limit: limitInput(10, MAX_LIMIT, 'Hits per page'),
     page: blankAsUnset(z.number().int().min(1).default(1)).describe(
       'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
     ),
@@ -516,7 +514,7 @@ export const searchRecords = tool('cern_opendata_search_records', {
     {
       reason: 'page_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'page × limit, the limit applied (at most 50), exceeds 10,000, the deepest match the portal pages to.',
+      when: 'page × the applied limit exceeds 10,000, the deepest match the portal pages to.',
       recovery:
         'Narrow the search with filters such as experiment, type, file_type or year_from (the facets show how matches split), then call cern_opendata_search_records again from page 1.',
       severity: 'notice',
@@ -566,7 +564,13 @@ export const searchRecords = tool('cern_opendata_search_records', {
       unrecognizedValues(param, input[param]),
     );
 
-    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT, true);
+    const { limit, fragment: limitFragment } = applyLimit(
+      ctx,
+      'cern_opendata_search_records',
+      input.limit,
+      MAX_LIMIT,
+      true,
+    );
     startListEnrichment(ctx, limit);
     ctx.enrich({
       applied_filters: definedOnly<AppliedFilters>({

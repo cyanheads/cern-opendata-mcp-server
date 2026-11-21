@@ -640,7 +640,7 @@ describe('lookup cache', () => {
     );
     const slugs = pages.map((page) => String(page.id));
     expect(pages.every((page) => jsonBytes(page) === 252_275)).toBe(true);
-    // Each search answers with the pages it names: all 34 would pass the 8 MiB search ceiling.
+    // Return only the named hits so successive lookups exercise the 8 MiB cache.
     const { service, http, ctx } = makeService([
       searchRoute(
         answerByQuery((query) =>

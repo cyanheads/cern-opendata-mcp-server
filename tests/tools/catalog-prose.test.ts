@@ -32,7 +32,7 @@ describe('catalog prose', () => {
     expect(getRecords.output.shape.deferred.element.type).toBe('string');
     expect(RecordSchema.shape.body_offset.unwrap().type).toBe('number');
     expect(searchRecords.input.parse({})).toEqual({ limit: 10, page: 1 });
-    expect(searchRecords.input.safeParse({ limit: 10_001 }).success).toBe(false);
+    expect(searchRecords.input.safeParse({ limit: 10_001 }).success).toBe(true);
     expect(searchRecords.output.shape.facets.shape.type.shape.buckets.element.shape).toHaveProperty(
       'subtypes_other_count',
     );
@@ -41,11 +41,10 @@ describe('catalog prose', () => {
     ).toHaveProperty('subcategories_other_count');
   });
 
-  it('retains whole-first-record, lookup-cap and ordered continuation guidance', () => {
+  it('describes workload deferral and body continuation', () => {
     const deferred = getRecords.output.shape.deferred.description ?? '';
-    expect(deferred).toMatch(/64,000 bytes/);
-    expect(deferred).toMatch(/first record.*whole.*(?:larger|exceeds)/);
-    expect(deferred).toMatch(/then.*(?:past|after).*20.*not looked up/);
+    expect(deferred).not.toMatch(/byte|budget/i);
+    expect(deferred).toMatch(/past the first 20.*not looked up/);
     expect(deferred).toMatch(/input order/);
     expect(deferred).toMatch(/(?:Pass|pass).*ids/);
     expect(deferred).toMatch(/Empty|empty/);

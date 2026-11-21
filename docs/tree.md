@@ -1,6 +1,6 @@
 # cern-opendata-mcp-server - Directory Structure
 
-Generated on: 2026-10-30 09:36:37
+Generated on: 2026-11-21 17:52:36
 
 ```text
 cern-opendata-mcp-server/
@@ -141,6 +141,8 @@ cern-opendata-mcp-server/
 │   └── cern-opendata-guide/
 │       └── SKILL.md
 ├── src/
+│   ├── config/
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
@@ -157,7 +159,8 @@ cern-opendata-mcp-server/
 │   │   │   │   ├── search-records.tool.ts
 │   │   │   │   └── search-trigger-paths.tool.ts
 │   │   │   ├── enrichment.ts
-│   │   │   └── inputs.ts
+│   │   │   ├── inputs.ts
+│   │   │   └── render-production-metadata.ts
 │   │   └── record-schema.ts
 │   ├── services/
 │   │   └── cern-opendata/
@@ -165,6 +168,7 @@ cern-opendata-mcp-server/
 │   │       ├── guide-markdown.ts
 │   │       ├── identifiers.ts
 │   │       ├── normalize.ts
+│   │       ├── production-metadata.ts
 │   │       ├── query-syntax.ts
 │   │       ├── text.ts
 │   │       ├── trigger-parse.ts
@@ -177,7 +181,8 @@ cern-opendata-mcp-server/
 │   │   ├── cern-opendata-upstream.ts
 │   │   ├── cpu-time.ts
 │   │   ├── record-metadata-hits.json
-│   │   └── record-metadata-upstream.ts
+│   │   ├── record-metadata-upstream.ts
+│   │   └── record-production-hits.json
 │   ├── fuzz/
 │   ├── integration/
 │   ├── resources/
@@ -207,6 +212,7 @@ cern-opendata-mcp-server/
 │       ├── get-validated-runs.tool.test.ts
 │       ├── list-files.tool.test.ts
 │       ├── list-reference.tool.test.ts
+│       ├── record-production-metadata.test.ts
 │       ├── search-records.tool.test.ts
 │       ├── search-trigger-paths.tool.test.ts
 │       └── upstream-failures.test.ts
@@ -220,6 +226,7 @@ cern-opendata-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

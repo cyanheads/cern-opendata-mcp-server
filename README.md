@@ -60,7 +60,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 ### `cern_opendata_search_records` <sub>tool</sub>
 
 - Optional `query` (an OpenSearch `query_string`, up to 500 characters) plus OR-list filters `type`, `experiment`, `category` (physics category, `Higgs Physics::Standard Model`), `keywords`, `collision_energy`, `collision_type`, `file_type`, `availability`, `collection`, and the LHCb `magnet_polarity`, `stripping_stream` and `stripping_version`, each an array of values; `year_from`/`year_to` and `min_events`/`max_events` bound the data-taking year and event count
-- `sort` (`bestmatch`, `mostrecent` for newest `date_published` first, `title`, `title_desc`), `limit` 1–50 (default 10; a larger value, up to 10,000, is served at 50 with a notice) and `page` from 1, counting pages of the limit applied; `page × limit` past 10,000 fails as `page_window_exceeded`
+- `sort` (`bestmatch`, `mostrecent` for newest `date_published` first, `title`, `title_desc`), `limit` up to 1,000 (default 10) and `page` from 1, counting pages of the limit applied. `page × limit` past 10,000 fails as `page_window_exceeded`
 - Compact `hits` with recids, plus thirteen live `facets` that each ignore their own filter (`type` and `category` with up to 10 secondary values each, and `subtypes_other_count` or `subcategories_other_count` when the portal cuts that list); `applied_filters` echoes what ran, and values outside the verified vocabulary appear under `unrecognized_values`
 
 ---
@@ -70,7 +70,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 - `ids`: up to 100 recids, DOIs, CMS dataset paths (`/Primary/Era/TIER`) or documentation slugs, mixed in one array; the first 20 distinct are looked up and the rest returned in `deferred`
 - Each record carries a `license` with its `basis` (`record`, `cern_terms_default`, `not_stated`) and, when it has a DOI, a ready `citation`
 - Documentation and news bodies come in slices of up to 30,000 characters: `body_offset` with that one id reads on from the `body_next_offset` the last slice returned
-- Each response stays within 64,000 bytes, except that the first record always comes back whole: records past the budget are left out and listed in `deferred`, ahead of any ids past the first 20, to pass back as `ids`
+- Simulated datasets can include ordered `methodology_steps` and a `cross_section` with the portal’s values and units. Set `include_scripts: true` to retrieve inline production scripts as text. When scripts are omitted, the record gives their count and the call to retrieve them.
 - Records also return what they state of a `variables` dictionary (name, type, unit, description), a physics `category`, pile-up (`pileup_html`, with the pile-up datasets under `links`), `keywords`, and the LHCb `magnet_polarity` and `stripping` stream and version
 - Unresolved identifiers land in `missing` with `interpreted_as` and guidance instead of failing the call; file lists come from `cern_opendata_list_files`
 
@@ -78,8 +78,8 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern_opendata_list_files` <sub>tool</sub>
 
-- `recid` required; without `index`, returns the record's file indexes and regular files, and with an index key, that index's files, read without the rest of the record
-- `limit` 1–500 (default 50; a larger value, up to 10,000, is served at 500 with a notice), continued with `next_cursor`; each file carries `xrootd_uri`, `size_in_bytes`, `checksum` and `availability`, an `https_url` when one can be built from its key or EOS path, and `key` or `filename` as the portal states them, and each index a `uri_list_url` listing every XRootD URI in it
+- Without `index`, a record page lists file indexes first, then regular files. With an index key, it pages through that index’s member files.
+- `limit` up to 2,000 (default 50), continued with `next_cursor`; each file carries `xrootd_uri`, `size_in_bytes`, `checksum` and `availability`, an `https_url` when one can be built from its key or EOS path, and `key` or `filename` as the portal states them, and each index a `uri_list_url` listing every XRootD URI in it
 - Files marked `on demand` sit on tape and must be requested on the record's portal page first; an umbrella record with no files of its own returns its child recids under `children`
 
 ---
@@ -94,7 +94,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern_opendata_get_validated_runs` <sub>tool</sub>
 
-- Exactly one of `recid` (a CMS collision dataset or a validated-run list) or `run_period` (`Run2012B`; `2012B` also matches); `variant` `full` or `muons_only`; `run_min`/`run_max`; `limit` 1–2000 (default 200; a larger value, up to 10,000, is served at 2000 with a notice)
+- Exactly one of `recid` (a CMS collision dataset or a validated-run list) or `run_period` (`Run2012B`; `2012B` also matches); `variant` `full` or `muons_only`; `run_min`/`run_max`; `limit` up to 2,000 (default 200)
 - A dataset `recid` bounds the runs to the dataset's first and last listed run, echoed in `run_bounds`; when several lists match, `matched_lists` names them and no runs are read
 - Each run carries `lumi_sections` and `lumi_ranges`; `list.https_url` downloads the whole list file. CMS only: other records fail as `no_validated_runs`
 
@@ -102,7 +102,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern_opendata_search_trigger_paths` <sub>tool</sub>
 
-- `path`: an exact name (`HLT_IsoMu24`, `AlCa_EcalPi0`) or a prefix with one trailing `*` (`HLT_IsoMu*`); a name without the `HLT_` prefix is matched against record path names in the case given and also searched with `HLT_` added, and a `_v<n>` version suffix is dropped; optional `year`, `limit` 1–50 (default 10; a larger value, up to 10,000, is served at 50 with a notice) and `page`
+- `path`: an exact name (`HLT_IsoMu24`, `AlCa_EcalPi0`) or a prefix with one trailing `*` (`HLT_IsoMu*`); a name without the `HLT_` prefix is matched against record path names in the case given and also searched with `HLT_` added, and a `_v<n>` version suffix is dropped; optional `year`, `limit` up to 625 (default 10) and `page`
 - Each per-year record is parsed into the primary `datasets` its title names, `first_seen`, `last_seen`, per-version run ranges with their `l1_seed`, and HLT menu record links; `parsed: false` marks a record to read from its `abstract_html`
 - CMS open data from 2011–2016 only
 
@@ -117,7 +117,7 @@ Tool-only clients get the same data from `cern_opendata_get_records`.
 
 ### `cern-opendata://record/{recid}` <sub>resource</sub>
 
-- One record by `recid` (`6004`, or a prefixed recid such as `atlas-160006`; leading zeros ignored) as `application/json`, in the `cern_opendata_get_records` record shape: metadata (variable dictionary, physics category, pile-up and LHCb run conditions included), license and citation, without file lists
+- One record by `recid` (`6004`, or a prefixed recid such as `atlas-160006`; leading zeros ignored) as `application/json`, in the `cern_opendata_get_records` record shape: metadata (including production steps and cross section when stated), license and citation, with inline scripts omitted
 - `recid` comes from `cern_opendata_search_records`; reads carry a 15-minute public cache hint
 
 ## Features
@@ -131,7 +131,7 @@ CERN Open Data-specific:
 - Filter values canonicalized against the portal's verified vocabulary (`13 tev` → `13TeV`, `lhcb` → `LHCb`, `Pb-Pb` → `PbPb`, `dataset/collision` → `Dataset::Collision`); unknown values are sent as given and flagged
 - Tape-resident (`ondemand`) records are included in every search and lookup, where the portal otherwise drops them silently
 - File manifests, and file indexes read on their own, are cached for 15 minutes, so paging through a record's or an index's files costs one read
-- Records `cern_opendata_get_records` and the record resource resolved are cached for 15 minutes (up to 8 MiB), so fetching a budget-deferred record or following `body_next_offset` costs no further portal request
+- Lookup hits are cached for 15 minutes within an 8 MiB cache shared by the record tool and resource. A repeated lookup or body continuation reuses a cached hit.
 
 Agent-friendly output:
 
@@ -192,17 +192,20 @@ No API key or account is required. For Docker or a source build, see [Running th
 
 ## Configuration
 
-The server has no settings of its own; these framework variables apply.
+By default, a list tool serves an oversized `limit` at its cap and reports the applied value. To continue a search whose requested size was clamped to 50, pass `limit: 50` to keep the same offsets.
 
 | Variable | Description | Default |
 |:---|:---|:---|
+| `CERN_OPENDATA_CLAMP_LIMITS` | Serve oversized page requests at the tool’s cap. Set `false` to advertise the cap as a schema maximum and reject larger requests. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_HTTP_HOST` | HTTP server host. | `127.0.0.1` |
+| `MCP_HTTP_ENDPOINT_PATH` | Literal HTTP endpoint path. | `/mcp` |
+| `MCP_PUBLIC_URL` | Public HTTP(S) base URL for reverse-proxy deployments. Omit credentials, query parameters, and fragments. | Unset |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). Relative paths resolve from the server package. | `<app-root>/logs` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
 See [`.env.example`](./.env.example) for the common framework overrides.
@@ -211,7 +214,7 @@ See [`.env.example`](./.env.example) for the common framework overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 ```sh
 git clone https://github.com/cyanheads/cern-opendata-mcp-server.git

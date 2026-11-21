@@ -35,19 +35,20 @@ import {
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, LIMIT_CEILING, recidInput } from '../inputs.js';
+import { blankAsUnset, limitInput, recidInput } from '../inputs.js';
 
 /** Child recids named in the umbrella-record notice. */
 const CHILDREN_NAMED = 5;
 
-/** The most files one page returns; a larger limit is served at it. */
-const MAX_LIMIT = 500;
+/** The most entries one page returns. */
+const MAX_LIMIT = 2_000;
 
-/** The decoded `cursor`: recid, index key (`null` in record scope) and offset. */
+/** The decoded cursor. Version 2 uses a combined offset in record scope. */
 const CursorSchema = z.object({
   r: z.string(),
   i: z.string().nullable(),
   o: z.number().int().min(0),
+  v: z.literal(2).optional(),
 });
 
 type FilesCursor = z.infer<typeof CursorSchema>;
@@ -200,14 +201,14 @@ const ListFilesOutput = z.object({
     .describe("record: the record's indexes and regular files; index: one index's files."),
   indexes: z
     .array(IndexSchema)
-    .describe('Every file index in record scope; only the selected one in index scope.'),
+    .describe('File indexes on this page in record scope; the selected index in index scope.'),
   files: z
     .array(FileSchema)
     .describe('This page: regular files in record scope, index files in index scope.'),
   children: z
     .array(z.string().describe('One child recid.'))
     .describe('Child recids of a fileless umbrella record; empty otherwise.'),
-  has_more: z.boolean().describe('True when more files remain past this page.'),
+  has_more: z.boolean().describe('True when more entries remain past this page.'),
   next_cursor: z
     .string()
     .optional()
@@ -222,7 +223,7 @@ type ListFilesOut = z.infer<typeof ListFilesOutput>;
 export const listFiles = tool('cern_opendata_list_files', {
   title: 'List CERN Open Data Record Files',
   description:
-    "List one record's files: its file indexes (groups of up to ~1,500 files) with their XRootD URI-list URLs, and per file the XRootD URI, HTTPS download URL, size, adler32 checksum and availability. Without index, returns the record's indexes and its regular files; with index, reads only that index and pages through its files. Files marked on demand sit on tape and must be requested on the record's portal page before download.",
+    "List one record's files: its file indexes (groups of related files) with their XRootD URI-list URLs, and per file the XRootD URI, HTTPS download URL, size, adler32 checksum and availability. Without index, page through the record's indexes first, then its regular files. With index, page through its member files and include the selected index as metadata. Files marked on demand sit on tape and must be requested on the record's portal page before download.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     recid: recidInput().describe(
@@ -239,13 +240,11 @@ export const listFiles = tool('cern_opendata_list_files', {
     cursor: blankAsUnset(z.string().max(500).optional()).describe(
       'next_cursor from the previous page, unchanged, with the same recid and index. Omit for the first page.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(50)).describe(
-      'Files per page, 1-500. A value above 500 is served at 500.',
-    ),
+    limit: limitInput(50, MAX_LIMIT, 'Entries per page'),
   }),
   output: ListFilesOutput,
   enrichment: listEnrichment(
-    'Files in scope: regular files in record scope, index files in index scope.',
+    'Entries in scope: indexes and regular files in record scope, member files in index scope.',
   ),
   errors: [
     {
@@ -292,13 +291,18 @@ export const listFiles = tool('cern_opendata_list_files', {
   ],
 
   async handler(input, ctx) {
-    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT);
+    const { limit, fragment: limitFragment } = applyLimit(
+      ctx,
+      'cern_opendata_list_files',
+      input.limit,
+      MAX_LIMIT,
+    );
     startListEnrichment(ctx, limit);
     const indexKey = input.index ?? null;
 
-    let offset = 0;
+    let cursor: FilesCursor | undefined;
     if (input.cursor !== undefined) {
-      const cursor = decodeCursor(input.cursor);
+      cursor = decodeCursor(input.cursor);
       if (!cursor || cursor.r !== input.recid || cursor.i !== indexKey) {
         throw ctx.fail(
           'invalid_cursor',
@@ -308,7 +312,6 @@ export const listFiles = tool('cern_opendata_list_files', {
           { recid: input.recid, index: indexKey },
         );
       }
-      offset = cursor.o;
     }
 
     const service = getCernOpenDataService();
@@ -342,17 +345,37 @@ export const listFiles = tool('cern_opendata_list_files', {
       indexes = [lookup.listing.index];
     }
 
-    const total = scopeFiles.length;
-    if (offset > 0 && offset >= total) {
+    const indexCount = manifest?.indexes.length ?? 0;
+    const total = indexCount + scopeFiles.length;
+    const cursorOffset = cursor?.o ?? 0;
+    // Older record cursors counted only files because the caller already received every index.
+    const legacyRecordCursor =
+      manifest !== undefined && cursor !== undefined && cursor.v === undefined;
+    const cursorTotal = legacyRecordCursor ? scopeFiles.length : total;
+    const cursorItem = legacyRecordCursor || indexCount === 0 ? 'file' : 'entry';
+    if (cursorOffset > 0 && cursorOffset >= cursorTotal) {
+      const inScope = countOf(
+        cursorTotal,
+        cursorItem,
+        cursorItem === 'entry' ? 'entries' : undefined,
+      );
       throw ctx.fail(
         'invalid_cursor',
-        `The cursor points to file ${offset + 1}, past the ${countOf(total, 'file')} in scope.`,
-        { recid: input.recid, index: indexKey, offset, total },
+        `The cursor points to ${cursorItem} ${cursorOffset + 1}, past the ${inScope} in scope.`,
+        { recid: input.recid, index: indexKey, offset: cursorOffset, total: cursorTotal },
       );
     }
 
-    const page = scopeFiles.slice(offset, offset + limit);
-    const hasMore = offset + page.length < total;
+    const offset = legacyRecordCursor ? indexCount + cursorOffset : cursorOffset;
+    const end = offset + limit;
+    const pageIndexes = manifest ? indexes.slice(offset, end) : indexes;
+    const pageFiles = scopeFiles.slice(
+      Math.max(0, offset - indexCount),
+      Math.max(0, end - indexCount),
+    );
+    const shown = pageFiles.length + (manifest ? pageIndexes.length : 0);
+    const nextOffset = offset + shown;
+    const hasMore = nextOffset < total;
     const portalUrl = recordUrl(record.recid);
 
     const fragments = limitFragment ? [limitFragment] : [];
@@ -363,7 +386,7 @@ export const listFiles = tool('cern_opendata_list_files', {
       );
     }
     const onTape =
-      scopeFiles.filter((file) => file.availability === 'on demand').length +
+      scopeFiles.reduce((count, file) => count + Number(file.availability === 'on demand'), 0) +
       (manifest ? indexes.reduce((sum, index) => sum + (index.availability.on_demand ?? 0), 0) : 0);
     if (onTape > 0) {
       const [are, them] = onTape === 1 ? ['is', 'it'] : ['are', 'them'];
@@ -395,13 +418,14 @@ export const listFiles = tool('cern_opendata_list_files', {
       }
     }
     if (hasMore) {
+      const entries = indexCount > 0 ? 'entries' : 'files';
       fragments.push(
-        `Showing files ${offset + 1}–${offset + page.length} of ${total}; call cern_opendata_list_files again with cursor set to next_cursor.`,
+        `Showing ${entries} ${offset + 1}–${nextOffset} of ${total}; call cern_opendata_list_files again with cursor set to next_cursor.`,
       );
     }
 
     finishListEnrichment(ctx, {
-      shown: page.length,
+      shown,
       total,
       cap: limit,
       truncated: hasMore,
@@ -414,12 +438,17 @@ export const listFiles = tool('cern_opendata_list_files', {
       availability: record.availability,
       availability_details: record.availability_details,
       scope: indexKey === null ? 'record' : 'index',
-      indexes: indexes.map((index) => toIndexOut(record.recid, index)),
-      files: page.map((file) => toFileOut(record.recid, file)),
+      indexes: pageIndexes.map((index) => toIndexOut(record.recid, index)),
+      files: pageFiles.map((file) => toFileOut(record.recid, file)),
       children: manifest?.children ?? [],
       has_more: hasMore,
       next_cursor: hasMore
-        ? encodeCursor({ r: input.recid, i: indexKey, o: offset + page.length })
+        ? encodeCursor({
+            r: input.recid,
+            i: indexKey,
+            o: nextOffset,
+            ...(manifest ? { v: 2 } : {}),
+          })
         : undefined,
       portal_url: portalUrl,
     });
@@ -466,7 +495,7 @@ export const listFiles = tool('cern_opendata_list_files', {
     }
     lines.push(
       '',
-      `**More files:** ${result.has_more ? 'yes' : 'no'}${result.next_cursor ? ` · **next_cursor:** \`${result.next_cursor}\`` : ''}`,
+      `**More ${result.scope === 'record' ? 'entries' : 'files'}:** ${result.has_more ? 'yes' : 'no'}${result.next_cursor ? ` · **next_cursor:** \`${result.next_cursor}\`` : ''}`,
     );
     return [{ type: 'text', text: lines.join('\n') }];
   },

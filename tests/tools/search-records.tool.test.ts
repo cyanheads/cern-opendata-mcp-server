@@ -2,8 +2,8 @@
  * @fileoverview Tests for cern_opendata_search_records: registration and
  * contract, blank-as-unset and canonicalizing inputs, the request sent on the
  * wire, applied_filters and unrecognized values, required enrichment on the
- * zero-result, under-cap, truncated and past-the-end pages, a limit above 50
- * served at 50, the page-window rejection split from an invalid query, every declared error on the wire, and
+ * zero-result, under-cap, truncated and past-the-end pages, limit clamping,
+ * the page-window rejection split from an invalid query, every declared error on the wire, and
  * the text twin of structuredContent. Upstream I/O is a strict fetch fake.
  * @module tests/tools/search-records.tool.test
  */
@@ -333,7 +333,6 @@ describe('cern_opendata_search_records input', () => {
     ['negative max_events', { max_events: -1 }],
     ['an unknown sort', { sort: 'bogus' }],
     ['limit 0', { limit: 0 }],
-    ['limit 10001', { limit: 10_001 }],
     ['a fractional limit', { limit: 20.5 }],
     ['page 0', { page: 0 }],
     ['a fractional page', { page: 1.5 }],
@@ -1221,85 +1220,106 @@ describe('cern_opendata_search_records enrichment', () => {
   });
 });
 
-describe('cern_opendata_search_records limit above 50', () => {
+describe('cern_opendata_search_records limit', () => {
   const clamped = (requested: number) =>
-    `limit ${requested} is above this tool's maximum of 50, so 50 was applied, and page numbers count pages of 50.`;
+    `limit ${requested} is above this tool's maximum of 1000, so 1000 was applied, and page numbers count pages of 1000.`;
 
   /** The trailer line that renders the notice, and the trailer's cap line. */
   const trailerLines = (result: ContractResult) => textOf(result, 1).split('\n');
 
-  it('serves limit 60 at 50: the request, cap, shown, has_more and the notice all use 50', async () => {
-    const { http } = serve(searchBody(syntheticHits(50), { total: 95 }));
-    const result = await run({ limit: 60 });
+  it('clamps a large limit and discloses the applied cap and continuation on both surfaces', async () => {
+    const { http } = serve(searchBody(syntheticHits(1_000), { total: 1_095 }));
+    const result = await run({ limit: 1e20 });
     const data = success(result);
-    expect(paramsOf(http).get('size')).toBe('50');
+    expect(paramsOf(http).get('size')).toBe('1000');
     expect(data).toMatchObject({
       truncated: true,
-      shown: 50,
-      cap: 50,
-      totalCount: 95,
+      shown: 1_000,
+      cap: 1_000,
+      totalCount: 1_095,
       has_more: true,
       page: 1,
     });
-    expect(data.hits).toHaveLength(50);
-    const notice = `${clamped(60)} Showing 1–50 of 95; call cern_opendata_search_records again with page 2, or narrow with filters.`;
+    expect(data.hits).toHaveLength(1_000);
+    const notice = `${clamped(1e20)} Showing 1–1000 of 1095; call cern_opendata_search_records again with page 2, or narrow with filters.`;
     expect(data.notice).toBe(notice);
     expect(trailerLines(result)).toContain(`> ${notice}`);
-    expect(trailerLines(result)).toContain('**cap:** 50');
+    expect(trailerLines(result)).toContain('**cap:** 1000');
   });
 
-  it('pages by the applied limit: page 200 at limit 60 returns matches 9951–10000', async () => {
-    const { http } = serve(searchBody(syntheticHits(50), { total: 35_747 }));
-    const data = success(await run({ limit: 60, page: 200 }));
-    expect(paramsOf(http).get('size')).toBe('50');
-    expect(paramsOf(http).get('page')).toBe('200');
-    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 50, cap: 50 });
+  it('pages by the applied limit: page 10 at limit 1001 returns matches 9001–10000', async () => {
+    const { http } = serve(searchBody(syntheticHits(1_000), { total: 35_747 }));
+    const data = success(await run({ limit: 1_001, page: 10 }));
+    expect(paramsOf(http).get('size')).toBe('1000');
+    expect(paramsOf(http).get('page')).toBe('10');
+    expect(data).toMatchObject({ truncated: true, has_more: false, shown: 1_000, cap: 1_000 });
     expect(data.notice).toBe(
-      `${clamped(60)} Showing 9951–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.`,
+      `${clamped(1_001)} Showing 9001–10000 of 35747; this is the last page within the first 10,000 matches, the deepest the portal pages to. Add filters to reach the rest.`,
     );
   });
 
-  it('refuses page 201 at limit 60 before any request, naming the limit applied', async () => {
+  it('refuses page 11 at limit 1001 before any request, naming the limit applied', async () => {
     const { http } = serve(emptySearchBody);
-    const result = await run({ limit: 60, page: 201 });
+    const result = await run({ limit: 1_001, page: 11 });
     const error = errorOf(result);
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.message).toBe(
-      'page 201 × limit 50 (the maximum; 60 was requested) reaches past match 10000, the deepest the portal pages to.',
+      'page 11 × limit 1000 (the maximum; 1001 was requested) reaches past match 10000, the deepest the portal pages to.',
     );
     expect(error.data).toMatchObject({
       reason: 'page_window_exceeded',
-      page: 201,
-      limit: 50,
-      requested_limit: 60,
+      page: 11,
+      limit: 1_000,
+      requested_limit: 1_001,
       window: 10_000,
     });
     expect(hintOf(error)).toContain('Narrow the search');
     expect(http.calls).toHaveLength(0);
   });
 
+  it('rejects the formerly clamped page at the new cap and keeps its offsets at 50', async () => {
+    const { http } = serve(searchBody(syntheticHits(50), { total: 12_000 }));
+    const filters = { type: ['Dataset::Simulated'], page: 11 };
+    expect(errorOf(await run({ ...filters, limit: 1_000 })).data).toMatchObject({
+      reason: 'page_window_exceeded',
+      page: 11,
+      limit: 1_000,
+    });
+    expect(http.calls).toHaveLength(0);
+    const data = success(await run({ ...filters, limit: 50 }));
+    expect(paramsOf(http).get('size')).toBe('50');
+    expect(paramsOf(http).get('page')).toBe('11');
+    expect(data.notice).toContain('Showing 501–550');
+  });
+
   it('counts the last page in pages of the applied limit when the page is past the end', async () => {
-    serve(searchBody([], { total: 95 }));
-    const data = success(await run({ limit: 60, page: 3 }));
-    expect(data).toMatchObject({ hits: [], truncated: false, shown: 0, cap: 50, totalCount: 95 });
+    serve(searchBody([], { total: 1_095 }));
+    const data = success(await run({ limit: 1_001, page: 3 }));
+    expect(data).toMatchObject({
+      hits: [],
+      truncated: false,
+      shown: 0,
+      cap: 1_000,
+      totalCount: 1_095,
+    });
     expect(data.notice).toBe(
-      `${clamped(60)} Page 3 is past the last page (95 matches); call cern_opendata_search_records again with page 2.`,
+      `${clamped(1_001)} Page 3 is past the last page (1095 matches); call cern_opendata_search_records again with page 2.`,
     );
   });
 
   it('names the requested limit on a zero-result page too', async () => {
     serve(emptySearchBody);
-    const data = success(await run({ limit: 75 }));
-    expect(data).toMatchObject({ truncated: false, shown: 0, cap: 50, totalCount: 0 });
-    expect(data.notice).toBe(clamped(75));
+    const data = success(await run({ limit: 1_075 }));
+    expect(data).toMatchObject({ truncated: false, shown: 0, cap: 1_000, totalCount: 0 });
+    expect(data.notice).toBe(clamped(1_075));
   });
 
-  it('serves the 10,000 ceiling at 50', async () => {
+  it('clamps a limit beyond the 10,000-match window on an under-cap page', async () => {
     const { http } = serve(searchBody(syntheticHits(5), { total: 5 }));
-    const data = success(await run({ limit: 10_000 }));
-    expect(paramsOf(http).get('size')).toBe('50');
-    expect(data).toMatchObject({ truncated: false, shown: 5, cap: 50, totalCount: 5 });
-    expect(data.notice).toBe(clamped(10_000));
+    const data = success(await run({ limit: 10_001 }));
+    expect(paramsOf(http).get('size')).toBe('1000');
+    expect(data).toMatchObject({ truncated: false, shown: 5, cap: 1_000, totalCount: 5 });
+    expect(data.notice).toBe(clamped(10_001));
   });
 
   it('leaves a limit of exactly 50 as it was: no clamp fragment', async () => {
@@ -1311,14 +1331,26 @@ describe('cern_opendata_search_records limit above 50', () => {
     );
   });
 
-  it('advertises the 10,000 ceiling and says what a value above 50 does', () => {
+  it('returns the requested 1,000 hits, with order and paging on both surfaces', async () => {
+    const hits = syntheticHits(1_000);
+    const { http } = serve(searchBody(hits, { total: 1_005 }));
+    const result = await run({ limit: 1_000 });
+    const data = success(result);
+    expect(paramsOf(http).get('size')).toBe('1000');
+    expect(data.hits.map((hit) => hit.id)).toEqual(hits.map((hit) => String(hit.id)));
+    expect(data).toMatchObject({ shown: 1_000, cap: 1_000, truncated: true, has_more: true });
+    expect(textOf(result, 1)).toContain('Showing 1–1000 of 1005');
+  });
+
+  it('advertises the limit as an integer with no maximum and describes clamping', () => {
     const { properties } = z.toJSONSchema(searchRecords.input, { io: 'input' }) as {
       properties: Record<string, { description?: string; maximum?: number }>;
     };
     expect(properties.limit).toMatchObject({
-      maximum: 10_000,
-      description: 'Hits per page, 1-50. A value above 50 is served at 50.',
+      type: 'integer',
+      description: 'Hits per page. Values above 1000 are served at that limit.',
     });
+    expect(JSON.stringify(properties.limit)).not.toContain('maximum');
     expect(properties.page?.description).toBe(
       'Page number, from 1, counting pages of the limit applied. page × limit may not exceed 10,000.',
     );

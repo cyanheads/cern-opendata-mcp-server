@@ -6,10 +6,11 @@
  */
 
 import type { McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { ProductionMetadata } from './production-metadata.js';
 
 // Raw upstream payloads (opendata.cern.ch, invenio-records-rest)
 
-/** A link entry in `abstract`, `note`, `usage`, `validation`, `use_with` or software `links`. */
+/** A link entry listed by a section of portal metadata. */
 export interface RawLink {
   description?: string;
   recid?: string;
@@ -67,6 +68,7 @@ export interface RawMetadata {
   collaboration?: { name?: string; recid?: string } | null;
   collections?: string[];
   collision_information?: { energy?: string; type?: string } | null;
+  cross_section?: unknown;
   /** Inline variable dictionary; `description` is HTML. */
   dataset_semantics?: RawVariable[] | null;
   dataset_semantics_files?: { json?: string; url?: string } | null;
@@ -88,7 +90,7 @@ export interface RawMetadata {
   links?: RawLink[];
   /** LHCb: `MagDown` or `MagUp`. */
   magnet_polarity?: string;
-  methodology?: RawSection | null;
+  methodology?: (RawSection & { steps?: unknown }) | null;
   note?: RawSection | null;
   /** CMS simulated data: the pile-up description (HTML) and the pile-up datasets, linked by `title`. */
   pileup?: { description?: string; links?: { recid?: string; title?: string }[] } | null;
@@ -413,15 +415,20 @@ export interface Citation {
   text: string;
 }
 
-/** Which metadata section a record link came from. */
-export type LinkSource =
-  | 'abstract'
-  | 'note'
-  | 'usage'
-  | 'validation'
-  | 'use_with'
-  | 'pileup'
-  | 'software';
+/** Metadata sections with their own array of links. */
+export const LINK_SECTIONS = [
+  'abstract',
+  'methodology',
+  'note',
+  'usage',
+  'validation',
+  'use_with',
+] as const;
+
+/** Provenance values emitted in a record's links. */
+export const LINK_SOURCES = [...LINK_SECTIONS, 'pileup', 'software'] as const;
+
+export type LinkSource = (typeof LINK_SOURCES)[number];
 
 export interface RecordLink {
   description?: string;
@@ -464,7 +471,7 @@ export interface SystemDetails {
 }
 
 /** The Record shape shared by `cern_opendata_get_records` and `cern-opendata://record/{recid}`. */
-export interface RecordShape {
+export interface RecordShape extends ProductionMetadata {
   abstract_html?: string;
   authors?: { name: string; orcid?: string }[];
   availability?: string;

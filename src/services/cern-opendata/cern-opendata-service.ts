@@ -86,7 +86,7 @@ const ROUTES: Record<
 > = {
   search: {
     accept: new Set([200, 400, 404, 429]),
-    limitBytes: 8 * MiB,
+    limitBytes: 64 * MiB,
     attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
   },
   record: { accept: new Set([200, 404, 429]), limitBytes: 32 * MiB },

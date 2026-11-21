@@ -41,7 +41,7 @@ import {
   listEnrichment,
   startListEnrichment,
 } from '../enrichment.js';
-import { blankAsUnset, LIMIT_CEILING, recidInput } from '../inputs.js';
+import { blankAsUnset, limitInput, recidInput } from '../inputs.js';
 
 /** The most runs one call returns; a larger limit is served at it. */
 const MAX_LIMIT = 2000;
@@ -329,9 +329,7 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
     run_max: blankAsUnset(z.number().int().min(1).optional()).describe(
       'Highest run to return, inclusive. Defaults with run_min for a dataset recid.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(200)).describe(
-      'Runs to return, 1-2000. A value above 2000 is served at 2000.',
-    ),
+    limit: limitInput(200, MAX_LIMIT, 'Runs to return'),
   }),
   output: GetValidatedRunsOutput,
   enrichment: listEnrichment('Runs in the selected list inside run_bounds.'),
@@ -396,7 +394,12 @@ export const getValidatedRuns = tool('cern_opendata_get_validated_runs', {
   ],
 
   async handler(input, ctx) {
-    const { limit, fragment: limitFragment } = applyLimit(input.limit, MAX_LIMIT);
+    const { limit, fragment: limitFragment } = applyLimit(
+      ctx,
+      'cern_opendata_get_validated_runs',
+      input.limit,
+      MAX_LIMIT,
+    );
     startListEnrichment(ctx, limit);
     const { recid, run_period: runPeriod, run_min: runMin, run_max: runMax } = input;
     const selection = selectionOf(recid, runPeriod);

@@ -28,6 +28,7 @@ import {
   filesRecordBody,
   HTML_ERROR_PAGE,
   jsonResponse,
+  oversizedResponse,
   portalRoute,
   SYNTAX_ERROR_BODY,
 } from '../fixtures/cern-opendata-upstream.js';
@@ -57,7 +58,7 @@ const TARGETS: Target[] = [
     tool: 'cern_opendata_search_records',
     route: searchRoute,
     healthy: emptySearchBody,
-    limitBytes: 8 * MiB,
+    limitBytes: 64 * MiB,
     input: (n) => ({ query: `q${n}` }),
   },
   {
@@ -65,7 +66,7 @@ const TARGETS: Target[] = [
     tool: 'cern_opendata_get_records',
     route: searchRoute,
     healthy: emptySearchBody,
-    limitBytes: 8 * MiB,
+    limitBytes: 64 * MiB,
     input: (n) => ({ ids: [String(1000 + n)] }),
   },
   {
@@ -122,6 +123,7 @@ describe.each(TARGETS)('$name: upstream failures on the wire', (target) => {
     expect(text).toContain('Recovery: Wait the retryAfter seconds');
     expect(text).toContain(`call ${target.tool} again`);
     expect(text).toContain('reason rate_limited');
+    expect(text).toContain('retry after 60');
     expect(http.calls).toHaveLength(1);
   });
 
@@ -275,6 +277,8 @@ describe('search_records: a 500 on every attempt', () => {
       retryAttempts: 3,
     });
     expect(error.data).not.toHaveProperty('retryable');
+    expect(error.data).not.toHaveProperty('body');
+    expect(error.data).not.toHaveProperty('responseBody');
     expect(error.message).toBe(
       'CERN Open Data answered HTTP 500 to all 3 attempts at this search, as it does for some malformed queries.',
     );
@@ -289,9 +293,13 @@ describe('search_records: a 500 on every attempt', () => {
 
   it('keeps the baseline ServiceUnavailable for a search without query', async () => {
     const { http } = answering(500);
-    const error = errorOf(await searchWith({ experiment: 'CMS' }));
+    const result = await searchWith({ experiment: 'CMS' });
+    const error = errorOf(result);
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.data).toMatchObject({ status: 500, retryAttempts: 3 });
+    expect(error.data).not.toHaveProperty('body');
+    expect(error.data).not.toHaveProperty('responseBody');
+    expect(textOf(result)).not.toContain('<html>Internal Server Error</html>');
     expect(error.data).not.toHaveProperty('reason');
     expect(http.calls).toHaveLength(3);
   });
@@ -345,16 +353,14 @@ describe('search_records: a 500 on every attempt', () => {
   });
 });
 
-describe('search_records: a streamed body over the 8 MiB ceiling', () => {
+describe('search_records: a streamed body over the 64 MiB ceiling', () => {
   it('maps it to non-retryable upstream_unreadable after one request', async () => {
-    const { http } = installService([
-      searchRoute(() => new Response('x'.repeat(8 * MiB + 1), { status: 200 })),
-    ]);
+    const { http } = installService([searchRoute(() => oversizedResponse(64 * MiB))]);
     const result = await settled(TARGETS[0] as Target);
     expect(errorOf(result).data).toMatchObject({
       reason: 'upstream_unreadable',
       retryable: false,
-      limitBytes: 8 * MiB,
+      limitBytes: 64 * MiB,
     });
     expect(http.calls).toHaveLength(1);
   });

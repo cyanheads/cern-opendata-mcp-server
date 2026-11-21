@@ -7,6 +7,7 @@
  */
 
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { productionMetadataOf } from './production-metadata.js';
 import { PORTAL_ORIGIN, sliceText } from './text.js';
 import type {
   AvailabilityCounts,
@@ -36,6 +37,7 @@ import type {
   SystemDetails,
   ValidatedRunList,
 } from './types.js';
+import { LINK_SECTIONS } from './types.js';
 
 /** Doc and news bodies are cut at this many characters (Decision 14). */
 export const DOC_BODY_MAX_CHARS = 30_000;
@@ -276,8 +278,6 @@ export function citationOf(meta: RawMetadata, doi: string): Citation {
   return { text: parts.join(' '), doi, request: CITATION_REQUEST };
 }
 
-const LINK_SECTIONS = ['abstract', 'note', 'usage', 'validation', 'use_with'] as const;
-
 /** Pile-up links name their dataset in `title`, which becomes the link's `description`. */
 function pileupLinksOf(meta: RawMetadata) {
   const links = meta.pileup?.links;
@@ -425,19 +425,32 @@ function strippingOf(meta: RawMetadata): RecordShape['stripping'] {
  * `matchedInputs` lists the caller's ids that resolved here; the resource
  * passes `[recid]`. A doc or news body is returned as a slice of at most
  * {@link DOC_BODY_MAX_CHARS} UTF-16 units from `bodyOffset` (Decision 50).
+ * Inline configurations are included only on explicit opt-in.
  */
-export function toRecord(hit: RawHit, matchedInputs: string[], bodyOffset = 0): RecordShape {
+export function toRecord(
+  hit: RawHit,
+  matchedInputs: string[],
+  bodyOffset = 0,
+  includeScripts = false,
+): RecordShape {
   const meta = hit.metadata;
+  const recid = str(meta.recid);
   const slug = str(meta.slug);
   const doi = str(meta.doi);
   const body = str(meta.body?.content);
   const slice = body === undefined ? undefined : sliceText(body, bodyOffset, DOC_BODY_MAX_CHARS);
   const more = slice !== undefined && slice.end < (body?.length ?? 0);
   const collaborationName = str(meta.collaboration?.name);
+  const { methodology_steps, methodology_scripts_notice, cross_section } = productionMetadataOf(
+    meta.methodology?.steps,
+    meta.cross_section,
+    recid ?? slug ?? String(hit.id),
+    includeScripts,
+  );
   return definedOnly<RecordShape>({
     id: String(hit.id),
     kind: slug ? 'doc' : 'record',
-    recid: str(meta.recid),
+    recid,
     slug,
     matched_inputs: matchedInputs,
     title: str(meta.title),
@@ -462,9 +475,12 @@ export function toRecord(hit: RawHit, matchedInputs: string[], bodyOffset = 0): 
     collision_energy: str(meta.collision_information?.energy),
     collision_type: str(meta.collision_information?.type),
     distribution: distributionOf(meta),
+    cross_section,
     availability_details: availabilityCounts(meta._availability_details),
     abstract_html: str(meta.abstract?.description),
     methodology_html: str(meta.methodology?.description),
+    methodology_steps,
+    methodology_scripts_notice,
     usage_html: str(meta.usage?.description),
     validation_html: str(meta.validation?.description),
     note_html: str(meta.note?.description),

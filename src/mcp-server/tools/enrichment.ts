@@ -8,8 +8,15 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { ATTR_MCP_TOOL_NAME, createCounter } from '@cyanheads/mcp-ts-core/utils';
 import { PAGE_WINDOW } from '@/services/cern-opendata/cern-opendata-service.js';
 import { oneLine } from '@/services/cern-opendata/text.js';
+
+const countClamped = createCounter(
+  'mcp.input.count_clamped',
+  'Tool count inputs clamped',
+  '{calls}',
+);
 
 /**
  * The enrichment fields every list-shaped tool declares. `totalDescription`
@@ -46,11 +53,15 @@ export function startListEnrichment(ctx: Context, cap: number): void {
  * pages of the applied limit, for the tools that page by number.
  */
 export function applyLimit(
+  ctx: Context,
+  tool: string,
   requested: number,
   max: number,
   paged = false,
 ): { fragment: string | undefined; limit: number } {
   if (requested <= max) return { limit: requested, fragment: undefined };
+  ctx.log.info('Count input clamped', { field: 'limit', requested, applied: max });
+  countClamped.add(1, { [ATTR_MCP_TOOL_NAME]: tool, 'mcp.input.field': 'limit' });
   const pages = paged ? `, and page numbers count pages of ${max}` : '';
   return {
     limit: max,
@@ -67,9 +78,6 @@ export function composeNotice(fragments: readonly (string | undefined)[]): strin
   const parts = fragments.filter((fragment): fragment is string => Boolean(fragment));
   return parts.length > 0 ? oneLine(parts.join(' ')) : undefined;
 }
-
-/** Limits in the tools' 1-50 range whose last page ends exactly at match 10,000, smallest first. */
-const WINDOW_END_LIMITS = [10, 20, 25, 40, 50] as const;
 
 /**
  * The notice for the last page a search pages to at this limit. When the limit
@@ -92,7 +100,9 @@ export function lastPageNotice(
   if (to >= end) {
     return `${showing}; this is the last page within the first 10,000 matches, the deepest the portal pages to. ${narrow} to reach the rest.`;
   }
-  const tail = WINDOW_END_LIMITS.find((size) => size >= PAGE_WINDOW - to) ?? 50;
+  // Both tool caps divide the window, so a sufficient divisor exists at or below each cap.
+  let tail = Math.max(10, PAGE_WINDOW - to);
+  while (PAGE_WINDOW % tail !== 0) tail += 1;
   const tailFrom = Math.max(PAGE_WINDOW - tail + 1, from);
   const rest = to + 1 === end ? `match ${end}` : `matches ${to + 1}–${end}`;
   const shown =

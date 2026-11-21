@@ -4,7 +4,7 @@
  * `missing` with guidance (unrecognized ids included), the uppercase-DOI retry,
  * license and citation in every record, doc-body slices read on with
  * `body_offset` and their notice, the variable dictionary, category, pile-up
- * and LHCb fields, the 64,000-byte response budget and its `deferred` list,
+ * and LHCb fields, complete resolved batches,
  * the ids past the first 20 that are deferred unread, sparse payloads, the text twin of structuredContent, table abstracts, and
  * errors on the wire.
  * @module tests/tools/get-records.tool.test
@@ -130,7 +130,7 @@ describe('cern_opendata_get_records registration', () => {
     }
   });
 
-  it('advertises up to 100 ids, the first 20 looked up, and the first-record exemption from the budget', () => {
+  it('advertises up to 100 ids and the 20-id lookup cap', () => {
     const input = z.toJSONSchema(getRecords.input, { io: 'input', unrepresentable: 'any' }) as {
       properties: Record<string, { description?: string; maxItems?: number }>;
     };
@@ -143,17 +143,10 @@ describe('cern_opendata_get_records registration', () => {
       properties: Record<string, { description?: string }>;
     };
     const deferred = output.properties.deferred?.description;
-    expect(deferred).toMatch(
-      /budget.*records.*input order.*then ids past the first 20.*not looked up/i,
-    );
-    expect(deferred).toMatch(/64,000 bytes/);
-    expect(deferred).toMatch(/first record.*whole.*larger/i);
+    expect(deferred).toMatch(/past the first 20.*input order.*not looked up/i);
     expect(deferred).toMatch(/pass.*ids.*fetch/i);
     expect(deferred).toMatch(/empty when none/i);
-    expect(getRecords.description).toContain(
-      ' Each response holds to 64,000 bytes, except that the first record always comes back whole: records past the budget, and ids past the first 20, are listed under deferred, to pass back as ids. ',
-    );
-    expect(getRecords.description).not.toContain('Each response holds to 64,000 bytes:');
+    expect(getRecords.description).not.toMatch(/64,000|byte budget/i);
   });
 });
 
@@ -1495,248 +1488,58 @@ describe('cern_opendata_get_records variables, category, pile-up and LHCb fields
   });
 });
 
-const BUDGET = 64_000;
-const deferralNotice = (n: number) =>
-  n === 1
-    ? 'The response reached its 64,000-byte budget, so 1 record was deferred; call cern_opendata_get_records with ids set to the deferred list to fetch it.'
-    : `The response reached its 64,000-byte budget, so ${n} records were deferred; call cern_opendata_get_records with ids set to the deferred list to fetch them.`;
-
-/** UTF-8 bytes of each surface the caller receives: structuredContent JSON and every content[] text block. */
-function surfaces(result: ContractResult) {
-  return {
-    json: Buffer.byteLength(JSON.stringify(result.structuredContent)),
-    text: Buffer.byteLength(
-      result.content.map((block) => (block.type === 'text' ? block.text : '')).join(''),
-    ),
-  };
-}
-
 const runArgs = (args: { body_offset?: unknown; ids: unknown }) =>
   runToolContract(getRecords, args as never);
 
-describe('cern_opendata_get_records response budget', () => {
-  it('budgets expanded image references with an ordered continuation and a whole first record', async () => {
+describe('cern_opendata_get_records complete batches', () => {
+  it('returns large variable dictionaries and following records in the same call', async () => {
+    const { http } = servePool([largeVariablesHit12320, unitsHit84000]);
+    const result = await run(['12320', '84000', 'no-such-page', 'recid:12320']);
+    const data = success(result);
+    expect(data.records.map((record) => record.id)).toEqual(['12320', '84000']);
+    expect(data.records[0]?.matched_inputs).toEqual(['12320', 'recid:12320']);
+    expect(data.records[0]?.variables).toHaveLength(622);
+    expect(data.missing.map((entry) => entry.input)).toEqual(['no-such-page']);
+    expect(data.deferred).toEqual([]);
+    expect(data).not.toHaveProperty('notice');
+    expect(textOf(result)).toContain('**id:** 84000');
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('includes every image reference when rendered text outgrows the metadata', async () => {
     const html = '<img src=/x>'.repeat(2_400);
     servePool([
       hit(9300, { recid: '9300', title: 'First' }),
       hit(9301, { recid: '9301', title: 'Images', abstract: { description: html } }),
       hit(9302, { recid: '9302', title: 'Last' }),
     ]);
-    const first = await run(['9300', '9301', '9302']);
-    expect(success(first).records.map((record) => record.id)).toEqual(['9300']);
-    expect(success(first).deferred).toEqual(['9301', '9302']);
-    expect(surfaces(first).text).toBeLessThanOrEqual(BUDGET);
-    const second = await run(success(first).deferred);
-    expect(success(second).records.map((record) => record.id)).toEqual(['9301']);
-    expect(success(second).records[0]?.abstract_html).toBe(html);
-    expect(textOf(second).match(/!\[\]\(https:\/\/opendata.cern.ch\/x\)/g)).toHaveLength(2_400);
-    expect(surfaces(second).text).toBeGreaterThan(BUDGET);
-    expect(success(second).deferred).toEqual(['9302']);
-    const third = success(await run(success(second).deferred));
-    expect(third.records.map((record) => record.id)).toEqual(['9302']);
-    expect(third.deferred).toEqual([]);
-  });
-  const pool = [
-    variablesHit12220,
-    largeVariablesHit12320,
-    unitsHit84000,
-    pileupHit67817,
-    lhcbHit28004,
-    collisionDatasetHit,
-    docHit,
-  ];
-
-  it('returns every record under the budget, with deferred [] and body_offset 0 on docs', async () => {
-    const { http } = servePool(pool);
-    const result = success(await run(['6004', 'cms-guide-docker', '28004']));
-    expect(result.records.map((record) => record.id)).toEqual([
-      '6004',
-      'cms-guide-docker',
-      '28004',
-    ]);
-    expect(result.deferred).toEqual([]);
-    expect(result.records[1]).toMatchObject({ body_offset: 0, body_truncated: false });
-    expect(result.records[0]).not.toHaveProperty('body_offset');
-    expect(result).not.toHaveProperty('notice');
-    expect(http.calls).toHaveLength(1);
+    const result = await run(['9300', '9301', '9302']);
+    expect(success(result).records.map((record) => record.id)).toEqual(['9300', '9301', '9302']);
+    expect(success(result).records[1]?.abstract_html).toBe(html);
+    expect(textOf(result).split('![](https://opendata.cern.ch/x)').length - 1).toBe(2_400);
+    expect(success(result).deferred).toEqual([]);
   });
 
-  it('stops at the first record that would cross the budget, deferring it and every record after it', async () => {
-    const { http } = servePool(pool);
-    const both = await run(['12220', '84000']);
-    expect(success(both).deferred).toEqual([]);
-    expect(surfaces(both).json).toBeLessThan(BUDGET);
-
-    const result = await run(['12220', '12320', '84000']);
+  it('returns all 20 large records with each body continuation, deferring only unread ids', async () => {
+    const pages = Array.from({ length: 19 }, (_, i) => docHitWithBody(`guide-${i}-page`, 40_000));
+    const ids = ['12320', ...pages.map((page) => String(page.id))];
+    const unread = ['6004', '84000', '67817', '28004', '101'];
+    const { http } = servePool([largeVariablesHit12320, ...pages]);
+    const result = await run([...ids, ...unread]);
     const data = success(result);
-    expect(data.records.map((record) => record.id)).toEqual(['12220']);
-    expect(data.deferred).toEqual(['12320', '84000']);
-    expect(data.notice).toBe(deferralNotice(2));
-    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
-    expect(queriesOf(http).map((query) => query.get('q'))).toEqual([
-      'recid:(12220 OR 84000)',
-      'recid:(12320)',
-    ]);
-  });
-
-  it('returns the first record whole even alone over the budget, and nothing after it', async () => {
-    const { http } = servePool(pool);
-    const result = await run(['12320', '84000']);
-    const data = success(result);
-    expect(data.records.map((record) => record.id)).toEqual(['12320']);
-    expect(data.records[0]?.variables).toHaveLength(622);
-    expect(data.deferred).toEqual(['84000']);
-    expect(data.notice).toBe(deferralNotice(1));
-    expect(surfaces(result).json).toBeGreaterThan(BUDGET);
-    expect(textOf(result)).toContain('## Deferred\n- 84000');
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('lists every input of a deferred record in input order, and keeps misses under missing', async () => {
-    const { http } = servePool(pool);
-    const data = success(
-      await run(['12220', '12320', 'no-such-page', '84000', 'recid:12320', '012220']),
-    );
-    expect(data.records.map((record) => record.id)).toEqual(['12220']);
-    expect(data.records[0]?.matched_inputs).toEqual(['12220', '012220']);
-    expect(data.deferred).toEqual(['12320', '84000', 'recid:12320']);
-    expect(data.missing.map((entry) => entry.input)).toEqual(['no-such-page']);
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('returns the deferred records when the deferred list is passed back as ids, budgeted again', async () => {
-    const { http } = servePool(pool);
-    const first = success(await run(['12220', '12320', '84000']));
-    expect(first.deferred).toEqual(['12320', '84000']);
-    const second = success(await run(first.deferred));
-    expect(second.records.map((record) => record.id)).toEqual(['12320']);
-    expect(second.deferred).toEqual(['84000']);
-    const third = success(await run(second.deferred));
-    expect(third.records.map((record) => record.id)).toEqual(['84000']);
-    expect(third.deferred).toEqual([]);
-    expect(third).not.toHaveProperty('notice');
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('puts the body cut and the deferral in one notice, for admitted records only', async () => {
-    const { http } = servePool([
-      ...pool,
-      docHitWithBody('cut-a', 40_000),
-      docHitWithBody('cut-b', 40_000),
-    ]);
-    const data = success(await run(['cut-a', '12320', 'cut-b']));
-    expect(data.records.map((record) => record.id)).toEqual(['cut-a']);
-    expect(data.deferred).toEqual(['12320', 'cut-b']);
-    expect(data.notice).toBe(
-      `The body of cut-a was cut at character 30000 of 40000; call cern_opendata_get_records with ids ["cut-a"] and body_offset 30000 to continue it. ${deferralNotice(2)}`,
-    );
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('holds both assembled surfaces to 64,000 bytes, notice included, across a sweep over the edge', async () => {
-    const outcomes = new Set<number>();
-    for (let fill = 1_000; fill <= 4_000; fill += 37) {
-      disposeInstalledService();
-      const { http } = servePool([
-        docHitWithBody('cut-a', 40_000),
-        docHitWithBody('cut-b', 40_000),
-        docHitWithBody('fill', fill),
-      ]);
-      const result = await run(['cut-a', 'cut-b', 'no-such-page', 'fill']);
-      const data = success(result);
-      const { json, text } = surfaces(result);
-      expect(json, `fill ${fill}`).toBeLessThanOrEqual(BUDGET);
-      expect(text, `fill ${fill}`).toBeLessThanOrEqual(BUDGET);
-      expect(data.records.slice(0, 2).map((record) => record.id)).toEqual(['cut-a', 'cut-b']);
-      expect(data.deferred).toEqual(data.records.length === 3 ? [] : ['fill']);
-      expect(http.calls, `fill ${fill}`).toHaveLength(1);
-      outcomes.add(data.records.length);
+    expect(data.records.map((record) => record.id)).toEqual(ids);
+    expect(data.deferred).toEqual(unread);
+    expect(data.missing).toEqual([]);
+    expect(data.notice).toContain('5 ids past the first 20 were not looked up');
+    for (const record of data.records.slice(1)) {
+      expect(record.body).toHaveLength(30_000);
+      expect(record.body_next_offset).toBe(30_000);
+      expect(data.notice).toContain(`ids ["${record.id}"] and body_offset 30000`);
+      expect(textOf(result)).toContain(record.id);
     }
-    expect([...outcomes].sort()).toEqual([2, 3]);
-  });
-
-  it('holds a 20-id batch of long pages and #13 records to the budget, deferring a tail in input order', async () => {
-    const pages = Array.from({ length: 14 }, (_, i) =>
-      docHitWithBody(`stripping-line-${i}-page`, 47_000),
-    );
-    const { http } = servePool([...pool, ...pages]);
-    const ids = [
-      ...pages.map((page) => String(page.id)),
-      '12220',
-      '84000',
-      '67817',
-      '28004',
-      '6004',
-      'cms-guide-docker',
-    ];
-    const result = await run(ids);
-    const data = success(result);
-    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
-    const returned = data.records.map((record) => record.id);
-    expect(returned).toEqual(ids.slice(0, returned.length));
-    expect(data.deferred).toEqual(ids.slice(returned.length));
-    expect(data.notice).toContain(deferralNotice(ids.length - returned.length));
     expect(http.calls).toHaveLength(1);
-  });
-
-  it('lists budget-deferred inputs first, then the ids past the first 20, under one notice', async () => {
-    const { http } = servePool(pool);
-    const misses = Array.from({ length: 17 }, (_, i) => String(900_000 + i));
-    const unread = Array.from({ length: 5 }, (_, i) => String(900_100 + i));
-    const result = await run(['12220', '12320', '84000', ...misses, ...unread]);
-    const data = success(result);
-    expect(data.records.map((record) => record.id)).toEqual(['12220']);
-    expect(data.missing.map((entry) => entry.input)).toEqual(misses);
-    expect(data.deferred).toEqual(['12320', '84000', ...unread]);
-    expect(data.notice).toBe(
-      'The response reached its 64,000-byte budget, so 2 records were deferred, and 5 ids past the first 20 were not looked up; call cern_opendata_get_records with ids set to the deferred list to fetch them.',
-    );
-    expect(textOf(result).split('\n\n').at(-1)).toBe(
-      `## Deferred\n${['12320', '84000', ...unread].map((id) => `- ${id}`).join('\n')}`,
-    );
-    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
-    expect(http.calls).toHaveLength(1);
-  });
-
-  it('charges the ids past the first 20 to the budget, holding both surfaces to it after the first record', async () => {
-    const pages = Array.from({ length: 20 }, (_, i) => docHitWithBody(`fill-${i}-page`, 2_500));
-    const lookedUp = pages.map((page) => String(page.id));
-    const unread = Array.from({ length: 80 }, (_, i) => `${'u'.repeat(496)}${1000 + i}`);
-    servePool(pages);
-
-    const alone = success(await run(lookedUp));
-    expect(alone.records).toHaveLength(20);
-    expect(alone.deferred).toEqual([]);
-
-    const result = await run([...lookedUp, ...unread]);
-    const data = success(result);
-    expect(surfaces(result).json).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(result).text).toBeLessThanOrEqual(BUDGET);
-    const returned = data.records.map((record) => record.id);
-    expect(returned.length).toBeGreaterThan(0);
-    expect(returned.length).toBeLessThan(20);
-    expect(returned).toEqual(lookedUp.slice(0, returned.length));
-    expect(data.deferred).toEqual([...lookedUp.slice(returned.length), ...unread]);
-    expect(data.notice).toBe(
-      `The response reached its 64,000-byte budget, so ${20 - returned.length} records were deferred, and 80 ids past the first 20 were not looked up; call cern_opendata_get_records with ids set to the deferred list to fetch them.`,
-    );
-  });
-
-  it('words one deferred record and one id past the first 20 in the singular, fetched as them', async () => {
-    servePool(pool);
-    const misses = Array.from({ length: 18 }, (_, i) => String(900_000 + i));
-    const data = success(await run(['12320', '84000', ...misses, '900100']));
-    expect(data.records.map((record) => record.id)).toEqual(['12320']);
-    expect(data.deferred).toEqual(['84000', '900100']);
-    expect(data.notice).toBe(
-      'The response reached its 64,000-byte budget, so 1 record was deferred, and 1 id past the first 20 was not looked up; call cern_opendata_get_records with ids set to the deferred list to fetch them.',
-    );
   });
 });
-
 describe('cern_opendata_get_records body_offset', () => {
   it('continues a body from body_offset with one id, echoing the offset', async () => {
     const { http } = servePool([docHitWithBody('long', 70_000)]);
@@ -1892,28 +1695,16 @@ describe('cern_opendata_get_records lookup cache', () => {
     docHitWithBody(`stripping21-line-${String(i).padStart(2, '0')}-page`, 30_500 + i),
   );
 
-  it('walks 20 long pages through deferred with one search, and repeats the walk with none', async () => {
+  it('serves a repeated 20-record lookup from cache in the original order', async () => {
     const { http } = servePool(pages);
-    const walk = async () => {
-      const responses: Result[] = [];
-      let ids: string[] = pages.map((page) => String(page.id));
-      while (ids.length > 0) {
-        const data = success(await run(ids));
-        responses.push(data);
-        ids = data.deferred;
-      }
-      return responses;
-    };
-    const first = await walk();
+    const ids = pages.map((page) => String(page.id));
+    const first = success(await run(ids));
+    expect(first.records.map((record) => record.id)).toEqual(ids);
+    expect(first.deferred).toEqual([]);
     expect(http.calls).toHaveLength(1);
-    expect(first.flatMap((data) => data.records.map((record) => record.id))).toEqual(
-      pages.map((page) => String(page.id)),
-    );
-    expect(first.length).toBeGreaterThan(1);
-    expect(await walk()).toEqual(first);
+    expect(success(await run(ids))).toEqual(first);
     expect(http.calls).toHaveLength(1);
   });
-
   it('returns both surfaces byte-identical whether the hits came from the cache or the portal', async () => {
     const pool = [richDatasetHit, collisionDatasetHit, docHitWithBody('cut-a', 40_000), newsHit];
     const ids = ['cut-a', '6004', String(newsHit.id), String(richDatasetHit.id), 'no-such-page'];

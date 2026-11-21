@@ -15,6 +15,9 @@ import { expect } from 'vitest';
 const SAMPLE_MS = 4;
 const ROUNDS = 7;
 
+/** Synchronous benchmarks enforce thread-CPU limits. Time descheduled is outside the measurement. */
+export const cpuTimingOptions = { timeout: 0 } as const;
+
 /** Thread CPU milliseconds `run` takes. */
 function cpuMs(run: () => void): number {
   const start = process.threadCpuUsage();

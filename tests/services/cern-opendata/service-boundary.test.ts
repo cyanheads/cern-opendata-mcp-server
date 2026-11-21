@@ -27,6 +27,7 @@ import {
   indexedRecordBody,
   jsonResponse,
   NOT_FOUND_BODY,
+  oversizedResponse,
   PAGE_NOT_FOUND_HTML,
   PORTAL,
   portalRoute,
@@ -522,10 +523,23 @@ describe('bounded reads and envelope checks', () => {
   });
 
   describe('byte ceilings', () => {
+    it('search: reads a valid large page when the portal responds in time', async () => {
+      const heavyHit = {
+        ...docHit,
+        metadata: { ...docHit.metadata, body: { content: 'a'.repeat(9 * MiB) } },
+      };
+      const { service, http, ctx } = makeService([
+        searchRoute(jsonResponse(searchBody([heavyHit], { total: 1 }))),
+      ]);
+      const result = await service.search({ size: 50 }, service.startBudget(), ctx);
+      expect(result.kind === 'page' && result.page.hits).toHaveLength(1);
+      expect(http.calls).toHaveLength(1);
+    });
+
     it.each([
       [
         'search',
-        8 * MiB,
+        64 * MiB,
         (s: CernOpenDataService, b: Budget, c: ReturnType<typeof createMockContext>) =>
           s.search({ size: 1 }, b, c),
         searchRoute,
@@ -614,20 +628,21 @@ describe('bounded reads and envelope checks', () => {
       expect(lookup.kind === 'found' && lookup.listing.index.description?.length).toBe(3 * MiB);
     });
 
-    it('search: 8 MiB + 1 byte is unreadable', async () => {
-      const { service, ctx } = makeService([
-        searchRoute(() => new Response(new Uint8Array(8 * MiB + 1).fill(97))),
-      ]);
+    it('search: a streamed body past 64 MiB is unreadable and not retried', async () => {
+      const { service, http, ctx } = makeService([searchRoute(() => oversizedResponse(64 * MiB))]);
       const failure = failureOf(
         await settle(() => service.search({ size: 1 }, service.startBudget(), ctx)),
       );
-      expect(failure.data).toMatchObject({ reason: 'upstream_unreadable', limitBytes: 8 * MiB });
+      expect(failure.data).toMatchObject({
+        reason: 'upstream_unreadable',
+        retryable: false,
+        limitBytes: 64 * MiB,
+      });
+      expect(http.calls).toHaveLength(1);
     });
 
     it('applies the ceiling to a 400 body too', async () => {
-      const { service, ctx } = makeService([
-        searchRoute(() => new Response(new Uint8Array(8 * MiB + 1).fill(97), { status: 400 })),
-      ]);
+      const { service, ctx } = makeService([searchRoute(() => oversizedResponse(64 * MiB, 400))]);
       const failure = failureOf(
         await settle(() => service.search({ size: 1 }, service.startBudget(), ctx)),
       );

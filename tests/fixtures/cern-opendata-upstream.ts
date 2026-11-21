@@ -33,6 +33,23 @@ export function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { ...init, headers });
 }
 
+/** Stream one byte beyond a read ceiling, without a Content-Length header. */
+export function oversizedResponse(limitBytes: number, status = 200): Response {
+  const chunk = new Uint8Array(1024 * 1024).fill(97);
+  let remaining = limitBytes + 1;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const size = Math.min(remaining, chunk.byteLength);
+        controller.enqueue(chunk.subarray(0, size));
+        remaining -= size;
+        if (remaining === 0) controller.close();
+      },
+    }),
+    { status },
+  );
+}
+
 /** A fetch-mock route matching the portal origin, a pathname and an optional query predicate. */
 export function portalRoute(
   pathname: string | RegExp,
